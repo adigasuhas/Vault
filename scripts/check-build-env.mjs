@@ -12,13 +12,20 @@ const problems = [];
 
 if (!process.env.DATABASE_URL) {
   problems.push("DATABASE_URL: the Postgres connection string (use a pooled URL on serverless hosts).");
+} else if (!/^postgres(ql)?:\/\//.test(process.env.DATABASE_URL)) {
+  // The app talks to Postgres through node-postgres, which can't use Prisma
+  // Accelerate's prisma+postgres:// URLs.
+  problems.push(
+    "DATABASE_URL: must start with postgres:// or postgresql://. For Prisma Postgres, use its direct " +
+      "connection string (postgres://...@db.prisma.io:5432/...), not the prisma+postgres:// Accelerate URL."
+  );
 }
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   problems.push("JWT_SECRET: at least 32 random characters (openssl rand -base64 48).");
 }
 
 if (problems.length > 0) {
-  console.error("\nBuild stopped: required environment variables are missing.\n");
+  console.error("\nBuild stopped: required environment variables are missing or invalid.\n");
   for (const p of problems) console.error(`  - ${p}`);
   console.error(
     "\nSet them in your host's settings, then redeploy:" +
