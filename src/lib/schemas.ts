@@ -281,6 +281,8 @@ export const createLoanSchema = z.object({
   installments: zInt.refine((n) => n >= 1 && n <= 600, "out of range"),
   currency: CURRENCY,
   startDate: zIsoDate,
+  /** The user's own EMI. Omitted: computed (an equal split at 0%). */
+  emiAmount: zMoney.optional(),
   linkedAccountId: zId.optional(),
   /** Create the EMI schedule (paid from linkedAccountId) right away. */
   scheduleEmis: z.boolean().optional(),

@@ -87,6 +87,7 @@ function ExpenseForm({
   projects = [],
   onProjectCreated,
   defaultProjectId,
+  defaultCategoryId,
 }: {
   accounts: Account[];
   categories: Category[];
@@ -98,6 +99,7 @@ function ExpenseForm({
   projects?: Project[];
   onProjectCreated?: (p: Project) => void;
   defaultProjectId?: string | null;
+  defaultCategoryId?: string;
 }) {
   const editing = !!initial;
   const [projectId, setProjectId] = useState(initial?.project?.id ?? defaultProjectId ?? NO_GROUP);
@@ -106,7 +108,7 @@ function ExpenseForm({
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [amount, setAmount] = useState(initial ? String(Number(initial.amount)) : "");
   const [date, setDate] = useState(initial ? initial.date.slice(0, 10) : localToday());
-  const [categoryId, setCategoryId] = useState(initial?.category.id ?? "");
+  const [categoryId, setCategoryId] = useState(initial?.category.id ?? defaultCategoryId ?? "");
   // One-time purchases don't have to say how they were paid: no account is
   // picked for them unless the user chooses one.
   const [accountId, setAccountId] = useState(initial ? (initial.account?.id ?? NO_ACCOUNT) : oneTime ? NO_ACCOUNT : "");
@@ -184,8 +186,14 @@ function ExpenseForm({
         await api(`/api/expenses/${initial!.id}`, { method: "PATCH", body: { amount: amt, date, categoryId, accountId: payFrom, ...(noAccount ? { currency } : {}), description: description || null, ...extra } });
         toast.success("Expense corrected. The original stays on the statement with its reversal.");
       } else {
-        const r = await api<{ duplicate: boolean }>("/api/expenses", { body: { amount: amt, date, categoryId, accountId: payFrom, description: description || undefined, currency: cur, idempotencyKey: key, ...extra, notes: oneTime ? notes.trim() || undefined : undefined } });
-        toast.success(r.duplicate ? "Already logged. We didn't add it twice." : `${formatMoney(amt, cur)} on ${catName} logged for ${formatDate(date, { day: "numeric", month: "short" })}.`);
+        const r = await api<{ duplicate: boolean; loanEmi?: { loanName: string; paidCount: number | null } }>("/api/expenses", { body: { amount: amt, date, categoryId, accountId: payFrom, description: description || undefined, currency: cur, idempotencyKey: key, ...extra, notes: oneTime ? notes.trim() || undefined : undefined } });
+        toast.success(
+          r.duplicate
+            ? "Already logged. We didn't add it twice."
+            : r.loanEmi
+              ? `${formatMoney(amt, cur)} recorded as ${r.loanEmi.loanName} EMI${r.loanEmi.paidCount ? ` #${r.loanEmi.paidCount}` : ""}. It shows as paid in Loans & EMIs.`
+              : `${formatMoney(amt, cur)} on ${catName} logged for ${formatDate(date, { day: "numeric", month: "short" })}.`
+        );
         setAmount("");
         setDescription("");
         setNotes("");
@@ -806,7 +814,7 @@ export default function ExpensesPage() {
           {accounts.length === 0 ? (
             <EmptyState title="Add an account first">Expenses are paid from an account, card or wallet.</EmptyState>
           ) : (
-            <ExpenseForm accounts={accounts} categories={categories} onSaved={refreshAll} onCategoryCreated={(c) => setCategories((cs) => [...cs, c])} />
+            <ExpenseForm accounts={accounts} categories={categories} defaultCategoryId={search.get("category") ?? undefined} onSaved={refreshAll} onCategoryCreated={(c) => setCategories((cs) => [...cs, c])} />
           )}
         </Panel>
       )}

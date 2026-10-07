@@ -429,7 +429,7 @@ export default function BudgetPage() {
                               <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={`More for ${l.categoryName}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                               <DropdownMenuContent align="end" className="w-56">
                                 <DropdownMenuItem onClick={() => { setEditingLine(l); setLineOpen(true); }}>Change amount or account…</DropdownMenuItem>
-                                <DropdownMenuItem asChild><Link href={`/expenses?new=1`}>Log an expense</Link></DropdownMenuItem>
+                                <DropdownMenuItem asChild><Link href={`/expenses?new=1&category=${l.categoryId}`}>{l.scheduled.some((o) => o.kind === "EMI") ? "Log this EMI as paid" : "Log an expense"}</Link></DropdownMenuItem>
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem onClick={() => removeLine(l, "MONTH")}>Remove from {monthLabel(month, "short")}</DropdownMenuItem>
                                 {l.isRecurring && <DropdownMenuItem variant="destructive" onClick={() => removeLine(l, "FORWARD")}>Stop repeating from {monthLabel(month, "short")}</DropdownMenuItem>}

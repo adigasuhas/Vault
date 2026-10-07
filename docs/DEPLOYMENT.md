@@ -22,6 +22,7 @@ npm run check-env -- --env-file .env.production
 | Variable | Required | What it is |
 |---|---|---|
 | `DATABASE_URL` | yes | `postgresql://user:pass@host:5432/db?schema=public`. On serverless hosts use a **pooled** URL (Neon, Supabase pooler, Prisma Postgres); managed databases usually need `&sslmode=require`. |
+| `DIRECT_DATABASE_URL` | no | Direct (unpooled) URL for `prisma migrate deploy` when `DATABASE_URL` is a pooled endpoint. Not needed for Prisma Postgres: keep `DATABASE_URL` on `db.prisma.io` and the app routes its own queries through `pooled.db.prisma.io` (opt out with `DATABASE_DIRECT_ONLY=true`). |
 | `JWT_SECRET` | yes | 32+ random characters; signs session cookies. The app refuses to start without it. `openssl rand -base64 48` |
 | `CRON_SECRET` | for jobs | Bearer token for `/api/cron/*`. Without it scheduled payments, FX refresh, price updates and reminders don't run. `openssl rand -hex 32` |
 | `NEXT_PUBLIC_APP_URL` | recommended | Public `https://` URL; used in reminder emails. |

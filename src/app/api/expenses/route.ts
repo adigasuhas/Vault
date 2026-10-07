@@ -4,7 +4,7 @@ import { recordExpense } from "@/lib/ledger";
 import { parseJson, ValidationError } from "@/lib/validate";
 import { createExpenseSchema } from "@/lib/schemas";
 import { monthRange } from "@/lib/dates";
-import { userToday } from "@/lib/schedules";
+import { payNextLoanEmi, userToday } from "@/lib/schedules";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +50,25 @@ export const POST = authed(async (req, { userId }) => {
   }
   if (account && input.currency && input.currency !== account.currency) {
     throw new ValidationError(`${account.name} is in ${account.currency}. Log the expense against an account in ${input.currency}, or convert the amount.`);
+  }
+  // A loan's category means this is the loan's EMI: book it against the loan
+  // (and its schedule) so Loans & EMIs shows it paid — not as a loose expense
+  // the EMI schedule would then ask for again.
+  const loan = await db.loan.findFirst({ where: { categoryId: category.id, userId }, select: { id: true, name: true } });
+  if (loan) {
+    if (!account) throw new ValidationError(`Choose the account the ${loan.name} EMI was paid from.`);
+    if (input.oneTime) throw new ValidationError(`${loan.name} EMIs can't be one-time purchases. Untick "one-time" to log the EMI.`);
+    const r = await payNextLoanEmi(userId, {
+      loanId: loan.id,
+      amount: input.amount,
+      date: input.date ?? (await userToday(userId)),
+      accountId: account.id,
+      idempotencyKey: input.idempotencyKey,
+    });
+    return Response.json(
+      { expense: null, duplicate: r.duplicate, loanEmi: { loanId: loan.id, loanName: loan.name, paidCount: r.paidCount ?? null } },
+      { status: r.duplicate ? 200 : 201 }
+    );
   }
   // Without an account, the purchase is in the currency given (or the user's main one).
   const currency =

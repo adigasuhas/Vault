@@ -28,16 +28,21 @@ export interface AmortizationRow {
 /** Full month-by-month reducing-balance schedule, penny-exact: the EMI and
  * each month's interest are rounded to 2 decimals (as a lender would bill
  * them), and the last row's EMI absorbs the remaining drift so the balance
- * lands exactly on 0. */
+ * lands exactly on 0.
+ *
+ * `emiOverride` replaces the computed EMI (the user set their own). A larger
+ * EMI clears the loan early — the schedule then has fewer rows than
+ * `installments`; a smaller one leaves a bigger final installment. */
 export function amortizationSchedule(
   principal: number,
   annualRatePercent: number,
   installments: number,
-  startDate: Date
+  startDate: Date,
+  emiOverride?: number
 ): AmortizationRow[] {
   if (!(principal > 0) || installments <= 0) return [];
   const monthlyRate = annualRatePercent / 12 / 100;
-  const emi = roundMoney(computeEmi(principal, annualRatePercent, installments));
+  const emi = roundMoney(emiOverride && emiOverride > 0 ? emiOverride : computeEmi(principal, annualRatePercent, installments));
 
   const rows: AmortizationRow[] = [];
   let balance = roundMoney(principal);
@@ -59,8 +64,21 @@ export function amortizationSchedule(
       principal: principalComponent,
       balanceAfter: balance,
     });
+    if (balance === 0) break;
   }
   return rows;
+}
+
+/** A stored loan's schedule, using the EMI it was created with (which may be
+ * the user's own figure rather than the computed one). */
+export function loanAmortization(loan: { principal: unknown; interestRate: unknown; installments: number; startDate: Date; emiAmount: unknown }) {
+  return amortizationSchedule(Number(loan.principal), Number(loan.interestRate), loan.installments, loan.startDate, Number(loan.emiAmount));
+}
+
+/** Whole months from a loan's start to its last EMI (first EMI falls a month
+ * after the start). */
+export function monthsBetween(start: Date, end: Date): number {
+  return (end.getUTCFullYear() - start.getUTCFullYear()) * 12 + (end.getUTCMonth() - start.getUTCMonth());
 }
 
 export interface LoanProgress {

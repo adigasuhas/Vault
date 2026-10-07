@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { authed, notFound } from "@/lib/api";
-import { amortizationSchedule, loanProgress } from "@/lib/loans";
+import { loanAmortization, loanProgress } from "@/lib/loans";
 import { parseJson, ValidationError } from "@/lib/validate";
 import { patchLoanSchema } from "@/lib/schemas";
 import { audit, type Tx } from "@/lib/ledger";
@@ -18,7 +18,7 @@ export const GET = authed<{ id: string }>(async (_req, { userId, params }) => {
     },
   });
   if (!loan) return notFound("Loan not found.");
-  const schedule = amortizationSchedule(Number(loan.principal), Number(loan.interestRate), loan.installments, loan.startDate);
+  const schedule = loanAmortization(loan);
   const progress = loanProgress(
     schedule,
     loan.payments

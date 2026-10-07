@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 import { Prisma, type ScheduledCredit, type CreditExecution, type ScheduleOverride } from "@prisma/client";
 import { ValidationError } from "@/lib/validate";
 import { createFxConverter } from "@/lib/fx";
-import { audit, postOccurrence, reverseOccurrenceEntry, assertSufficientFunds, type Tx } from "@/lib/ledger";
+import { audit, postOccurrence, recordLoanPayment, reverseOccurrenceEntry, assertSufficientFunds, type Tx } from "@/lib/ledger";
 import {
   dateOnly,
   isoDate,
@@ -329,6 +329,83 @@ export async function confirmOccurrence(
       scheduledAmount: Number(x.amount),
     });
     return updated;
+  });
+}
+
+/** Books a loan's next outstanding EMI. Used when the user logs the EMI as an
+ * expense (Budget → "Log an expense", or the Expenses form with the loan's
+ * category) instead of confirming it from the schedule: the payment is booked
+ * against the earliest unpaid occurrence — a due one first, otherwise the next
+ * upcoming one, paid early — so the loan's progress moves and the schedule
+ * won't ask for that EMI again. A loan without a schedule records the payment
+ * directly. */
+export async function payNextLoanEmi(
+  userId: string,
+  input: { loanId: string; amount: number; date: Date; accountId: string; idempotencyKey?: string }
+) {
+  return db.$transaction(async (tx: Tx) => {
+    const loan = await tx.loan.findFirst({ where: { id: input.loanId, userId } });
+    if (!loan) throw new ValidationError("Loan not found.");
+    if (input.idempotencyKey) {
+      const seen = await tx.auditEvent.findFirst({
+        where: { userId, entityType: "loan", entityId: loan.id, action: "loan.emi_logged", detail: { path: ["idempotencyKey"], equals: input.idempotencyKey } },
+      });
+      if (seen) return { loan, duplicate: true };
+    }
+    if (loan.status === "CLOSED") throw new ValidationError(`${loan.name} is already fully paid.`);
+    const acct = await tx.account.findFirst({ where: { id: input.accountId, userId } });
+    if (!acct) throw new ValidationError("Account not found.");
+    assertSufficientFunds(acct, input.amount);
+    const date = dateOnly(input.date);
+
+    const s = await tx.scheduledCredit.findFirst({ where: { loanId: loan.id, isActive: true }, include: { overrides: true } });
+    let executionId: string | null = null;
+    if (s) {
+      const due = await tx.creditExecution.findFirst({
+        where: { scheduledCreditId: s.id, status: { in: ["PENDING", "FAILED"] } },
+        orderBy: { occurrenceDate: "asc" },
+      });
+      if (due) {
+        executionId = due.id;
+      } else {
+        // Next nominal occurrence with nothing stored against it yet.
+        const end = s.endDate ? dateOnly(s.endDate) : null;
+        const freq = s.frequency as Frequency;
+        for (let k = 0; k < 1200; k++) {
+          const nominal = nthOccurrence(s.startDate, freq, k, s.customIntervalDays);
+          if (end && nominal > end) break;
+          const stored = await tx.creditExecution.findUnique({
+            where: { scheduledCreditId_occurrenceDate: { scheduledCreditId: s.id, occurrenceDate: nominal } },
+          });
+          if (stored) continue;
+          const ov = s.overrides.find((o) => dateOnly(o.occurrenceDate).getTime() === nominal.getTime());
+          const x = await tx.creditExecution.create({
+            data: { scheduledCreditId: s.id, occurrenceDate: nominal, executedDate: ov?.date ? dateOnly(ov.date) : nominal, amount: ov?.amount ?? s.amount, status: "PENDING" },
+          });
+          executionId = x.id;
+          break;
+        }
+      }
+    }
+
+    if (s && executionId) {
+      await postOccurrence(tx, { ...s, receivingAccountId: acct.id }, { id: executionId, amount: input.amount, date });
+      await tx.creditExecution.update({
+        where: { id: executionId },
+        data: { status: "CONFIRMED", confirmedAt: new Date(), amount: input.amount, executedDate: date, failureReason: null },
+      });
+      if (s.categoryId) await syncScheduledBudgets(tx, userId, [s.categoryId]);
+    } else {
+      await recordLoanPayment(userId, { loanId: loan.id, amount: input.amount, paidOn: date, fromAccountId: acct.id }, tx);
+    }
+    const paid = await tx.loanPayment.count({ where: { loanId: loan.id, reversedAt: null } });
+    await audit(tx, userId, "loan", loan.id, "loan.emi_logged", `${loan.name}: EMI ${paid} of ${loan.installments} paid`, {
+      amount: input.amount,
+      date: isoDate(date),
+      occurrenceId: executionId,
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+    });
+    return { loan, paidCount: paid, duplicate: false };
   });
 }
 

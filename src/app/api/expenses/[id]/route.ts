@@ -1,6 +1,7 @@
+import { db } from "@/lib/db";
 import { authed } from "@/lib/api";
 import { amendExpense, voidExpense } from "@/lib/ledger";
-import { parseJson } from "@/lib/validate";
+import { parseJson, ValidationError } from "@/lib/validate";
 import { amendExpenseSchema, noteSchema } from "@/lib/schemas";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +10,10 @@ export const dynamic = "force-dynamic";
  * corrected one booked, in one transaction. */
 export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   const input = await parseJson(req, amendExpenseSchema);
+  const current = await db.expense.findFirst({ where: { id: params.id, userId }, select: { categoryId: true } });
+  if (input.categoryId && current && input.categoryId !== current.categoryId && (await db.loan.findFirst({ where: { categoryId: input.categoryId, userId }, select: { id: true } }))) {
+    throw new ValidationError("An expense can't be moved into a loan's category. Remove it and log the EMI as a new expense instead, so the loan records the payment.");
+  }
   const expense = await amendExpense(userId, params.id, input);
   return { expense };
 });

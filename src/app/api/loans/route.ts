@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { authed } from "@/lib/api";
-import { computeEmi, computeLoanEndDate, amortizationSchedule, loanProgress } from "@/lib/loans";
+import { amortizationSchedule, computeEmi, computeLoanEndDate, loanAmortization, loanProgress } from "@/lib/loans";
 import { parseJson, roundMoney, ValidationError } from "@/lib/validate";
 import { createLoanSchema } from "@/lib/schemas";
 import { audit, type Tx } from "@/lib/ledger";
@@ -24,7 +24,7 @@ export const GET = authed(async (_req, { userId }) => {
   });
   return {
     loans: loans.map(({ payments, ...loan }) => {
-      const schedule = amortizationSchedule(Number(loan.principal), Number(loan.interestRate), loan.installments, loan.startDate);
+      const schedule = loanAmortization(loan);
       const progress = loanProgress(
         schedule,
         payments.map((p) => ({ principalComponent: Number(p.principalComponent), interestComponent: Number(p.interestComponent), amount: Number(p.amount) }))
@@ -44,8 +44,14 @@ export const POST = authed(async (req, { userId }) => {
   if (input.scheduleEmis && !input.linkedAccountId) throw new ValidationError("Choose the account EMIs are paid from.");
 
   // Billed to the paisa/cent; amortizationSchedule uses the same rounded EMI.
-  const emiAmount = roundMoney(computeEmi(input.principal, input.interestRate, input.installments));
+  // By default that's the computed EMI (an equal split when the rate is 0);
+  // the user may set their own instead.
+  const emiAmount = roundMoney(input.emiAmount ?? computeEmi(input.principal, input.interestRate, input.installments));
   const start = dateOnly(input.startDate);
+  const firstInterest = roundMoney((input.principal * input.interestRate) / 1200);
+  if (emiAmount <= firstInterest) throw new ValidationError("The EMI has to be more than the month's interest, or the loan never gets paid down.");
+  // A larger EMI clears the loan in fewer months than asked for.
+  const installments = amortizationSchedule(input.principal, input.interestRate, input.installments, start, emiAmount).length;
   const month = monthKey(await userToday(userId));
 
   try {
@@ -69,11 +75,11 @@ export const POST = authed(async (req, { userId }) => {
           name: input.name,
           principal: input.principal,
           interestRate: input.interestRate,
-          installments: input.installments,
+          installments,
           emiAmount,
           currency: input.currency,
           startDate: start,
-          endDate: computeLoanEndDate(start, input.installments),
+          endDate: computeLoanEndDate(start, installments),
           linkedAccountId: input.linkedAccountId,
           categoryId: category.id,
         },
@@ -84,7 +90,8 @@ export const POST = authed(async (req, { userId }) => {
       await audit(tx, userId, "loan", loan.id, "loan.create", `Added loan ${loan.name}`, {
         principal: input.principal,
         rate: input.interestRate,
-        installments: input.installments,
+        installments,
+        emi: emiAmount,
       });
       return loan;
     });

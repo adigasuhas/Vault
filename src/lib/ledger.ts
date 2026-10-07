@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { Prisma, type LedgerEntryType } from "@prisma/client";
 import { ValidationError, MAX_AMOUNT } from "@/lib/validate";
-import { amortizationSchedule } from "@/lib/loans";
+import { loanAmortization } from "@/lib/loans";
 import { dateOnly, nthOccurrence, type Frequency } from "@/lib/dates";
 
 export type Tx = Prisma.TransactionClient;
@@ -759,7 +759,7 @@ export async function recordLoanPayment(
     if (!loan) throw new ValidationError("Loan not found.");
 
     const existing = await tx.loanPayment.count({ where: { loanId: loan.id, reversedAt: null } });
-    const schedule = amortizationSchedule(Number(loan.principal), Number(loan.interestRate), loan.installments, loan.startDate);
+    const schedule = loanAmortization(loan);
     if (existing >= schedule.length) throw new ValidationError("This loan is already fully paid.");
     const row = schedule[existing];
 

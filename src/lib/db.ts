@@ -13,11 +13,29 @@ const globalForPrisma = globalThis as unknown as {
 // (PgBouncer / Neon / Supabase pooler) in production and keep this modest.
 const POOL_MAX = Number(process.env.DATABASE_POOL_MAX || 5);
 
+/**
+ * Prisma Postgres' direct host (`db.prisma.io`) allows only a handful of
+ * connections (5 usable on the free plan), which a single serverless instance
+ * can exhaust. Its pooler takes the same credentials on `pooled.db.prisma.io`,
+ * so route app traffic there. Migrations keep the direct host (prisma.config.ts).
+ */
+export function appDatabaseUrl(url = process.env.DATABASE_URL): string | undefined {
+  if (!url || process.env.DATABASE_DIRECT_ONLY === "true") return url;
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "db.prisma.io") return url;
+    parsed.hostname = "pooled.db.prisma.io";
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function createClient() {
   const pool =
     globalForPrisma.pgPool ??
     new Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: appDatabaseUrl(),
       max: POOL_MAX,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,

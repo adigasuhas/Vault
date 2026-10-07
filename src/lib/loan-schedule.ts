@@ -1,4 +1,4 @@
-import { amortizationSchedule } from "@/lib/loans";
+import { loanAmortization } from "@/lib/loans";
 import { createSchedule } from "@/lib/schedules";
 import { ValidationError } from "@/lib/validate";
 import type { Tx } from "@/lib/ledger";
@@ -16,7 +16,7 @@ export async function createEmiSchedule(
   input: { accountId: string; requiresConfirmation: boolean }
 ) {
   if (!loan.categoryId) throw new ValidationError("This loan has no budget category.");
-  const rows = amortizationSchedule(Number(loan.principal), Number(loan.interestRate), loan.installments, loan.startDate);
+  const rows = loanAmortization(loan);
   const paid = await tx.loanPayment.count({ where: { loanId: loan.id, reversedAt: null } });
   // Installments already past are left for the user to record (or not) by
   // hand — the schedule only drives EMIs from today on.
