@@ -39,6 +39,16 @@ enum LedgerEntryType {
   // carries the exact opposite of the original's balance effect, so history is
   // never deleted — a reversed event shows as the original + its reversal.
   REVERSAL
+  // Proceeds of selling an investment or closing a deposit, credited to an
+  // account. Not income: the money was already yours, in another form.
+  INVESTMENT_SALE
+}
+
+enum InvestmentKind {
+  STOCK
+  MUTUAL_FUND
+  FIXED_DEPOSIT
+  OTHER
 }
 
 /// Whether a schedule brings money in (salary, stipend, refunds) or sends it
@@ -143,6 +153,7 @@ model User {
   mutualFunds       MutualFundHolding[]
   fixedDeposits     FixedDeposit[]
   otherAssets       OtherAsset[]
+  investmentSales   InvestmentSale[]
   exchangeRates     ExchangeRate[]
   loans             Loan[]
   monthlyPlans      MonthlyPlan[]
@@ -223,6 +234,7 @@ model Account {
   scheduledCredits     ScheduledCredit[]
   loans                Loan[]
   fixedDeposits        FixedDeposit[]
+  investmentSales      InvestmentSale[]
 
   @@index([userId])
 }
@@ -248,6 +260,8 @@ model LedgerEntry {
   creditExecution   CreditExecution? @relation(fields: [creditExecutionId], references: [id])
   loanPaymentId     String?          @unique
   loanPayment       LoanPayment?     @relation(fields: [loanPaymentId], references: [id])
+  investmentSaleId  String?          @unique
+  investmentSale    InvestmentSale?  @relation(fields: [investmentSaleId], references: [id])
   // Spending category for EXPENSE entries (expenses, scheduled payments, EMIs)
   // so budgets and analytics read straight from the ledger.
   categoryId        String?
@@ -642,6 +656,48 @@ model OtherAsset {
   updatedAt     DateTime       @updatedAt
 
   @@index([userId])
+}
+
+// A realised sale: shares or fund units sold, a deposit closed, or another
+// asset sold. The holding shrinks (or goes, when fully sold) and the net
+// proceeds are credited to an account through an INVESTMENT_SALE ledger entry.
+// Rows are never deleted; undoing a sale reverses the entry, puts the lots
+// back and stamps `reversedAt`.
+model InvestmentSale {
+  id             String         @id @default(uuid())
+  userId         String
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind           InvestmentKind
+  // The holding, deposit or asset sold. Not a foreign key: a fully sold
+  // holding is removed, and recreated with this id if the sale is undone.
+  holdingId      String
+  name           String // ticker, fund name, bank or asset name
+  detail         String? // exchange, scheme code or asset type
+  currency       String // the holding's currency
+  quantity       Decimal? // shares or units sold; null for deposits and other assets
+  price          Decimal? // sale price or NAV per unit
+  grossProceeds  Decimal
+  charges        Decimal        @default(0)
+  netProceeds    Decimal // grossProceeds - charges
+  costBasis      Decimal
+  realizedPnl    Decimal // netProceeds - costBasis
+  firstBoughtOn  DateTime
+  soldOn         DateTime
+  closedPosition Boolean // nothing of the holding was left afterwards
+  accountId      String
+  account        Account        @relation(fields: [accountId], references: [id])
+  creditedAmount Decimal // in the account's currency
+  // Purchases consumed, oldest first: [{ lotId, purchaseDate, quantity, price, cost }]
+  lots           Json
+  // What's needed to recreate a fully sold holding on undo.
+  snapshot       Json
+  note           String?
+  reversedAt     DateTime?
+  createdAt      DateTime       @default(now())
+
+  ledgerEntry LedgerEntry?
+
+  @@index([userId, soldOn])
 }
 
 // ---------- Currency & FX ----------

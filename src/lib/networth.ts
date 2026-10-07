@@ -4,6 +4,7 @@ import { computePortfolioValue } from "@/lib/portfolio";
 import { fdCurrentValue } from "@/lib/investments";
 import { signedAmount } from "@/lib/ledger";
 import { loanLiabilities } from "@/lib/loan-balance";
+import type { SoldLot } from "@/lib/investment-sales";
 
 /**
  * Net-worth history (finding F9).
@@ -87,11 +88,12 @@ export interface NetWorthPoint {
 
 /** Cost-basis value of every holding that existed on or before `asOf`. */
 async function reconstructInvestmentsAt(userId: string, asOf: Date, fx: FxConverter): Promise<number> {
-  const [stocks, funds, deposits, other] = await Promise.all([
+  const [stocks, funds, deposits, other, sales] = await Promise.all([
     db.stockHolding.findMany({ where: { userId }, include: { lots: true } }),
     db.mutualFundHolding.findMany({ where: { userId }, include: { lots: true } }),
     db.fixedDeposit.findMany({ where: { userId } }),
     db.otherAsset.findMany({ where: { userId } }),
+    db.investmentSale.findMany({ where: { userId, reversedAt: null } }),
   ]);
 
   let total = 0;
@@ -115,6 +117,21 @@ async function reconstructInvestmentsAt(userId: string, asOf: Date, fx: FxConver
   }
   for (const a of other) {
     if (a.purchaseDate <= asOf) total += fx.convert(Number(a.purchasePrice), a.currency);
+  }
+  // Sold later: still held on `asOf`, and its proceeds aren't in cash yet.
+  for (const s of sales) {
+    if (s.soldOn <= asOf) continue;
+    const lots = s.lots as unknown as SoldLot[];
+    if (s.kind === "FIXED_DEPOSIT") {
+      const snap = s.snapshot as { interestRate?: string; maturityDate?: string };
+      if (s.firstBoughtOn <= asOf && snap.maturityDate) {
+        const maturity = new Date(snap.maturityDate);
+        total += fx.convert(fdCurrentValue(Number(s.costBasis), Number(snap.interestRate ?? 0), s.firstBoughtOn, asOf < maturity ? asOf : maturity), s.currency);
+      }
+      continue;
+    }
+    const cost = lots.filter((l) => new Date(l.purchaseDate) <= asOf).reduce((sum, l) => sum + l.cost, 0);
+    if (cost > 0) total += fx.convert(cost, s.currency);
   }
   return total;
 }

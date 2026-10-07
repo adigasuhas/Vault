@@ -13,7 +13,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { toast } from "sonner";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useSort, SortTh } from "@/components/investments/table-kit";
-import { Eye, LineChart, MoreHorizontal, Pencil, Search, Trash2 } from "lucide-react";
+import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Search, Trash2 } from "lucide-react";
+import { useSell } from "@/components/investments/SellDialog";
 import { cn } from "@/lib/utils";
 
 interface Lot { id: string; quantity: string; price: string; purchaseDate: string }
@@ -117,6 +118,16 @@ export function StockTable({
     "current"
   );
   const [deleting, setDeleting] = useState<StockRow | null>(null);
+  const sell = useSell();
+  const sellStock = (s: StockRow) =>
+    sell?.({
+      kind: "STOCK",
+      holdingId: s.id,
+      name: s.ticker,
+      currency: s.currency,
+      price: s.lastPrice != null ? Number(s.lastPrice) : null,
+      lots: s.lots.map((l) => ({ id: l.id, quantity: Number(l.quantity), price: Number(l.price), purchaseDate: l.purchaseDate })),
+    });
 
   if (loading) return <SkeletonBlock className="h-48" />;
   if (!stocks.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="No stocks yet">Add a holding and its price, value and one-year line show up here.</EmptyState>;
@@ -154,21 +165,24 @@ export function StockTable({
                 {s.lastPrice ? formatMoney(Number(s.lastPrice), s.currency) : <span className="text-muted-foreground">–</span>}
                 <p className={cn("text-xs", m.dayPct == null ? "text-muted-foreground" : tone(m.dayPct))}>{m.dayPct == null ? "no quote" : `${pct(m.dayPct)} today`}</p>
               </td>
-              <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.invested, s.currency)}</td>
+              <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.invested, s.currency)}<p><Equivalent both stack value={m.invested} currency={s.currency} /></p></td>
               <td className="px-3 py-2.5 text-right tabular-nums">
                 {formatMoney(m.current, s.currency)}
-                <p><Equivalent value={m.current} currency={s.currency} /></p>
+                <p><Equivalent both stack value={m.current} currency={s.currency} /></p>
               </td>
               <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(m.pl))}>
                 {signed(m.pl, s.currency)}
                 <p className="text-xs">{pct(m.plPct)}</p>
+                <p><Equivalent both stack value={m.pl} currency={s.currency} signed /></p>
               </td>
               <td className="pr-3 text-right">
                 <div className="flex justify-end gap-0.5">
                   <Button variant="ghost" size="icon-sm" title="Purchases and returns" aria-label={`Details for ${s.ticker}`} onClick={() => onView(s.id)}><Eye className="h-4 w-4" /></Button>
+                  <Button variant="ghost" size="icon-sm" title="Sell" aria-label={`Sell ${s.ticker}`} onClick={() => sellStock(s)}><Banknote className="h-4 w-4" /></Button>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={`More for ${s.ticker}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => sellStock(s)}><Banknote className="h-4 w-4" /> Sell…</DropdownMenuItem>
                       <DropdownMenuItem onClick={() => onEdit(s)}><Pencil className="h-4 w-4" /> Edit</DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem variant="destructive" onClick={() => setDeleting(s)}><Trash2 className="h-4 w-4" /> Delete holding…</DropdownMenuItem>
@@ -220,9 +234,9 @@ export function StockBreakdown({ h, onEditLot, onDeleteLot }: { h: StockRow; onE
       </DialogHeader>
       <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-4">
         {[
-          ["Invested", formatMoney(invested, c), <Equivalent key="e" value={invested} currency={c} />],
-          ["Current value", formatMoney(current, c), <Equivalent key="e" value={current} currency={c} />],
-          ["Profit / loss", <span key="v" className={tone(pl)}>{signed(pl, c)}</span>, <Equivalent key="e" value={pl} currency={c} signed />],
+          ["Invested", formatMoney(invested, c), <Equivalent both key="e" value={invested} currency={c} />],
+          ["Current value", formatMoney(current, c), <Equivalent both key="e" value={current} currency={c} />],
+          ["Profit / loss", <span key="v" className={tone(pl)}>{signed(pl, c)}</span>, <Equivalent both key="e" value={pl} currency={c} signed />],
           ["Return", <span key="v" className={tone(pl)}>{pct(invested > 0 ? (pl / invested) * 100 : null)}</span>, <span key="e" className="text-xs text-muted-foreground">avg cost {formatMoney(invested / (qty || 1), c)}</span>],
         ].map(([label, value, sub]) => (
           <div key={label as string} className="bg-card p-4">
@@ -251,9 +265,9 @@ export function StockBreakdown({ h, onEditLot, onDeleteLot }: { h: StockRow; onE
                 <td className="px-4 py-2.5 font-mono text-xs">{formatDate(l.purchaseDate)}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums">{Number(l.qty.toFixed(4))}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.price, c)}</td>
-                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.invested, c)}</td>
-                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.current, c)}</td>
-                <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(l.pl))}>{signed(l.pl, c)} <span className="text-xs">({pct(l.plPct)})</span></td>
+                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.invested, c)}<Equivalent both stack value={l.invested} currency={c} /></td>
+                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.current, c)}<Equivalent both stack value={l.current} currency={c} /></td>
+                <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(l.pl))}>{signed(l.pl, c)} <span className="text-xs">({pct(l.plPct)})</span><Equivalent both stack signed value={l.pl} currency={c} /></td>
                 <td className="pr-3 text-right">
                   <div className="flex justify-end gap-0.5">
                     <Button variant="ghost" size="icon-sm" aria-label="Edit purchase" onClick={() => onEditLot(l.lot)}><Pencil className="h-3.5 w-3.5" /></Button>
@@ -274,9 +288,9 @@ export function StockBreakdown({ h, onEditLot, onDeleteLot }: { h: StockRow; onE
               <td className="px-4 py-2.5">Total</td>
               <td className="px-3 py-2.5 text-right tabular-nums">{Number(qty.toFixed(4))}</td>
               <td className="px-3 py-2.5 text-right text-xs text-muted-foreground tabular-nums">avg {formatMoney(invested / (qty || 1), c)}</td>
-              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(invested, c)}</td>
-              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(current, c)}</td>
-              <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(pl))}>{signed(pl, c)}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(invested, c)}<Equivalent both stack value={invested} currency={c} /></td>
+              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(current, c)}<Equivalent both stack value={current} currency={c} /></td>
+              <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(pl))}>{signed(pl, c)}<Equivalent both stack signed value={pl} currency={c} /></td>
               <td />
             </tr>
           </tfoot>
@@ -297,6 +311,7 @@ function fundMetrics(f: FundRow) {
 }
 
 export function FundTable({ funds, loading, series, onDelete, onChanged }: { funds: FundRow[]; loading: boolean; series: Record<string, SparkPoint[]> | null; onDelete: (id: string) => void; onChanged?: () => void }) {
+  const sell = useSell();
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [open, setOpen] = useState<string | null>(null);
@@ -338,18 +353,39 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
               <td className="hidden px-3 py-1.5 lg:table-cell">
                 {f.schemeCode ? <Sparkline points={series ? series[f.id] ?? [] : undefined} currency={f.currency} width={84} height={26} /> : <span className="text-xs text-muted-foreground" title="Add the AMFI scheme code to see NAV history">No scheme code</span>}
               </td>
-              <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.invested, f.currency)}</td>
+              <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.invested, f.currency)}<p><Equivalent both stack value={m.invested} currency={f.currency} /></p></td>
               <td className="px-3 py-2.5 text-right tabular-nums">
                 {formatMoney(m.current, f.currency)}
-                <p><Equivalent value={m.current} currency={f.currency} /></p>
+                <p><Equivalent both stack value={m.current} currency={f.currency} /></p>
               </td>
               <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(m.pl))}>
                 {signed(m.pl, f.currency)}
                 <p className="text-xs">{pct(m.plPct)}</p>
+                <p><Equivalent both stack value={m.pl} currency={f.currency} signed /></p>
               </td>
               <td className="pr-3 text-right">
                 <div className="flex justify-end gap-0.5">
                   <Button variant="ghost" size="icon-sm" aria-label={`Details for ${f.fundName}`} onClick={() => setOpen(f.id)}><Eye className="h-4 w-4" /></Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    title="Redeem"
+                    aria-label={`Redeem ${f.fundName}`}
+                    onClick={() =>
+                      sell?.({
+                        kind: "MUTUAL_FUND",
+                        holdingId: f.id,
+                        name: f.fundName,
+                        currency: f.currency,
+                        price: f.lastNav != null ? Number(f.lastNav) : null,
+                        lots: f.lots?.length
+                          ? f.lots.map((l) => ({ id: l.id, quantity: Number(l.units), price: Number(l.nav), purchaseDate: l.purchaseDate }))
+                          : [{ id: "", quantity: Number(f.units), price: Number(f.avgNav), purchaseDate: f.purchaseDate }],
+                      })
+                    }
+                  >
+                    <Banknote className="h-4 w-4" />
+                  </Button>
                   <Button variant="ghost" size="icon-sm" aria-label={`Delete ${f.fundName}`} onClick={() => setDeleting(f)}><Trash2 className="h-4 w-4" /></Button>
                 </div>
               </td>
@@ -434,9 +470,9 @@ function FundBreakdown({ f, onChanged }: { f: FundRow; onChanged: () => void }) 
       </DialogHeader>
       <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-4">
         {[
-          ["Invested", formatMoney(invested, c), <Equivalent key="e" value={invested} currency={c} />],
-          ["Current value", formatMoney(current, c), <Equivalent key="e" value={current} currency={c} />],
-          ["Profit / loss", <span key="v" className={tone(pl)}>{signed(pl, c)}</span>, <Equivalent key="e" value={pl} currency={c} signed />],
+          ["Invested", formatMoney(invested, c), <Equivalent both key="e" value={invested} currency={c} />],
+          ["Current value", formatMoney(current, c), <Equivalent both key="e" value={current} currency={c} />],
+          ["Profit / loss", <span key="v" className={tone(pl)}>{signed(pl, c)}</span>, <Equivalent both key="e" value={pl} currency={c} signed />],
           ["Return", <span key="v" className={tone(pl)}>{pct(invested > 0 ? (pl / invested) * 100 : null)}</span>, <span key="e" className="text-xs text-muted-foreground">avg NAV {formatMoney(invested / (units || 1), c)}</span>],
         ].map(([label, value, sub]) => (
           <div key={label as string} className="bg-card p-4">
@@ -465,9 +501,9 @@ function FundBreakdown({ f, onChanged }: { f: FundRow; onChanged: () => void }) 
                 <td className="px-4 py-2.5 font-mono text-xs">{formatDate(l.lot.purchaseDate)}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums">{Number(l.units.toFixed(3))}</td>
                 <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.nav, c)}</td>
-                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.invested, c)}</td>
-                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.current, c)}</td>
-                <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(l.pl))}>{signed(l.pl, c)} <span className="text-xs">({pct(l.plPct)})</span></td>
+                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.invested, c)}<Equivalent both stack value={l.invested} currency={c} /></td>
+                <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.current, c)}<Equivalent both stack value={l.current} currency={c} /></td>
+                <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(l.pl))}>{signed(l.pl, c)} <span className="text-xs">({pct(l.plPct)})</span><Equivalent both stack signed value={l.pl} currency={c} /></td>
                 <td className="pr-3 text-right">
                   {l.lot.id !== "_agg" && (
                     <div className="flex justify-end gap-0.5">
@@ -490,9 +526,9 @@ function FundBreakdown({ f, onChanged }: { f: FundRow; onChanged: () => void }) 
               <td className="px-4 py-2.5">Total</td>
               <td className="px-3 py-2.5 text-right tabular-nums">{Number(units.toFixed(3))}</td>
               <td className="px-3 py-2.5 text-right text-xs text-muted-foreground tabular-nums">avg {formatMoney(invested / (units || 1), c)}</td>
-              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(invested, c)}</td>
-              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(current, c)}</td>
-              <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(pl))}>{signed(pl, c)}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(invested, c)}<Equivalent both stack value={invested} currency={c} /></td>
+              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(current, c)}<Equivalent both stack value={current} currency={c} /></td>
+              <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(pl))}>{signed(pl, c)}<Equivalent both stack signed value={pl} currency={c} /></td>
               <td />
             </tr>
           </tfoot>
@@ -521,6 +557,7 @@ function FundBreakdown({ f, onChanged }: { f: FundRow; onChanged: () => void }) 
 
 export interface DepositRow {
   id: string;
+  linkedAccountId?: string | null;
   bank: string;
   principal: string;
   interestRate: string;
@@ -543,6 +580,7 @@ function depositMetrics(d: DepositRow, now = Date.now()) {
 }
 
 export function DepositTable({ deposits, loading, onDelete }: { deposits: DepositRow[]; loading: boolean; onDelete: (id: string) => void }) {
+  const sell = useSell();
   const [show, setShow] = useState<"all" | "active" | "matured">("all");
   const [now] = useState(() => Date.now());
   const [open, setOpen] = useState<string | null>(null);
@@ -590,10 +628,11 @@ export function DepositTable({ deposits, loading, onDelete }: { deposits: Deposi
                   <div className="mt-1 h-1 w-28 overflow-hidden rounded-full bg-muted"><div className="h-full bg-positive" style={{ width: `${m.progress}%` }} /></div>
                 </td>
                 <td className="hidden px-3 py-2.5 text-right tabular-nums sm:table-cell">{m.rate}%</td>
-                <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.principal, d.currency)}</td>
+                <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.principal, d.currency)}<Equivalent both stack value={m.principal} currency={d.currency} /></td>
                 <td className="px-3 py-2.5 text-right tabular-nums">
                   {formatMoney(Math.round(m.value * 100) / 100, d.currency)}
                   <p className="text-xs text-positive">+{formatMoney(Math.round(m.earned), d.currency)}</p>
+                  <Equivalent both stack value={m.value} currency={d.currency} />
                 </td>
                 <td className="px-3 py-2.5 text-right">
                   <span className="font-mono text-xs">{formatDate(d.maturityDate)}</span>
@@ -602,6 +641,17 @@ export function DepositTable({ deposits, loading, onDelete }: { deposits: Deposi
                 <td className="pr-3 text-right">
                   <div className="flex justify-end gap-0.5">
                     <Button variant="ghost" size="icon-sm" aria-label={`Details for ${d.bank}`} onClick={() => setOpen(d.id)}><Eye className="h-4 w-4" /></Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="Close deposit"
+                      aria-label={`Close ${d.bank} deposit`}
+                      onClick={() =>
+                        sell?.({ kind: "FIXED_DEPOSIT", holdingId: d.id, name: d.bank, currency: d.currency, principal: Number(d.principal), rate: Number(d.interestRate), startDate: d.startDate, maturityDate: d.maturityDate, linkedAccountId: d.linkedAccountId ?? null })
+                      }
+                    >
+                      <Banknote className="h-4 w-4" />
+                    </Button>
                     <Button variant="ghost" size="icon-sm" aria-label={`Delete ${d.bank} deposit`} onClick={() => setDeleting(d)}><Trash2 className="h-4 w-4" /></Button>
                   </div>
                 </td>
@@ -624,16 +674,22 @@ export function DepositTable({ deposits, loading, onDelete }: { deposits: Deposi
                 <div className="h-2 overflow-hidden rounded-full bg-muted"><div className="h-full bg-positive transition-[width] duration-700" style={{ width: `${dm.progress}%` }} /></div>
               </div>
               <dl className="grid grid-cols-2 gap-4 text-sm">
-                {[
-                  ["Invested", formatMoney(dm.principal, detail.currency)],
-                  ["Value now", formatMoney(Math.round(dm.value * 100) / 100, detail.currency)],
-                  ["Interest so far", `+${formatMoney(Math.round(dm.earned * 100) / 100, detail.currency)}`],
-                  ["Value at maturity", formatMoney(Math.round(dm.atMaturity * 100) / 100, detail.currency)],
-                ].map(([k, v]) => (
-                  <div key={k} className="rounded-lg border border-border p-3"><dt className="eyebrow">{k}</dt><dd className="mt-1 text-base font-semibold tabular-nums">{v}</dd></div>
+                {(
+                  [
+                    ["Invested", dm.principal, ""],
+                    ["Value now", dm.value, ""],
+                    ["Interest so far", dm.earned, "+"],
+                    ["Value at maturity", dm.atMaturity, ""],
+                  ] as [string, number, string][]
+                ).map(([k, v, sign]) => (
+                  <div key={k} className="rounded-lg border border-border p-3">
+                    <dt className="eyebrow">{k}</dt>
+                    <dd className="mt-1 text-base font-semibold tabular-nums">{sign}{formatMoney(Math.round(v * 100) / 100, detail.currency)}</dd>
+                    <dd><Equivalent both stack value={v} currency={detail.currency} /></dd>
+                  </div>
                 ))}
               </dl>
-              <p className="text-xs text-muted-foreground">Estimated with simple interest. Your bank may compound, so the final figure can be a little higher. <Equivalent value={dm.value} currency={detail.currency} /></p>
+              <p className="text-xs text-muted-foreground">Estimated with simple interest. Your bank may compound, so the final figure can be a little higher.</p>
             </div>
           )}
         </DialogContent>
@@ -659,6 +715,7 @@ export interface AssetRow {
 }
 
 export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: { assets: AssetRow[]; loading: boolean; typeLabel: (t: string) => string; onDelete: (id: string) => void; onChanged: () => void }) {
+  const sell = useSell();
   const [type, setType] = useState("ALL");
   const [now] = useState(() => Date.now());
   const [open, setOpen] = useState<string | null>(null);
@@ -729,18 +786,28 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
                   <button onClick={() => { setOpen(a.id); setValue(String(Number(a.currentValue))); }} className="block cursor-pointer truncate text-left font-medium hover:underline">{a.name}</button>
                   <p className="truncate text-xs text-muted-foreground">{typeLabel(a.assetType)}{a.quantity ? ` · ${Number(a.quantity)} ${a.unit ?? ""}` : ""}</p>
                 </td>
-                <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(cost, a.currency)}</td>
+                <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(cost, a.currency)}<Equivalent both stack value={cost} currency={a.currency} /></td>
                 <td className="px-3 py-2.5 text-right tabular-nums">
                   {formatMoney(cur, a.currency)}
-                  <p><Equivalent value={cur} currency={a.currency} /></p>
+                  <Equivalent both stack value={cur} currency={a.currency} />
                 </td>
                 <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(pl))}>
                   {signed(pl, a.currency)}
                   <p className="text-xs">{pct(plPct)}</p>
+                  <Equivalent both stack signed value={pl} currency={a.currency} />
                 </td>
                 <td className="pr-3 text-right">
                   <div className="flex justify-end gap-0.5">
                     <Button variant="ghost" size="icon-sm" aria-label={`Details for ${a.name}`} onClick={() => { setOpen(a.id); setValue(String(Number(a.currentValue))); }}><Eye className="h-4 w-4" /></Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="Sell"
+                      aria-label={`Sell ${a.name}`}
+                      onClick={() => sell?.({ kind: "OTHER", holdingId: a.id, name: a.name, currency: a.currency, cost: Number(a.purchasePrice), value: Number(a.currentValue), purchaseDate: a.purchaseDate })}
+                    >
+                      <Banknote className="h-4 w-4" />
+                    </Button>
                     <Button variant="ghost" size="icon-sm" aria-label={`Delete ${a.name}`} onClick={() => setDeleting(a)}><Trash2 className="h-4 w-4" /></Button>
                   </div>
                 </td>
@@ -763,13 +830,19 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
                   <DialogDescription>{typeLabel(detail.assetType)} · bought {formatDate(detail.purchaseDate)}{detail.quantity ? ` · ${Number(detail.quantity)} ${detail.unit ?? ""}` : ""} · {detail.currency}</DialogDescription>
                 </DialogHeader>
                 <dl className="grid grid-cols-2 gap-4 text-sm">
-                  {[
-                    ["Paid", formatMoney(cost, detail.currency)],
-                    ["Value now", formatMoney(cur, detail.currency)],
-                    ["Profit / loss", `${signed(cur - cost, detail.currency)} (${pct(cost > 0 ? ((cur - cost) / cost) * 100 : null)})`],
-                    ["Per year", cagr == null ? "After a year" : pct(cagr)],
-                  ].map(([k, v]) => (
-                    <div key={k} className="rounded-lg border border-border p-3"><dt className="eyebrow">{k}</dt><dd className="mt-1 text-base font-semibold tabular-nums">{v}</dd></div>
+                  {(
+                    [
+                      ["Paid", formatMoney(cost, detail.currency), cost, false],
+                      ["Value now", formatMoney(cur, detail.currency), cur, false],
+                      ["Profit / loss", `${signed(cur - cost, detail.currency)} (${pct(cost > 0 ? ((cur - cost) / cost) * 100 : null)})`, cur - cost, true],
+                      ["Per year", cagr == null ? "After a year" : pct(cagr), null, false],
+                    ] as [string, string, number | null, boolean][]
+                  ).map(([k, v, n, sgn]) => (
+                    <div key={k} className="rounded-lg border border-border p-3">
+                      <dt className="eyebrow">{k}</dt>
+                      <dd className="mt-1 text-base font-semibold tabular-nums">{v}</dd>
+                      {n != null && <dd><Equivalent both stack signed={sgn} value={n} currency={detail.currency} /></dd>}
+                    </div>
                   ))}
                 </dl>
                 {detail.notes && <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">{detail.notes}</p>}

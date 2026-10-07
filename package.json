@@ -14,7 +14,7 @@
     "db:studio": "prisma studio",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "build:deploy": "node scripts/check-build-env.mjs && prisma migrate deploy && next build",
+    "build:deploy": "prisma migrate deploy && next build",
     "vercel-build": "npm run build:deploy",
     "db:seed": "tsx prisma/seed.ts",
     "create-user": "tsx scripts/create-user.ts",

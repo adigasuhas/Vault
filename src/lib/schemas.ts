@@ -292,6 +292,26 @@ export const loanScheduleSchema = z.object({
 });
 export const patchLoanSchema = z.object({ status: z.enum(["ACTIVE", "CLOSED"]) });
 
+// ---- Investment sales ----
+const saleCommon = {
+  holdingId: zId,
+  charges: zMoneyNonNegative.default(0),
+  soldOn: zIsoDate,
+  accountId: zId,
+  // Only when the account's currency differs from the holding's: what arrived.
+  creditedAmount: zMoney.optional(),
+  note: z.string().trim().max(500).optional(),
+};
+export const createSaleSchema = z.discriminatedUnion("kind", [
+  // Shares or fund units, at a price (or NAV) per unit.
+  z.object({ kind: z.literal("STOCK"), quantity: zPositive, price: zNonNegative, ...saleCommon }),
+  z.object({ kind: z.literal("MUTUAL_FUND"), quantity: zPositive, price: zNonNegative, ...saleCommon }),
+  // A whole deposit or asset, for one amount (before charges).
+  z.object({ kind: z.literal("FIXED_DEPOSIT"), amount: zMoney, ...saleCommon }),
+  z.object({ kind: z.literal("OTHER"), amount: zMoney, ...saleCommon }),
+]);
+export type CreateSaleInput = z.infer<typeof createSaleSchema>;
+
 // ---- Settings / FX ----
 export const patchSettingsSchema = z.object({
   name: z.string().trim().max(120).optional(),

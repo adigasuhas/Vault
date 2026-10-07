@@ -20,6 +20,7 @@ export async function deleteUserData(userId: string) {
     await tx.budgetPlan.deleteMany({ where: { userId } });
     await tx.loan.deleteMany({ where: { userId } });
     await tx.fixedDeposit.deleteMany({ where: { userId } });
+    await tx.investmentSale.deleteMany({ where: { userId } });
     await tx.category.deleteMany({ where: { userId } });
     await tx.account.deleteMany({ where: { userId } });
     await tx.user.delete({ where: { id: userId } });

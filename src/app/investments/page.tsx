@@ -6,6 +6,8 @@ import { PageHeader, Panel, Stat } from "@/components/app/PageHeader";
 import { Equivalent } from "@/components/app/Money";
 import { useCurrency } from "@/context/CurrencyContext";
 import { StockTable, FundTable, StockBreakdown, DepositTable, AssetTable } from "@/components/investments/Holdings";
+import { SellContext, SellDialog, type SellTarget } from "@/components/investments/SellDialog";
+import { SalesHistory, type SaleRow } from "@/components/investments/SalesHistory";
 import { useSession } from "@/context/SessionContext";
 import { formatMoney } from "@/lib/currencies";
 import { SUPPORTED_CURRENCIES } from "@/lib/currencies";
@@ -60,6 +62,7 @@ interface MutualFundHolding {
 
 interface FixedDeposit {
   id: string;
+  linkedAccountId: string | null;
   bank: string;
   principal: string;
   interestRate: string;
@@ -257,19 +260,23 @@ export default function InvestmentsPage() {
   const [otherAssets, setOtherAssets] = useState<OtherAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [sales, setSales] = useState<SaleRow[]>([]);
+  const [sellTarget, setSellTarget] = useState<SellTarget | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [sRes, mRes, fRes, oRes] = await Promise.all([
+    const [sRes, mRes, fRes, oRes, salesRes] = await Promise.all([
       fetch("/api/investments/stocks"),
       fetch("/api/investments/mutual-funds"),
       fetch("/api/investments/fixed-deposits"),
       fetch("/api/investments/other"),
+      fetch("/api/investments/sales"),
     ]);
     setStocks((await sRes.json()).holdings || []);
     setFunds((await mRes.json()).holdings || []);
     setDeposits((await fRes.json()).deposits || []);
     setOtherAssets((await oRes.json()).assets || []);
+    setSales(salesRes.ok ? (await salesRes.json()).sales || [] : []);
     setLoading(false);
   }, []);
 
@@ -349,7 +356,14 @@ export default function InvestmentsPage() {
     [otherAssets, toBase]
   );
 
+  const realized = useMemo(
+    () => sales.filter((x) => !x.reversedAt).reduce((sum, x) => sum + toBase(Number(x.realizedPnl), x.currency), 0),
+    [sales, toBase]
+  );
+
+  const liveSales = sales.filter((x) => !x.reversedAt).length;
   const totalValue = stockValue + fundValue + depositValue + otherValue;
+  const totalInvested = stockCost + fundCost + depositCost + otherCost;
   const totalGain = stockValue - stockCost + (fundValue - fundCost) + (depositValue - depositCost) + (otherValue - otherCost);
 
   return (
@@ -367,19 +381,45 @@ export default function InvestmentsPage() {
 
       <Panel className="settle overflow-hidden p-0">
         <div className="grid grid-cols-2 gap-px bg-border lg:grid-cols-4">
-          <div className="bg-card p-5"><Stat label="Portfolio value" value={formatMoney(Math.round(totalValue), currency)} hint={<Equivalent value={totalValue} currency={currency} />} /></div>
-          <div className="bg-card p-5"><Stat label="Profit / loss" value={<span className={gainClass(totalGain)}>{totalGain >= 0 ? "+" : "−"}{formatMoney(Math.abs(Math.round(totalGain)), currency)}</span>} hint={totalValue - totalGain > 0 ? `${((totalGain / (totalValue - totalGain)) * 100).toFixed(1)}% on what you put in` : undefined} /></div>
-          <div className="bg-card p-5"><Stat label="Stocks and funds" value={formatMoney(Math.round(stockValue + fundValue), currency)} /></div>
-          <div className="bg-card p-5"><Stat label="Deposits and other" value={formatMoney(Math.round(depositValue + otherValue), currency)} /></div>
+          <div className="bg-card p-5">
+            <Stat
+              label="Invested"
+              value={formatMoney(Math.round(totalInvested), currency)}
+              hint={<><Equivalent both value={totalInvested} currency={currency} className="block text-xs" /><span className="block">What your current holdings cost</span></>}
+            />
+          </div>
+          <div className="bg-card p-5">
+            <Stat
+              label="Current value"
+              value={formatMoney(Math.round(totalValue), currency)}
+              hint={<><Equivalent both value={totalValue} currency={currency} className="block text-xs" /><span className="block">Stocks and funds {formatMoney(Math.round(stockValue + fundValue), currency)} · deposits and other {formatMoney(Math.round(depositValue + otherValue), currency)}</span></>}
+            />
+          </div>
+          <div className="bg-card p-5">
+            <Stat
+              label="Profit / loss"
+              value={<span className={gainClass(totalGain)}>{totalGain >= 0 ? "+" : "−"}{formatMoney(Math.abs(Math.round(totalGain)), currency)}</span>}
+              hint={<><Equivalent both signed value={totalGain} currency={currency} className="block text-xs" />{totalInvested > 0 && <span className="block">{((totalGain / totalInvested) * 100).toFixed(1)}% on what you hold now</span>}</>}
+            />
+          </div>
+          <div className="bg-card p-5">
+            <Stat
+              label="Realised from sales"
+              value={<span className={gainClass(realized)}>{realized >= 0 ? "+" : "−"}{formatMoney(Math.abs(Math.round(realized)), currency)}</span>}
+              hint={<><Equivalent both signed value={realized} currency={currency} className="block text-xs" /><span className="block">{liveSales ? `From ${liveSales} ${liveSales === 1 ? "sale" : "sales"} and closures` : "Nothing sold yet"}</span></>}
+            />
+          </div>
         </div>
       </Panel>
 
+      <SellContext.Provider value={setSellTarget}>
       <Tabs defaultValue="stocks">
         <TabsList>
           <TabsTrigger value="stocks" className="cursor-pointer">Stocks</TabsTrigger>
           <TabsTrigger value="funds" className="cursor-pointer">Mutual funds</TabsTrigger>
           <TabsTrigger value="fds" className="cursor-pointer">Fixed deposits</TabsTrigger>
           <TabsTrigger value="other" className="cursor-pointer">Other assets</TabsTrigger>
+          <TabsTrigger value="sold" className="cursor-pointer">Sold &amp; closed{liveSales ? ` (${liveSales})` : ""}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="stocks" className="space-y-4">
@@ -394,7 +434,12 @@ export default function InvestmentsPage() {
         <TabsContent value="other" className="space-y-4">
           <OtherAssetTab assets={otherAssets} loading={loading} defaultCurrency={currency} onChange={load} />
         </TabsContent>
+        <TabsContent value="sold" className="space-y-4">
+          <SalesHistory sales={sales} loading={loading} onChanged={load} />
+        </TabsContent>
       </Tabs>
+      </SellContext.Provider>
+      <SellDialog target={sellTarget} onOpenChange={(o) => !o && setSellTarget(null)} onSold={load} />
     </div>
   );
 }

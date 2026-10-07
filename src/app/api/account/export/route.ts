@@ -37,6 +37,7 @@ export async function GET() {
     scheduleOverrides,
     loanPayments,
     expenseProjects,
+    investmentSales,
   ] = await Promise.all([
     db.user.findUnique({ where: { id: userId } }),
     db.account.findMany({ where: { userId } }),
@@ -48,7 +49,7 @@ export async function GET() {
     db.creditExecution.findMany({ where: { scheduledCredit: { userId } } }),
     db.budgetPlan.findMany({ where: { userId }, include: { allocations: { include: { adjustments: true } } } }),
     db.stockHolding.findMany({ where: { userId }, include: { lots: true } }),
-    db.mutualFundHolding.findMany({ where: { userId } }),
+    db.mutualFundHolding.findMany({ where: { userId }, include: { lots: true } }),
     db.fixedDeposit.findMany({ where: { userId } }),
     db.otherAsset.findMany({ where: { userId } }),
     db.exchangeRate.findMany({ where: { userId } }),
@@ -59,6 +60,7 @@ export async function GET() {
     db.scheduleOverride.findMany({ where: { scheduledCredit: { userId } } }),
     db.loanPayment.findMany({ where: { loan: { userId } } }),
     db.expenseProject.findMany({ where: { userId } }),
+    db.investmentSale.findMany({ where: { userId }, orderBy: { soldOn: "asc" } }),
   ]);
 
   const profile = user
@@ -94,6 +96,7 @@ export async function GET() {
     mutualFunds,
     fixedDeposits,
     otherAssets,
+    investmentSales,
     exchangeRates,
     loans,
     monthlyPlans,

@@ -52,11 +52,25 @@ export function Money({
   );
 }
 
-/** "≈ £4,300" in the other configured currency, or nothing. */
-export function Equivalent({ value, currency, signed, className }: { value: number; currency: string; signed?: boolean; className?: string }) {
+/** "≈ £4,300" in the other configured currency, or nothing. With `both`, the
+ * amount in primary and in secondary, leaving out whichever is its own currency. */
+export function Equivalent({ value, currency, signed, className, both, stack }: { value: number; currency: string; signed?: boolean; className?: string; both?: boolean; stack?: boolean }) {
   const fx = useCurrency();
-  const eq = fx.equivalent(Math.abs(value), currency);
-  if (!eq) return null;
+  const parts: { amount: number; currency: string }[] = [];
+  if (both) {
+    if (fx.ready && currency !== fx.primary) {
+      const p = fx.toPrimaryAmount(Math.abs(value), currency);
+      if (p != null) parts.push({ amount: p, currency: fx.primary });
+    }
+    if (fx.ready && fx.secondary && currency !== fx.secondary) {
+      const s = fx.toSecondaryAmount(Math.abs(value), currency);
+      if (s != null) parts.push({ amount: s, currency: fx.secondary });
+    }
+  } else {
+    const eq = fx.equivalent(Math.abs(value), currency);
+    if (eq) parts.push(eq);
+  }
+  if (!parts.length) return null;
   const sign = signed ? (value > 0 ? "+" : value < 0 ? "−" : "") : value < 0 ? "−" : "";
   const asOf = fx.asOf ? new Date(fx.asOf).toLocaleDateString("en-GB", { day: "numeric", month: "short" }) : null;
   return (
@@ -64,8 +78,12 @@ export function Equivalent({ value, currency, signed, className }: { value: numb
       className={cn("text-[0.78em] font-normal whitespace-nowrap text-muted-foreground tabular-nums", className)}
       title={`Converted at today's rate${asOf ? ` (updated ${asOf})` : ""}. The real amount is in ${currency}.`}
     >
-      ≈ {sign}
-      {formatMoney(Math.round(eq.amount), eq.currency)}
+      {parts.map((p, i) => (
+        <span key={p.currency} className={stack ? "block" : undefined}>
+          {i > 0 && !stack && " · "}≈ {sign}
+          {formatMoney(Math.round(p.amount), p.currency)}
+        </span>
+      ))}
     </span>
   );
 }

@@ -22,7 +22,6 @@ npm run check-env -- --env-file .env.production
 | Variable | Required | What it is |
 |---|---|---|
 | `DATABASE_URL` | yes | `postgresql://user:pass@host:5432/db?schema=public`. On serverless hosts use a **pooled** URL (Neon, Supabase pooler, Prisma Postgres); managed databases usually need `&sslmode=require`. |
-| `DIRECT_URL` | no | Direct (non-pooled) connection string used only for migrations. Set it if `prisma migrate deploy` fails through the pooler; on Neon it's the connection string without `-pooler` in the host. |
 | `JWT_SECRET` | yes | 32+ random characters; signs session cookies. The app refuses to start without it. `openssl rand -base64 48` |
 | `CRON_SECRET` | for jobs | Bearer token for `/api/cron/*`. Without it scheduled payments, FX refresh, price updates and reminders don't run. `openssl rand -hex 32` |
 | `NEXT_PUBLIC_APP_URL` | recommended | Public `https://` URL; used in reminder emails. |
@@ -113,7 +112,6 @@ The `vercel-build` script migrates before building, and `vercel.json` schedules 
 
 1. Create a pooled Postgres database (Neon has a Netlify integration).
 2. `npm run setup -- --target netlify`, then import the repo in Netlify and add the variables from `.env.production` (or let the script push them with the `netlify` CLI).
-   At minimum the build needs `DATABASE_URL` and `JWT_SECRET`; without them it stops with a list of what's missing. Add `CRON_SECRET`, `NEXT_PUBLIC_APP_URL` (your `https://<site>.netlify.app` address) and `DIRECT_URL` (if migrations fail through the pooler) as well.
 3. `netlify.toml` sets the build command (`npm run build:deploy`) and Node 24; Netlify's Next.js runtime is picked up automatically.
 4. Enable the scheduled-jobs workflow (see above).
 

@@ -20,6 +20,8 @@ interface CurrencyApi extends FxState {
   equivalent: (amount: number, currency: string) => { amount: number; currency: string } | null;
   /** Converts to primary (null when no rate is known). */
   toPrimaryAmount: (amount: number, currency: string) => number | null;
+  /** Converts to secondary (null when there's no secondary or no rate). */
+  toSecondaryAmount: (amount: number, currency: string) => number | null;
   reload: () => void;
 }
 
@@ -61,6 +63,12 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
       toPrimaryAmount: (amount, currency) => {
         if (currency === s.primary) return amount;
         const r = s.toPrimary[currency];
+        return r == null ? null : amount * r;
+      },
+      toSecondaryAmount: (amount, currency) => {
+        if (!s.secondary) return null;
+        if (currency === s.secondary) return amount;
+        const r = s.toSecondary[currency];
         return r == null ? null : amount * r;
       },
       equivalent: (amount, currency) => {

@@ -13,7 +13,6 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%2B-336791?logo=postgresql&logoColor=white)
 ![Prisma](https://img.shields.io/badge/Prisma-7-2d3748?logo=prisma)
-[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
 
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/adigasuhas)
 
@@ -30,7 +29,7 @@ VAULT is a self-hosted, multi-user app for keeping track of where your money is,
 - **Budgets:** monthly plans per category with recurring lines, adjustments and live utilization.
 - **Income and payments:** scheduled salary, rent, subscriptions and bills that post automatically when due, with per-occurrence skips and overrides.
 - **Loans:** EMI schedules accurate to the paisa, payment tracking, and outstanding balances that count against your net worth.
-- **Investments:** stocks (with live prices), mutual funds (daily NAVs), fixed deposits and other assets, with purchase lots and gains.
+- **Investments:** stocks (with live prices), mutual funds (daily NAVs), fixed deposits and other assets, with purchase lots and gains. Sell, redeem or close any holding with the proceeds credited to an account, and review every past trade with its realised profit or loss.
 - **Multi-currency:** primary, secondary and budget currencies, automatic or manual exchange rates, and the original currency always shown next to a conversion.
 - **Analytics and reports:** net worth history, cash flow, budget adherence, a funding runway, and statements and summaries as CSV, Excel or PDF.
 - **Reminders:** an in-app bell for income about to arrive, bills coming up and budget categories close to their limit.
@@ -135,15 +134,6 @@ VAULT is free. The coffee wasn't. It was built on a questionable amount of coffe
 
 Optional, and nothing unlocks. Not a coffee person? A star on GitHub helps too.
 
-## Contributing
-
-Ideas, bug reports and pull requests are welcome. Every change goes through a pull request and is reviewed by the maintainer before it's merged. See [CONTRIBUTING.md](CONTRIBUTING.md) for how it works and the contributor agreement.
-
 ## License
 
-VAULT is **source-available** under the [PolyForm Noncommercial License 1.0.0](LICENSE). Copyright (c) 2026 Suhas Adiga.
-
-- ✅ Use it, self-host it, change it and share it for personal, educational, research or other noncommercial purposes.
-- ❌ Don't sell it, offer it as a paid service or use it to make money in any other way.
-
-For commercial use, get in touch with the maintainer.
+Proprietary. Copyright (c) 2026 Suhas Adiga. All rights reserved. See [LICENSE](LICENSE).

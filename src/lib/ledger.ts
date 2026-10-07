@@ -119,6 +119,7 @@ type PostInput = {
   transferId?: string;
   creditExecutionId?: string;
   loanPaymentId?: string;
+  investmentSaleId?: string;
   categoryId?: string | null;
   reversalOfId?: string;
   oneTime?: boolean;
@@ -148,6 +149,7 @@ async function post(tx: Tx, input: PostInput) {
       transferId: input.transferId,
       creditExecutionId: input.creditExecutionId,
       loanPaymentId: input.loanPaymentId,
+      investmentSaleId: input.investmentSaleId,
       categoryId: input.categoryId ?? null,
       reversalOfId: input.reversalOfId,
       oneTime: input.oneTime ?? false,
@@ -700,6 +702,42 @@ export async function recordManualIncome(
       description: input.description,
     });
   });
+}
+
+// ---------------------------------------------------------------- investments
+
+/** Credits the net proceeds of an investment sale to an account. Runs in the
+ * caller's transaction, after the InvestmentSale row exists. */
+export async function postInvestmentSale(
+  tx: Tx,
+  userId: string,
+  input: { saleId: string; accountId: string; amount: number; currency: string; date: Date; description: string }
+) {
+  const account = await tx.account.findFirst({ where: { id: input.accountId, userId } });
+  if (!account) throw new ValidationError("Account not found.");
+  assertOpen(account);
+  assertPostable(input.amount, input.currency, account.currency);
+  return post(tx, {
+    userId,
+    accountId: account.id,
+    type: "INVESTMENT_SALE",
+    amount: input.amount,
+    currency: input.currency,
+    date: input.date,
+    description: input.description,
+    investmentSaleId: input.saleId,
+  });
+}
+
+/** Takes a sale's proceeds back out of the account it was credited to. */
+export async function reverseInvestmentSale(tx: Tx, userId: string, saleId: string, reason: string) {
+  const entry = await tx.ledgerEntry.findFirst({ where: { investmentSaleId: saleId, userId }, include: { account: true } });
+  if (!entry) throw new ValidationError("This sale has no ledger entry to reverse.");
+  if (entry.account) {
+    assertOpen(entry.account);
+    assertSufficientFunds(entry.account, Number(entry.amount));
+  }
+  return reverseEntry(tx, entry.id, reason);
 }
 
 // ---------------------------------------------------------------- loans

@@ -268,7 +268,7 @@ Due payments appear under **Due**. Confirm once paid, or skip it. To change one 
 
 ## 9. Investments
 
-Investments brings stocks, mutual funds, fixed deposits and other assets into one portfolio. The top of the page shows **portfolio value**, overall **profit / loss**, and the split between stocks and funds and deposits and other assets.
+Investments brings stocks, mutual funds, fixed deposits and other assets into one portfolio. The top of the page shows what you have **invested**, the **current value**, your **profit / loss** on what you still hold, and the profit or loss **realised from sales**. Every amount is shown in its own currency with "≈" conversions into your primary and secondary currencies.
 
 ### Stocks
 
@@ -291,6 +291,24 @@ Add the bank, principal, interest rate, start date and maturity date to watch th
 Gold, bonds, cryptocurrency, property or anything else. Enter what you paid and what it is worth now, and update the value yourself when it changes.
 
 Investments are tracked separately from your account ledger, so adding or deleting a holding doesn't change any account balance. Buying with money from an account? Log the expense or transfer for that account too.
+
+### Selling and closing
+
+Use the sell button on a holding's row (**Sell** for stocks and other assets, **Redeem** for mutual funds, **Close deposit** for fixed deposits):
+
+- **Shares and fund units:** enter how many you sold and the price or NAV. You can sell part of a holding. The oldest purchases are sold first.
+- **Fixed deposits:** VAULT suggests the payout from the interest earned up to the closing date. Enter what the bank actually paid, plus any penalty or tax deducted. Closing before maturity is recorded as an early closure.
+- **Other assets:** enter the sale price.
+- **Charges** (brokerage, exit load, fees) come off the proceeds.
+- **Credit the money to:** pick the account the money went into. If its currency differs from the investment's, enter the amount that actually arrived.
+
+Before you confirm, a preview shows what you receive, the cost of what you're selling and your profit or loss. The money is posted to the account as an **Investment sale** entry. It isn't counted as income, because it was already yours in another form.
+
+### Sold & closed
+
+The **Sold & closed** tab is your trade history: realised profit and loss, gains and losses, what you received and the charges paid. Filter by type and year, search, and download it as CSV. Select a trade to see every detail, including which purchases were sold, how long each was held and its share of the profit.
+
+Recorded a sale by mistake? Open it and choose **Undo**. The money is taken back out of the account and the holding returns to your portfolio. Both the sale and its undo stay in the ledger.
 
 ---
 
