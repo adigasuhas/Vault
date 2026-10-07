@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 112" width="400" height="112" fill="none" role="img" aria-labelledby="t">
+<title id="t">VAULT</title>
+<style>
+  .door { transform-box: fill-box; transform-origin: center; animation: door 0.9s cubic-bezier(.2,.8,.2,1) both; }
+  .spin { transform-box: fill-box; transform-origin: center; animation: spin 1.6s cubic-bezier(.65,0,.35,1) 0.3s both; }
+  .click { transform-box: fill-box; transform-origin: center; animation: click 6s cubic-bezier(.7,0,.3,1) 2.4s infinite; }
+  .hub { transform-box: fill-box; transform-origin: center; animation: hub 3s ease-in-out 1.9s infinite; }
+  .glow { animation: glow 3s ease-in-out 1.9s infinite; opacity: 0; }
+  .ink path { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 0.7s cubic-bezier(.4,0,.2,1) forwards; }
+  .ink path:nth-child(1) { animation-delay: 0.9s; }
+  .ink path:nth-child(2) { animation-delay: 1.05s; }
+  .ink path:nth-child(3) { animation-delay: 1.2s; }
+  .ink path:nth-child(4) { animation-delay: 1.35s; }
+  .ink path:nth-child(5) { animation-delay: 1.5s; }
+  .bar { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 0.5s ease-out 2s forwards; }
+  @keyframes door { from { opacity: 0; transform: scale(.82); } to { opacity: 1; transform: scale(1); } }
+  @keyframes spin { from { transform: rotate(-270deg); } to { transform: rotate(0deg); } }
+  @keyframes click { 0%, 70% { transform: rotate(0deg); } 85%, 100% { transform: rotate(90deg); } }
+  @keyframes hub { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.18); } }
+  @keyframes glow { 0%, 100% { opacity: 0; } 50% { opacity: .22; } }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .door, .spin, .click, .hub, .glow, .ink path, .bar { animation: none; }
+    .ink path, .bar { stroke-dashoffset: 0; }
+  }
+</style>
+<g transform="translate(8 8) scale(3)">
+  <g class="door">
+    <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="#16171a"/>
+    <rect x="4.5" y="4.5" width="23" height="23" rx="4.5" stroke="#f5f3ee" stroke-opacity="0.22"/>
+    <g class="spin"><g class="click" stroke="#f5f3ee" stroke-linecap="round">
+      <circle cx="16" cy="16" r="11.4" stroke="none"/>
+      <circle cx="16" cy="16" r="7.6" stroke-width="1.6"/>
+      <line x1="25.60" y1="16.00" x2="27.40" y2="16.00" stroke-opacity="0.9" stroke-width="1.2"/><line x1="22.79" y1="22.79" x2="23.50" y2="23.50" stroke-opacity="0.45" stroke-width="1.2"/><line x1="16.00" y1="25.60" x2="16.00" y2="27.40" stroke-opacity="0.9" stroke-width="1.2"/><line x1="9.21" y1="22.79" x2="8.50" y2="23.50" stroke-opacity="0.45" stroke-width="1.2"/><line x1="6.40" y1="16.00" x2="4.60" y2="16.00" stroke-opacity="0.9" stroke-width="1.2"/><line x1="9.21" y1="9.21" x2="8.50" y2="8.50" stroke-opacity="0.45" stroke-width="1.2"/><line x1="16.00" y1="6.40" x2="16.00" y2="4.60" stroke-opacity="0.9" stroke-width="1.2"/><line x1="22.79" y1="9.21" x2="23.50" y2="8.50" stroke-opacity="0.45" stroke-width="1.2"/>
+      <path d="M16 10.4v2.4M21.6 16h-2.4M16 21.6v-2.4M10.4 16h2.4" stroke-width="1.6"/>
+    </g></g>
+    <circle class="glow" cx="16" cy="16" r="5" fill="#c9a35a"/>
+    <circle class="hub" cx="16" cy="16" r="2.4" fill="#9c7a2e"/>
+  </g>
+</g>
+<g transform="translate(136 32) scale(3)">
+  <g class="ink" stroke="#16171a" stroke-width="2.4" stroke-linecap="square" stroke-linejoin="miter">
+    <path pathLength="1" d="M0 0 L6.2 16 L12.4 0"/>
+    <path pathLength="1" d="M18 16 L24.2 0 L30.4 16"/>
+    <path pathLength="1" d="M37 0 V9.6 a5.8 5.8 0 0 0 11.6 0 V0"/>
+    <path pathLength="1" d="M56 0 V16 H65.6"/>
+    <path pathLength="1" d="M71 0 H84 M77.5 0 V16"/>
+  </g>
+  <path class="bar" pathLength="1" d="M21.4 10.6 H27" stroke="#9c7a2e" stroke-width="2.4" stroke-linecap="square"/>
+</g>
+</svg>

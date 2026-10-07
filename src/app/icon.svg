@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+<rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="#16171a"/>
+<rect x="4.5" y="4.5" width="23" height="23" rx="4.5" stroke="#ecebe6" stroke-opacity="0.22"/>
+<circle cx="16" cy="16" r="7.6" stroke="#ecebe6" stroke-width="1.6"/>
+<line x1="25.60" y1="16.00" x2="27.40" y2="16.00" stroke="#ecebe6" stroke-opacity="0.9" stroke-width="1.2" stroke-linecap="round"/><line x1="22.79" y1="22.79" x2="23.50" y2="23.50" stroke="#ecebe6" stroke-opacity="0.45" stroke-width="1.2" stroke-linecap="round"/><line x1="16.00" y1="25.60" x2="16.00" y2="27.40" stroke="#ecebe6" stroke-opacity="0.9" stroke-width="1.2" stroke-linecap="round"/><line x1="9.21" y1="22.79" x2="8.50" y2="23.50" stroke="#ecebe6" stroke-opacity="0.45" stroke-width="1.2" stroke-linecap="round"/><line x1="6.40" y1="16.00" x2="4.60" y2="16.00" stroke="#ecebe6" stroke-opacity="0.9" stroke-width="1.2" stroke-linecap="round"/><line x1="9.21" y1="9.21" x2="8.50" y2="8.50" stroke="#ecebe6" stroke-opacity="0.45" stroke-width="1.2" stroke-linecap="round"/><line x1="16.00" y1="6.40" x2="16.00" y2="4.60" stroke="#ecebe6" stroke-opacity="0.9" stroke-width="1.2" stroke-linecap="round"/><line x1="22.79" y1="9.21" x2="23.50" y2="8.50" stroke="#ecebe6" stroke-opacity="0.45" stroke-width="1.2" stroke-linecap="round"/>
+<path d="M16 10.4v2.4M21.6 16h-2.4M16 21.6v-2.4M10.4 16h2.4" stroke="#ecebe6" stroke-width="1.6" stroke-linecap="round"/>
+<circle cx="16" cy="16" r="2.4" fill="#c9a35a"/>
+</svg>

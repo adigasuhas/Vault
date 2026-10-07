@@ -1,0 +1,380 @@
+@import "tailwindcss";
+/* tw-animate-css's package.json only exposes its root export under a
+ * "style" condition, which this Turbopack build's bare-specifier CSS
+ * resolution doesn't recognize — vendoring the file locally (identical
+ * content, just imported by relative path) sidesteps package resolution
+ * entirely instead of fighting it. */
+@import "../styles/tw-animate.css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-heading: var(--font-geist), ui-sans-serif, sans-serif;
+  --color-brass: var(--brass);
+  --color-brass-soft: var(--brass-soft);
+  --color-positive-soft: var(--positive-soft);
+  --color-negative-soft: var(--negative-soft);
+  --color-warning-soft: var(--warning-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --shadow-card: var(--shadow-card);
+  --shadow-pop: var(--shadow-pop);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-warning: var(--warning);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* ------------------------------------------------------------------
+   VAULT design tokens.
+   One warm-neutral gray family across both themes, a single brass accent
+   (the "vault fittings"), and desaturated money colours. Dark mode is a
+   graphite theme, not inverted light: surfaces step *up* in lightness
+   (background < card < popover), borders are low-contrast lines, and text
+   tops out at bone (#ECEAE4) rather than pure white.
+   ------------------------------------------------------------------ */
+:root {
+  --background: #f5f3ee;
+  --foreground: #16171a;
+  --card: #fdfcf9;
+  --card-foreground: #16171a;
+  --popover: #ffffff;
+  --popover-foreground: #16171a;
+  --primary: #16171a;
+  --primary-foreground: #f7f5f0;
+  --secondary: #ebe8e1;
+  --secondary-foreground: #2f3033;
+  --muted: #eeebe4;
+  --muted-foreground: #696760;
+  --accent: #e8e4da;
+  --accent-foreground: #16171a;
+  --destructive: #b4432f;
+  --destructive-foreground: #ffffff;
+  --border: #dfdbd1;
+  --input: #d9d4c9;
+  --ring: #9c7a2e;
+  --radius: 0.625rem;
+
+  --brass: #9c7a2e;
+  --brass-soft: #f1e8d3;
+  --positive: #2f7a4f;
+  --positive-soft: #e3efe6;
+  --negative: #b4432f;
+  --negative-soft: #f6e4df;
+  --warning: #9a6512;
+  --warning-soft: #f5ead6;
+  --info: #3a6390;
+  --info-soft: #e2eaf3;
+
+  --shadow-card: 0 1px 0 rgba(22, 23, 26, 0.03), 0 1px 2px rgba(60, 50, 30, 0.05);
+  --shadow-pop: 0 12px 32px -12px rgba(50, 40, 20, 0.22), 0 2px 6px rgba(50, 40, 20, 0.06);
+  --grain-opacity: 0.035;
+
+  /* Categorical chart series — validated (dataviz validate_palette.js) on
+     the card surface: CVD-separated, fixed order, never cycled. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+  --chart-1: var(--series-1);
+  --chart-2: var(--series-2);
+  --chart-3: var(--series-3);
+  --chart-4: var(--series-4);
+  --chart-5: var(--series-5);
+
+  --sidebar: #efece5;
+  --sidebar-foreground: #16171a;
+  --sidebar-primary: #16171a;
+  --sidebar-primary-foreground: #f7f5f0;
+  --sidebar-accent: #e5e1d7;
+  --sidebar-accent-foreground: #16171a;
+  --sidebar-border: #dfdbd1;
+  --sidebar-ring: #9c7a2e;
+}
+
+.dark {
+  --background: #111111;
+  --foreground: #ecebe6;
+  --card: #18181a;
+  --card-foreground: #ecebe6;
+  --popover: #1e1e20;
+  --popover-foreground: #ecebe6;
+  --primary: #ecebe6;
+  --primary-foreground: #141415;
+  --secondary: #222224;
+  --secondary-foreground: #d5d3cc;
+  --muted: #1f1f21;
+  --muted-foreground: #9d9a92;
+  --accent: #26262a;
+  --accent-foreground: #ecebe6;
+  --destructive: #e07a66;
+  --destructive-foreground: #141415;
+  --border: #2a2a2d;
+  --input: #34343a;
+  --ring: #c9a35a;
+
+  --brass: #c9a35a;
+  --brass-soft: #2a2418;
+  --positive: #6cbf8e;
+  --positive-soft: #18261e;
+  --negative: #e58b78;
+  --negative-soft: #2c1b18;
+  --warning: #dcab55;
+  --warning-soft: #2a2215;
+  --info: #84aedb;
+  --info-soft: #172230;
+
+  --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.015), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 18px 40px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --grain-opacity: 0.05;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --chart-1: var(--series-1);
+  --chart-2: var(--series-2);
+  --chart-3: var(--series-3);
+  --chart-4: var(--series-4);
+  --chart-5: var(--series-5);
+
+  --sidebar: #141415;
+  --sidebar-foreground: #ecebe6;
+  --sidebar-primary: #ecebe6;
+  --sidebar-primary-foreground: #141415;
+  --sidebar-accent: #222224;
+  --sidebar-accent-foreground: #ecebe6;
+  --sidebar-border: #232326;
+  --sidebar-ring: #c9a35a;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    scroll-behavior: smooth;
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "ss01", "cv11";
+    overflow-x: hidden;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--brass) 30%, transparent);
+  }
+}
+
+/* Figures: every amount uses tabular lining numerals so columns align. */
+.tabular-nums,
+.num {
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* Display style: the same sans, heavier and tighter, for page titles and
+   headline figures. One family keeps the product consistent. */
+.font-display {
+  font-family: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+/* Small caps-style eyebrow labels. */
+.eyebrow {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/* Scrollbars follow the theme. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 9999px;
+  border: 2px solid var(--background);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+
+/* A whisper of paper grain over the app background — breaks digital
+   flatness without competing with content. */
+.grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Interactive card: lifts a pixel and firms its border on hover. */
+.lift {
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease, border-color 180ms ease;
+}
+.lift:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--foreground) 18%, var(--border));
+  box-shadow: var(--shadow-pop);
+}
+
+/* Page entrance: content settles in (opacity + 6px), staggered by --i. */
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.settle {
+  animation: settle 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+/* Skeleton shimmer that works on both themes. */
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+.shimmer {
+  position: relative;
+  overflow: hidden;
+  background: var(--muted);
+}
+.shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--foreground) 6%, transparent), transparent);
+  animation: shimmer 1.6s infinite;
+}
+
+/* Value changes flash briefly so a balance update is noticed. */
+@keyframes tick {
+  0% {
+    background: color-mix(in oklab, var(--brass) 22%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+.tick {
+  animation: tick 900ms ease-out;
+  border-radius: 4px;
+}
+
+/* The vault dial in the logo turns a quarter on hover. */
+.vault-dial {
+  transform-origin: 50% 50%;
+  transition: transform 700ms cubic-bezier(0.3, 1.4, 0.4, 1);
+}
+.group:hover .vault-dial {
+  transform: rotate(90deg);
+}
+
+/* Sign-in panel: the big vault dial turns into place on load. */
+@keyframes vault-turn-in {
+  from {
+    transform: rotate(-120deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+.auth-vault .vault-dial {
+  animation: vault-turn-in 2.2s cubic-bezier(0.2, 0.8, 0.2, 1) 0.15s both;
+}
+.group:hover .auth-vault .vault-dial {
+  animation: none;
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

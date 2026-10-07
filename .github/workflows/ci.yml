@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Required by src/lib/auth.ts at boot / build. CI-only throwaway value.
+  JWT_SECRET: ci-only-not-a-real-secret-do-not-use-anywhere-else-000
+  CRON_SECRET: ci-only-cron-secret
+  DATABASE_URL: postgresql://vault:vault@localhost:5432/vault_test?schema=public
+  DEV_USERNAME: ""
+  DEV_PASSWORD: ""
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: vault
+          POSTGRES_PASSWORD: vault
+          POSTGRES_DB: vault_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vault"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true # 17 known react-hooks/set-state-in-effect errors — tracked, not a merge blocker yet
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Dependency audit (informational)
+        run: npm audit --omit=dev || true

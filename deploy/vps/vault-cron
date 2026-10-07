@@ -1,0 +1,6 @@
+# /etc/cron.d/vault — VAULT background jobs on a VPS (times are UTC).
+# Replace CHANGE_ME with the app's CRON_SECRET; keep this file mode 600.
+CRON_SECRET=CHANGE_ME
+30 3,5,7 * * *  root  curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://127.0.0.1:3000/api/cron/market-update >/dev/null
+0 10 * * *      root  curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://127.0.0.1:3000/api/cron/market-update >/dev/null
+45 18 * * *     root  curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://127.0.0.1:3000/api/cron/daily >/dev/null

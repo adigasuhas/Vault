@@ -1,0 +1,26 @@
+# systemd unit for VAULT on a Linux server (Ubuntu/Debian).
+#   sudo cp deploy/vps/vault.service /etc/systemd/system/vault.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now vault
+# Assumes the repo is at /opt/vault, built with `npm ci && npm run build`,
+# owned by a `vault` user, with secrets in /opt/vault/.env.production.
+[Unit]
+Description=VAULT personal finance (Next.js)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vault
+WorkingDirectory=/opt/vault
+EnvironmentFile=/opt/vault/.env.production
+Environment=NODE_ENV=production PORT=3000 HOSTNAME=127.0.0.1
+ExecStartPre=/usr/bin/npx prisma migrate deploy
+ExecStart=/usr/bin/npx next start -H 127.0.0.1 -p 3000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

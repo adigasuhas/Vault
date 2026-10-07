@@ -1,0 +1,10 @@
+# Netlify: the Next.js runtime is detected automatically.
+# Set env vars in Site settings → Environment variables (npm run setup → Netlify
+# prints them). Scheduled jobs run from .github/workflows/scheduled-jobs.yml.
+[build]
+  command = "npm run build:deploy"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "24"
+  NEXT_TELEMETRY_DISABLED = "1"

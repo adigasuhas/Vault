@@ -1,0 +1,52 @@
+name: Scheduled jobs
+
+# Runs VAULT's background jobs on hosts without a built-in scheduler
+# (Netlify, Render, Railway, Fly.io, a VPS). Vercel deployments use
+# vercel.json instead and don't need this.
+#
+# Enable it with two repository secrets (Settings → Secrets and variables → Actions):
+#   VAULT_URL    e.g. https://vault.example.com  (no trailing slash)
+#   CRON_SECRET  the same value as the app's CRON_SECRET
+# Without them, every run exits immediately.
+
+on:
+  schedule:
+    - cron: "30 3 * * *"  # market update (09:00 IST)
+    - cron: "30 5 * * *"  # market update
+    - cron: "30 7 * * *"  # market update
+    - cron: "0 10 * * *"  # market update (15:30 IST)
+    - cron: "45 18 * * *" # daily: schedules, FX, net-worth snapshots, reminders
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Job to run
+        type: choice
+        options: [daily, market-update]
+        default: daily
+
+permissions: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call the job endpoint
+        env:
+          VAULT_URL: ${{ secrets.VAULT_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_JOB: ${{ inputs.job }}
+        run: |
+          if [ -z "$VAULT_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "VAULT_URL / CRON_SECRET secrets not set; nothing to do."
+            exit 0
+          fi
+          job="$INPUT_JOB"
+          if [ -z "$job" ]; then
+            if [ "$SCHEDULE" = "45 18 * * *" ]; then job=daily; else job=market-update; fi
+          fi
+          echo "Running $job"
+          curl -fsS --retry 3 --retry-delay 20 --max-time 90 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$VAULT_URL/api/cron/$job"

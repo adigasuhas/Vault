@@ -1,0 +1,800 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------- Enums ----------
+
+enum AccountType {
+  SAVINGS
+  CURRENT
+  FIXED_DEPOSIT
+  CREDIT_CARD
+  CASH_WALLET
+  DIGITAL_WALLET
+  LOAN
+  PREPAID_CARD
+  FOREX_CARD
+}
+
+enum AccountStatus {
+  ACTIVE
+  ARCHIVED
+  CLOSED
+}
+
+enum LedgerEntryType {
+  EXPENSE
+  INCOME
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT
+  // The account's starting balance, posted once when the account is created.
+  // With it in the ledger, currentBalance == Σ signed(entries) always holds.
+  OPENING
+  // Compensating entry that cancels another entry (reversalOfId). Signed: it
+  // carries the exact opposite of the original's balance effect, so history is
+  // never deleted — a reversed event shows as the original + its reversal.
+  REVERSAL
+}
+
+/// Whether a schedule brings money in (salary, stipend, refunds) or sends it
+/// out (rent, EMIs, subscriptions). Both share one occurrence engine.
+enum ScheduleDirection {
+  INCOME
+  PAYMENT
+}
+
+enum RecurrenceFrequency {
+  ONE_TIME
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  HALF_YEARLY
+  YEARLY
+  CUSTOM
+}
+
+enum CreditExecutionStatus {
+  PENDING
+  CONFIRMED
+  SKIPPED
+  REVERSED
+  // Auto-post was attempted but could not be booked (account closed, currency
+  // mismatch). Stays visible until the user retries or skips it.
+  FAILED
+}
+
+enum OtherAssetType {
+  GOLD
+  BOND
+  CRYPTO
+  REAL_ESTATE
+  OTHER
+}
+
+enum ExchangeRateMode {
+  AUTOMATIC
+  MANUAL
+}
+
+enum LoanStatus {
+  ACTIVE
+  CLOSED
+}
+
+enum PriceUpdateStatus {
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+// ---------- Core / Auth ----------
+
+model User {
+  id                     String           @id @default(uuid())
+  email                  String           @unique
+  name                   String?
+  avatarUrl              String?
+  googleId               String?          @unique // reserved for a future real-OAuth phase; unused for now
+  passwordHash           String?
+  role                   String           @default("USER") // USER, DEVELOPER
+  status                 String           @default("ACTIVE") // ACTIVE, SUSPENDED, DISABLED
+  timezone               String           @default("UTC")
+  // Primary currency: totals, net worth and analytics are shown in it.
+  baseCurrency           String           @default("INR")
+  // Optional second currency shown alongside amounts for people whose
+  // money lives in two countries.
+  secondaryCurrency      String?
+  // Currency new monthly budgets are planned in (defaults to primary).
+  budgetCurrency         String?
+  exchangeRateMode       ExchangeRateMode @default(AUTOMATIC)
+  isOnboarded            Boolean          @default(false)
+  deletedAt              DateTime?
+  lastLogin              DateTime?
+  // Session revocation: every issued JWT carries this number; bump it to
+  // invalidate all of a user's existing sessions immediately (on suspend,
+  // password change, or admin action).
+  tokenVersion           Int              @default(0)
+  // Login lockout after repeated failures.
+  failedLoginAttempts    Int              @default(0)
+  lockedUntil            DateTime?
+  // Account recovery: a question the user picked and a scrypt hash of the
+  // normalised answer. The answer itself is never stored or returned.
+  securityQuestion       String?
+  securityAnswerHash     String?
+  recoveryFailedAttempts Int              @default(0)
+  recoveryLockedUntil    DateTime?
+  emailVerifiedAt        DateTime?
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+
+  accounts          Account[]
+  ledgerEntries     LedgerEntry[]
+  categories        Category[]
+  expenses          Expense[]
+  transfers         Transfer[]
+  scheduledCredits  ScheduledCredit[]
+  budgetPlans       BudgetPlan[]
+  stockHoldings     StockHolding[]
+  mutualFunds       MutualFundHolding[]
+  fixedDeposits     FixedDeposit[]
+  otherAssets       OtherAsset[]
+  exchangeRates     ExchangeRate[]
+  loans             Loan[]
+  monthlyPlans      MonthlyPlan[]
+  setting           Setting?
+  netWorthSnapshots NetWorthSnapshot[]
+  auditEvents       AuditEvent[]
+  expenseProjects   ExpenseProject[]
+
+  auditLogsActed      AdminAuditLog[]      @relation("AuditActor")
+  auditLogsTargeted   AdminAuditLog[]      @relation("AuditTarget")
+  passwordResetTokens PasswordResetToken[]
+}
+
+// ---------- Admin audit trail ----------
+
+model AdminAuditLog {
+  id           String   @id @default(uuid())
+  actorId      String
+  actor        User     @relation("AuditActor", fields: [actorId], references: [id], onDelete: Cascade)
+  action       String // e.g. "user.create", "user.update.status", "user.delete", "user.reset_password"
+  targetUserId String?
+  target       User?    @relation("AuditTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+  detail       String?
+  ip           String?
+  createdAt    DateTime @default(now())
+
+  @@index([actorId])
+  @@index([targetUserId])
+  @@index([createdAt])
+}
+
+// ---------- Password reset ----------
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------- Accounts & Ledger ----------
+
+model Account {
+  id             String        @id @default(uuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  bankName       String?
+  branchName     String?
+  accountNumber  String?
+  currency       String
+  accountType    AccountType
+  openingBalance Decimal       @default(0)
+  currentBalance Decimal       @default(0)
+  openingDate    DateTime      @default(now())
+  notes          String?
+  status         AccountStatus @default(ACTIVE)
+  // Credit / prepaid cards only — spending headroom, informational.
+  creditLimit    Decimal?
+  // Closing is the only way an account leaves the app; rows are never
+  // deleted so the ledger keeps its full history.
+  closedAt       DateTime?
+  closureNote    String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  ledgerEntries        LedgerEntry[]
+  budgetAllocations    BudgetCategoryAllocation[]
+  defaultForCategories Category[]                 @relation("CategoryDefaultAccount")
+  expenses             Expense[]
+  transfersFrom        Transfer[]                 @relation("TransferFrom")
+  transfersTo          Transfer[]                 @relation("TransferTo")
+  scheduledCredits     ScheduledCredit[]
+  loans                Loan[]
+  fixedDeposits        FixedDeposit[]
+
+  @@index([userId])
+}
+
+model LedgerEntry {
+  id                String           @id @default(uuid())
+  userId            String
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Null for one-time purchases logged without an account: they count as
+  // spending but move no balance.
+  accountId         String?
+  account           Account?         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  type              LedgerEntryType
+  amount            Decimal
+  currency          String
+  date              DateTime         @default(now())
+  description       String?
+  expenseId         String?          @unique
+  expense           Expense?         @relation(fields: [expenseId], references: [id])
+  transferId        String?
+  transfer          Transfer?        @relation(fields: [transferId], references: [id])
+  creditExecutionId String?          @unique
+  creditExecution   CreditExecution? @relation(fields: [creditExecutionId], references: [id])
+  loanPaymentId     String?          @unique
+  loanPayment       LoanPayment?     @relation(fields: [loanPaymentId], references: [id])
+  // Spending category for EXPENSE entries (expenses, scheduled payments, EMIs)
+  // so budgets and analytics read straight from the ledger.
+  categoryId        String?
+  category          Category?        @relation(fields: [categoryId], references: [id])
+  // Set on a REVERSAL entry: the entry it cancels.
+  reversalOfId      String?          @unique
+  reversalOf        LedgerEntry?     @relation("Reversal", fields: [reversalOfId], references: [id])
+  reversedBy        LedgerEntry?     @relation("Reversal")
+  // Stamped on the original when it is reversed (denormalised for filtering).
+  reversedAt        DateTime?
+  // Mirrors Expense.oneTime so ledger-based figures can separate regular
+  // spending from one-off purchases.
+  oneTime           Boolean          @default(false)
+  countInBudget     Boolean          @default(false)
+  createdAt         DateTime         @default(now())
+
+  @@index([userId])
+  @@index([accountId])
+  @@index([userId, date])
+  @@index([categoryId])
+}
+
+// ---------- Categories & Expenses ----------
+
+model Category {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name             String
+  icon             String?
+  color            String?
+  sortOrder        Int      @default(0)
+  isDefault        Boolean  @default(false)
+  // Used as the starting budgetAmount when a default category auto-populates
+  // a new month (see ensureBudgetPlanWithAllocations) — lets a source like a
+  // Loan's EMI pre-fill every future month's budget instead of starting at 0.
+  defaultAmount    Decimal  @default(0)
+  // First month (YYYY-MM) a recurring category applies to. Months before it
+  // never get the recurring allocation, so marking a category recurring in
+  // October doesn't retroactively budget it in March.
+  defaultSince     String?
+  // Currency of defaultAmount (converted when stamped into a plan in another).
+  defaultCurrency  String?
+  // Account/card this category is normally paid from (pre-selected on new
+  // expenses and carried into each month's allocation).
+  defaultAccountId String?
+  defaultAccount   Account? @relation("CategoryDefaultAccount", fields: [defaultAccountId], references: [id])
+  createdAt        DateTime @default(now())
+
+  expenses          Expense[]
+  budgetAllocations BudgetCategoryAllocation[]
+  loans             Loan[]
+  ledgerEntries     LedgerEntry[]
+  schedules         ScheduledCredit[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Expense {
+  id             String          @id @default(uuid())
+  userId         String
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Optional only for one-time purchases ("paid from" left blank).
+  accountId      String?
+  account        Account?        @relation(fields: [accountId], references: [id], onDelete: NoAction)
+  categoryId     String
+  category       Category        @relation(fields: [categoryId], references: [id], onDelete: NoAction)
+  amount         Decimal
+  currency       String
+  date           DateTime        @default(now())
+  description    String?
+  notes          String?
+  receiptUrl     String?
+  // Voided expenses stay on record; their ledger entry is cancelled by a
+  // REVERSAL entry instead of being deleted.
+  voidedAt       DateTime?
+  voidReason     String?
+  // Client-generated key so a double-submitted form books one expense.
+  idempotencyKey String?
+  // One-time (non-budgeted) purchase: recorded in the ledger like any
+  // expense, but left out of monthly budgets and regular-spending figures.
+  oneTime        Boolean         @default(false)
+  // One-time purchase the user chose to count toward that month's budget.
+  countInBudget  Boolean         @default(false)
+  // Optional named occasion grouping related purchases ("Liverpool move").
+  projectId      String?
+  project        ExpenseProject? @relation(fields: [projectId], references: [id])
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  ledgerEntry LedgerEntry?
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId])
+  @@index([accountId])
+  @@index([categoryId])
+}
+
+/// A named occasion for related one-time purchases ("Liverpool move").
+model ExpenseProject {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  notes      String?
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  expenses Expense[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// ---------- Transfers ----------
+
+model Transfer {
+  id             String    @id @default(uuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fromAccountId  String
+  fromAccount    Account   @relation("TransferFrom", fields: [fromAccountId], references: [id], onDelete: NoAction)
+  toAccountId    String
+  toAccount      Account   @relation("TransferTo", fields: [toAccountId], references: [id], onDelete: NoAction)
+  amount         Decimal
+  currency       String
+  // Cross-currency transfers (e.g. loading a forex card): what actually
+  // arrived in the destination account, in its own currency. Null = same
+  // currency, toAmount == amount.
+  toAmount       Decimal?
+  toCurrency     String?
+  date           DateTime  @default(now())
+  notes          String?
+  reversedAt     DateTime?
+  reversalReason String?
+  // Client-generated per form-session so a double click books one transfer.
+  idempotencyKey String?
+  createdAt      DateTime  @default(now())
+
+  ledgerEntries LedgerEntry[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId])
+}
+
+// ---------- Scheduled Credits (Receivables) ----------
+
+/// A recurring or one-time money movement — despite the historical name this
+/// covers both income (salary, stipend) and outgoing scheduled payments (rent,
+/// EMIs), distinguished by `direction`. Each due date becomes a
+/// CreditExecution occurrence.
+model ScheduledCredit {
+  id                   String              @id @default(uuid())
+  userId               String
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  direction            ScheduleDirection   @default(INCOME)
+  // SALARY | STIPEND | REFUND | POCKET_MONEY | OTHER_INCOME |
+  // RENT | EMI | SUBSCRIPTION | INSURANCE | FEES | UTILITIES | OTHER_PAYMENT
+  kind                 String              @default("OTHER_INCOME")
+  name                 String
+  notes                String?
+  // PAYMENT schedules book into this budget category.
+  categoryId           String?
+  category             Category?           @relation(fields: [categoryId], references: [id])
+  // Set when this schedule is a loan's EMI plan.
+  loanId               String?             @unique
+  loan                 Loan?               @relation(fields: [loanId], references: [id])
+  amount               Decimal
+  currency             String
+  receivingAccountId   String
+  receivingAccount     Account             @relation(fields: [receivingAccountId], references: [id], onDelete: NoAction)
+  frequency            RecurrenceFrequency
+  customIntervalDays   Int?
+  startDate            DateTime
+  endDate              DateTime?
+  nextExecutionDate    DateTime
+  isActive             Boolean             @default(true)
+  // When true (the default), a due occurrence sits as a PENDING
+  // CreditExecution until the user confirms it — nothing posts to the
+  // ledger or account balance until then. When false, occurrences post
+  // automatically as soon as they're due, as before.
+  requiresConfirmation Boolean             @default(true)
+  // Ended schedules are kept (with their history); this stamps when.
+  cancelledAt          DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  executions CreditExecution[]
+  overrides  ScheduleOverride[]
+
+  @@index([userId])
+  @@index([nextExecutionDate])
+}
+
+/// Moves (or re-prices) one occurrence of a schedule — e.g. a quarterly
+/// stipend that actually lands on 5 Jan, 2 Apr, 9 Jul. Keyed by the nominal
+/// date the recurrence rule produces.
+model ScheduleOverride {
+  id                String          @id @default(uuid())
+  scheduledCreditId String
+  scheduledCredit   ScheduledCredit @relation(fields: [scheduledCreditId], references: [id], onDelete: Cascade)
+  occurrenceDate    DateTime
+  date              DateTime?
+  amount            Decimal?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([scheduledCreditId, occurrenceDate])
+}
+
+model CreditExecution {
+  id                String                @id @default(uuid())
+  scheduledCreditId String
+  scheduledCredit   ScheduledCredit       @relation(fields: [scheduledCreditId], references: [id], onDelete: Cascade)
+  executedDate      DateTime              @default(now()) // effective due date of the occurrence
+  // Nominal date from the recurrence rule (before any override). Unique per
+  // schedule, so an occurrence can never be booked twice.
+  occurrenceDate    DateTime?
+  confirmedAt       DateTime? // when the user confirmed or skipped it
+  reversedAt        DateTime? // when a previously-confirmed credit was reversed
+  amount            Decimal
+  status            CreditExecutionStatus @default(PENDING)
+  note              String?
+  failureReason     String?
+  ledgerEntry       LedgerEntry?
+  loanPayment       LoanPayment?
+
+  @@unique([scheduledCreditId, occurrenceDate])
+  @@index([scheduledCreditId])
+  @@index([status])
+}
+
+// ---------- Budget Planner ----------
+
+model BudgetPlan {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  month       String // "YYYY-MM"
+  // Every amount on this plan (income and lines) is in this currency.
+  currency    String   @default("INR")
+  totalIncome Decimal  @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  allocations BudgetCategoryAllocation[]
+
+  @@unique([userId, month])
+}
+
+model BudgetCategoryAllocation {
+  id           String     @id @default(uuid())
+  budgetPlanId String
+  budgetPlan   BudgetPlan @relation(fields: [budgetPlanId], references: [id], onDelete: Cascade)
+  categoryId   String
+  category     Category   @relation(fields: [categoryId], references: [id], onDelete: NoAction)
+  budgetAmount Decimal
+  sortOrder    Int        @default(0)
+  // Account/card this month's spending in the category is planned from.
+  accountId    String?
+  account      Account?   @relation(fields: [accountId], references: [id])
+  // MANUAL (added for this month) | RECURRING (from a recurring category) |
+  // SCHEDULE (sized from scheduled payments). Once the user edits the amount
+  // it becomes MANUAL and schedule syncs stop overwriting it.
+  source       String     @default("MANUAL")
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  adjustments BudgetAdjustment[]
+
+  @@unique([budgetPlanId, categoryId])
+}
+
+model BudgetAdjustment {
+  id                         String                   @id @default(uuid())
+  budgetCategoryAllocationId String
+  budgetCategoryAllocation   BudgetCategoryAllocation @relation(fields: [budgetCategoryAllocationId], references: [id], onDelete: Cascade)
+  oldAmount                  Decimal
+  newAmount                  Decimal
+  note                       String?
+  changedAt                  DateTime                 @default(now())
+
+  @@index([budgetCategoryAllocationId])
+}
+
+// ---------- Investments ----------
+
+model StockHolding {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticker        String
+  exchange      String?
+  // Aggregate position: quantity is the sum of every lot's quantity, and
+  // avgBuyPrice is the quantity-weighted average of every lot's price.
+  // Individual purchases are preserved in `lots` for the per-purchase detail
+  // view — this row is the derived total, not a single purchase.
+  quantity      Decimal
+  avgBuyPrice   Decimal
+  currency      String
+  purchaseDate  DateTime
+  lastPrice     Decimal?
+  lastPriceAt   DateTime?
+  previousClose Decimal? // prior trading day's close — powers the "today's gain/loss" figure
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  lots StockPurchaseLot[]
+
+  @@index([userId])
+}
+
+model StockPurchaseLot {
+  id             String       @id @default(uuid())
+  stockHoldingId String
+  stockHolding   StockHolding @relation(fields: [stockHoldingId], references: [id], onDelete: Cascade)
+  quantity       Decimal
+  price          Decimal
+  purchaseDate   DateTime
+  createdAt      DateTime     @default(now())
+
+  @@index([stockHoldingId])
+}
+
+model MutualFundHolding {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fundName     String
+  schemeCode   String?
+  units        Decimal
+  avgNav       Decimal
+  currency     String
+  purchaseDate DateTime
+  lastNav      Decimal?
+  lastNavAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // Individual purchases; units/avgNav above are derived from them.
+  lots MutualFundLot[]
+
+  @@index([userId])
+}
+
+model MutualFundLot {
+  id           String            @id @default(uuid())
+  holdingId    String
+  holding      MutualFundHolding @relation(fields: [holdingId], references: [id], onDelete: Cascade)
+  units        Decimal
+  nav          Decimal
+  purchaseDate DateTime
+  createdAt    DateTime          @default(now())
+
+  @@index([holdingId])
+}
+
+model FixedDeposit {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bank            String
+  principal       Decimal
+  interestRate    Decimal
+  startDate       DateTime
+  maturityDate    DateTime
+  currency        String
+  linkedAccountId String?
+  linkedAccount   Account? @relation(fields: [linkedAccountId], references: [id])
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model OtherAsset {
+  id            String         @id @default(uuid())
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assetType     OtherAssetType
+  name          String
+  quantity      Decimal?
+  unit          String?
+  purchasePrice Decimal
+  currentValue  Decimal
+  currency      String
+  purchaseDate  DateTime
+  notes         String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([userId])
+}
+
+// ---------- Currency & FX ----------
+
+model ExchangeRate {
+  id             String           @id @default(uuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  baseCurrency   String
+  targetCurrency String
+  rate           Decimal
+  mode           ExchangeRateMode
+  fetchedAt      DateTime         @default(now())
+
+  @@unique([userId, baseCurrency, targetCurrency, mode])
+}
+
+// ---------- Loans ----------
+
+model Loan {
+  id              String     @id @default(uuid())
+  userId          String
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  principal       Decimal
+  interestRate    Decimal // annual %, reducing-balance EMI
+  installments    Int // number of monthly EMIs
+  emiAmount       Decimal // computed at creation from principal/rate/installments
+  currency        String
+  startDate       DateTime
+  endDate         DateTime // startDate + installments months, computed at creation
+  linkedAccountId String?
+  linkedAccount   Account?   @relation(fields: [linkedAccountId], references: [id])
+  // The auto-created budget category that carries this loan's EMI into every
+  // month's budget automatically (Category.defaultAmount = emiAmount).
+  categoryId      String?
+  category        Category?  @relation(fields: [categoryId], references: [id])
+  status          LoanStatus @default(ACTIVE)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  payments LoanPayment[]
+  schedule ScheduledCredit?
+
+  @@index([userId])
+}
+
+model LoanPayment {
+  id                 String           @id @default(uuid())
+  loanId             String
+  loan               Loan             @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  amount             Decimal
+  principalComponent Decimal
+  interestComponent  Decimal
+  paidOn             DateTime         @default(now())
+  note               String?
+  // Set when the payment was booked from an EMI schedule occurrence.
+  // Reversed payments stay on record but no longer count toward the loan.
+  reversedAt         DateTime?
+  occurrenceId       String?          @unique
+  occurrence         CreditExecution? @relation(fields: [occurrenceId], references: [id])
+  ledgerEntry        LedgerEntry?
+  createdAt          DateTime         @default(now())
+
+  @@index([loanId])
+}
+
+// ---------- Monthly Financial Planner (retired) ----------
+// The Planner UI and API were removed (projections duplicated Budget). The
+// table is kept so existing users' notes stay in their data export.
+
+model MonthlyPlan {
+  id                     String   @id @default(uuid())
+  userId                 String
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  month                  String // "YYYY-MM"
+  projectedIncome        Decimal  @default(0)
+  projectedExpenses      Decimal  @default(0)
+  projectedSavings       Decimal  @default(0)
+  projectedInvestments   Decimal  @default(0)
+  expectedClosingBalance Decimal  @default(0)
+  notes                  String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([userId, month])
+}
+
+// ---------- Net-worth history ----------
+
+model NetWorthSnapshot {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date         DateTime @db.Date
+  cash         Decimal
+  investments  Decimal
+  netWorth     Decimal
+  baseCurrency String
+  createdAt    DateTime @default(now())
+
+  @@unique([userId, date])
+  @@index([userId, date])
+}
+
+// ---------- User-facing audit trail ----------
+
+/// Every consequential money action (closures, reversals, voids, skips,
+/// schedule edits) writes one row, so "what happened and when" is answerable
+/// even for actions that leave no balance change.
+model AuditEvent {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entityType String // account | transfer | expense | schedule | occurrence | budget | loan
+  entityId   String
+  action     String // e.g. "account.close", "transfer.reverse", "occurrence.skip"
+  summary    String
+  detail     Json?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([entityId])
+}
+
+/// Cached 1-year price series for the investments sparklines.
+model PriceHistoryCache {
+  key       String   @id // "stock:RELIANCE.NS" | "mf:119551"
+  points    Json // [{ d: "YYYY-MM-DD", v: number }]
+  fetchedAt DateTime @default(now())
+}
+
+// ---------- Settings ----------
+
+model Setting {
+  id                    String   @id @default(uuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notifyUpcomingCredits Boolean  @default(true)
+  notifyUpcomingBills   Boolean  @default(true)
+  budgetAlertThreshold  Int      @default(90) // percent
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+// ---------- Cron Observability ----------
+
+model PriceUpdateLog {
+  id           String            @id @default(uuid())
+  runAt        DateTime          @default(now())
+  source       String // "yahoo-finance2" | "amfi-nav" | "frankfurter"
+  itemsUpdated Int               @default(0)
+  itemsFailed  Int               @default(0)
+  status       PriceUpdateStatus
+  message      String?
+}

@@ -1,0 +1,62 @@
+# Local or single-server production: Postgres + VAULT.
+#   npm run setup      (choose "Docker"; writes .env.docker with secrets)
+#   docker compose --env-file .env.docker up -d --build
+# The app applies database migrations every time it starts.
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vault}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (npm run setup generates one)}
+      POSTGRES_DB: ${POSTGRES_DB:-vault_db}
+    volumes:
+      - vault-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vault_db}?schema=public
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (npm run setup generates one)}
+      CRON_SECRET: ${CRON_SECRET:-}
+      DEV_USERNAME: ${DEV_USERNAME:-}
+      DEV_PASSWORD: ${DEV_PASSWORD:-}
+      ALLOW_SIGNUP: ${ALLOW_SIGNUP:-true}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      # Behind a reverse proxy (Caddy/nginx) set this to 1; directly exposed, leave "none".
+      TRUST_PROXY: ${TRUST_PROXY:-none}
+
+  # Runs the daily and market-update jobs (what Vercel Cron does on Vercel).
+  cron:
+    image: curlimages/curl:8.10.1
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      CRON_SECRET: ${CRON_SECRET:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        [ -z "$$CRON_SECRET" ] && { echo "CRON_SECRET not set; scheduled jobs disabled."; exec sleep infinity; }
+        while true; do
+          now=$$(date -u +%H:%M)
+          case "$$now" in
+            03:30|05:30|07:30|10:00) curl -fsS -H "Authorization: Bearer $$CRON_SECRET" http://app:3000/api/cron/market-update ;;
+            18:45) curl -fsS -H "Authorization: Bearer $$CRON_SECRET" http://app:3000/api/cron/daily ;;
+          esac
+          s=$$(date -u +%S); s=$${s#0}
+          sleep $$((61 - s))
+        done
+
+volumes:
+  vault-db:

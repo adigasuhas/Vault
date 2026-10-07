@@ -1,0 +1,39 @@
+# Render Blueprint: New → Blueprint → pick this repo.
+# Creates a Postgres database and the web service; you'll be prompted for the
+# values marked `sync: false`. Scheduled jobs: .github/workflows/scheduled-jobs.yml.
+databases:
+  - name: vault-db
+    databaseName: vault_db
+    user: vault
+    plan: free
+
+services:
+  - type: web
+    name: vault
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    # Migrations run at start (preDeployCommand needs a paid plan).
+    startCommand: npx prisma migrate deploy && npx next start -p $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vault-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
+      - key: TRUST_PROXY
+        value: "1"
+      - key: ALLOW_SIGNUP
+        value: "true"
+      - key: NEXT_PUBLIC_APP_URL
+        sync: false
+      - key: DEV_USERNAME
+        sync: false
+      - key: DEV_PASSWORD
+        sync: false

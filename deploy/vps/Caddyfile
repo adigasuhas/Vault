@@ -1,0 +1,8 @@
+# Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+# Replace vault.example.com with your domain, point its DNS A/AAAA record at
+# the server, then: sudo cp Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+# Set TRUST_PROXY=1 in the app's env (Caddy is the one trusted hop).
+vault.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3000
+}
