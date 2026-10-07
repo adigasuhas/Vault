@@ -66,12 +66,14 @@ const lastAttempt = new Map<string, number>();
 export async function ensureFreshRates(userId: string) {
   const user = await db.user.findUnique({ where: { id: userId }, select: { exchangeRateMode: true, baseCurrency: true } });
   if (!user || user.exchangeRateMode !== "AUTOMATIC") return;
-  const latest = await db.exchangeRate.findFirst({
+  // The oldest rate decides: the live primary/secondary rate (fx-live.ts) is
+  // re-saved every few minutes and mustn't make the rest look fresh.
+  const oldest = await db.exchangeRate.findFirst({
     where: { userId, mode: "AUTOMATIC", baseCurrency: user.baseCurrency },
-    orderBy: { fetchedAt: "desc" },
+    orderBy: { fetchedAt: "asc" },
     select: { fetchedAt: true },
   });
-  if (latest && Date.now() - latest.fetchedAt.getTime() < STALE_AFTER_MS) return;
+  if (oldest && Date.now() - oldest.fetchedAt.getTime() < STALE_AFTER_MS) return;
   const last = lastAttempt.get(userId) ?? 0;
   if (Date.now() - last < RETRY_AFTER_MS) return;
   lastAttempt.set(userId, Date.now());

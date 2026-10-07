@@ -69,6 +69,8 @@ export default function SettingsPage() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [pw, setPw] = useState({ current: "", next: "" });
+  const [em, setEm] = useState({ next: "", password: "" });
+  const [emBusy, setEmBusy] = useState(false);
   const [pwBusy, setPwBusy] = useState(false);
   const [deletePw, setDeletePw] = useState("");
   const [sq, setSq] = useState<{ current: string | null; question: string; answer: string; password: string }>({ current: null, question: "", answer: "", password: "" });
@@ -142,6 +144,21 @@ export default function SettingsPage() {
     }
   }
 
+  async function changeEmail(e: React.FormEvent) {
+    e.preventDefault();
+    setEmBusy(true);
+    try {
+      const r = await api<{ email: string }>("/api/auth/change-email", { body: { newEmail: em.next, currentPassword: em.password } });
+      setEm({ next: "", password: "" });
+      toast.success(`Your email is now ${r.email}. Use it to sign in. You've been signed out everywhere else.`);
+      await Promise.all([load(), refreshSession()]);
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setEmBusy(false);
+    }
+  }
+
   async function saveQuestion(e: React.FormEvent) {
     e.preventDefault();
     setSqBusy(true);
@@ -178,7 +195,7 @@ export default function SettingsPage() {
         <Block title="Profile">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5"><Label htmlFor="st-name">Name</Label><Input id="st-name" value={s.name ?? ""} onChange={(e) => set({ name: e.target.value })} /></div>
-            <div className="space-y-1.5"><Label htmlFor="st-email">Email</Label><Input id="st-email" value={s.email} disabled /></div>
+            <div className="space-y-1.5"><Label htmlFor="st-email">Email</Label><Input id="st-email" value={s.email} disabled /><p className="text-xs text-muted-foreground">Change it under <a href="#email" className="underline underline-offset-2 hover:text-foreground">Email</a> below.</p></div>
             <div className="space-y-1.5 sm:col-span-2">
               <Label>Time zone</Label>
               <Select value={s.timezone} onValueChange={(v) => set({ timezone: v })}>
@@ -268,6 +285,16 @@ export default function SettingsPage() {
             </label>
           </div>
         </Block>
+
+        <div id="email" className="scroll-mt-20">
+          <Block title="Email" description="The address you sign in with. Changing it signs you out on every other device.">
+            <form onSubmit={changeEmail} className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+              <div className="space-y-1.5"><Label htmlFor="em-n">New email</Label><Input id="em-n" type="email" autoComplete="email" value={em.next} onChange={(e) => setEm({ ...em, next: e.target.value })} placeholder={s.email} required /></div>
+              <div className="space-y-1.5"><Label htmlFor="em-p">Current password</Label><PasswordInput id="em-p" autoComplete="current-password" value={em.password} onChange={(e) => setEm({ ...em, password: e.target.value })} required /></div>
+              <Button type="submit" variant="outline" disabled={emBusy || !em.next.includes("@") || !em.password}>{emBusy ? "Updating…" : "Update"}</Button>
+            </form>
+          </Block>
+        </div>
 
         <Block title="Password" description="Changing it signs you out on every other device.">
           <form onSubmit={changePassword} className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">

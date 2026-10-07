@@ -37,6 +37,7 @@ export async function GET() {
     scheduleOverrides,
     loanPayments,
     expenseProjects,
+    notebookEntries,
     investmentSales,
   ] = await Promise.all([
     db.user.findUnique({ where: { id: userId } }),
@@ -60,6 +61,7 @@ export async function GET() {
     db.scheduleOverride.findMany({ where: { scheduledCredit: { userId } } }),
     db.loanPayment.findMany({ where: { loan: { userId } } }),
     db.expenseProject.findMany({ where: { userId } }),
+    db.notebookEntry.findMany({ where: { userId }, orderBy: { date: "asc" } }),
     db.investmentSale.findMany({ where: { userId }, orderBy: { soldOn: "asc" } }),
   ]);
 
@@ -88,6 +90,7 @@ export async function GET() {
     categories,
     expenses,
     expenseProjects,
+    notebookEntries,
     transfers,
     scheduledCredits,
     creditExecutions,

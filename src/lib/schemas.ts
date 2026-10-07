@@ -100,6 +100,24 @@ export const expenseProjectSchema = z.object({
 
 export const updateExpenseProjectSchema = expenseProjectSchema.partial().extend({ archived: z.boolean().optional() });
 
+// ---- Notebook ----
+const notebookFields = {
+  title: z.string().trim().min(1, "Say what it was.").max(160),
+  amount: zMoney,
+  currency: CURRENCY,
+  date: zIsoDate,
+  paidBy: z.enum(["ME", "OTHER"]),
+  person: z.string().trim().max(120).nullish(),
+  notes: z.string().trim().max(500).nullish(),
+  projectId: zId.nullish(),
+};
+export const notebookEntrySchema = z.object(notebookFields);
+export const patchNotebookEntrySchema = z.object(notebookFields).partial();
+export const convertNotebookEntrySchema = z.discriminatedUnion("to", [
+  z.object({ to: z.literal("EXPENSE"), accountId: zId, categoryId: zId, date: zIsoDate.optional() }),
+  z.object({ to: z.literal("RECEIVABLE"), accountId: zId, date: zIsoDate }),
+]);
+
 export const closeAccountSchema = z
   .object({
     transferToAccountId: zId.optional(),
@@ -139,6 +157,8 @@ export const createScheduleSchema = z
     kind: KIND,
     name: z.string().trim().min(1, "is required").max(120),
     amount: zMoney,
+    /** Defaults to the account's currency. */
+    currency: CURRENCY.optional(),
     accountId: zId,
     categoryId: zId.nullish(),
     frequency: FREQUENCY,
@@ -157,6 +177,7 @@ export const patchScheduleSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   kind: KIND.optional(),
   amount: zMoney.optional(),
+  currency: CURRENCY.optional(),
   accountId: zId.optional(),
   categoryId: zId.nullish(),
   requiresConfirmation: z.boolean().optional(),
@@ -284,6 +305,8 @@ export const createLoanSchema = z.object({
   /** The user's own EMI. Omitted: computed (an equal split at 0%). */
   emiAmount: zMoney.optional(),
   linkedAccountId: zId.optional(),
+  /** The Notebook entry this loan was made from (marked converted). */
+  notebookEntryId: zId.optional(),
   /** Create the EMI schedule (paid from linkedAccountId) right away. */
   scheduleEmis: z.boolean().optional(),
   requiresConfirmation: z.boolean().optional(),
@@ -292,7 +315,18 @@ export const loanScheduleSchema = z.object({
   accountId: zId,
   requiresConfirmation: z.boolean().default(true),
 });
-export const patchLoanSchema = z.object({ status: z.enum(["ACTIVE", "CLOSED"]) });
+export const patchLoanSchema = z.object({
+  status: z.enum(["ACTIVE", "CLOSED"]).optional(),
+  name: z.string().trim().min(1).max(120).optional(),
+  linkedAccountId: zId.optional(),
+  // Terms: only while nothing has been paid or skipped yet.
+  principal: zMoney.optional(),
+  interestRate: zNonNegative.refine((n) => n <= 100, "must be at most 100%").optional(),
+  installments: zInt.refine((n) => n >= 1 && n <= 600, "out of range").optional(),
+  startDate: zIsoDate.optional(),
+  /** null: back to the computed EMI. */
+  emiAmount: zMoney.nullish(),
+});
 
 // ---- Investment sales ----
 const saleCommon = {

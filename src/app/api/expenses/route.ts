@@ -38,7 +38,8 @@ export const GET = authed(async (req, { userId }) => {
 
 export const POST = authed(async (req, { userId }) => {
   const input = await parseJson(req, createExpenseSchema);
-  if (!input.accountId && !input.oneTime) throw new ValidationError("Choose the account this was paid from.");
+  if (input.oneTime) throw new ValidationError("One-time purchases now go in the Notebook, which keeps them out of your balances and monthly outflow.");
+  if (!input.accountId) throw new ValidationError("Choose the account this was paid from.");
   const [account, category] = await Promise.all([
     input.accountId ? db.account.findFirst({ where: { id: input.accountId, userId } }) : null,
     db.category.findFirst({ where: { id: input.categoryId, userId } }),

@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { api, localMonth, localToday, newKey } from "@/lib/client";
 import { formatMoney, SUPPORTED_CURRENCIES } from "@/lib/currencies";
@@ -18,7 +19,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ConfirmAction } from "@/components/ConfirmAction";
-import { MoreHorizontal, Plus, Receipt, Search, ShoppingBag } from "lucide-react";
+import { MoreHorizontal, Plus, Receipt, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCurrency } from "@/context/CurrencyContext";
 
@@ -40,14 +41,10 @@ interface Expense {
   account: { id: string; name: string; currency: string; status: string } | null;
   project: { id: string; name: string } | null;
 }
-interface Project { id: string; name: string; notes: string | null; archivedAt: string | null; count: number; byCurrency: { currency: string; amount: number }[]; total: number | null; lastDate: string | null }
 interface BudgetLine { categoryId: string; budgetAmount: number; spent: number; accountId: string | null; id: string | null }
 interface BudgetResp { month: string; currency: string; lines: BudgetLine[]; unbudgeted: BudgetLine[]; hasPlan: boolean }
 
 const NEW_CAT = "__new__";
-const NEW_GROUP = "__new_group__";
-const NO_GROUP = "__none__";
-const NO_ACCOUNT = "__no_account__";
 
 function relDay(iso: string) {
   const today = localToday();
@@ -83,10 +80,6 @@ function ExpenseForm({
   onSaved,
   onCancel,
   onCategoryCreated,
-  oneTime = false,
-  projects = [],
-  onProjectCreated,
-  defaultProjectId,
   defaultCategoryId,
 }: {
   accounts: Account[];
@@ -95,26 +88,14 @@ function ExpenseForm({
   onSaved: () => void;
   onCancel?: () => void;
   onCategoryCreated: (c: Category) => void;
-  oneTime?: boolean;
-  projects?: Project[];
-  onProjectCreated?: (p: Project) => void;
-  defaultProjectId?: string | null;
   defaultCategoryId?: string;
 }) {
   const editing = !!initial;
-  const [projectId, setProjectId] = useState(initial?.project?.id ?? defaultProjectId ?? NO_GROUP);
-  const [newGroup, setNewGroup] = useState("");
-  const [countInBudget, setCountInBudget] = useState(initial?.countInBudget ?? false);
-  const [notes, setNotes] = useState(initial?.notes ?? "");
   const [amount, setAmount] = useState(initial ? String(Number(initial.amount)) : "");
   const [date, setDate] = useState(initial ? initial.date.slice(0, 10) : localToday());
   const [categoryId, setCategoryId] = useState(initial?.category.id ?? defaultCategoryId ?? "");
-  // One-time purchases don't have to say how they were paid: no account is
-  // picked for them unless the user chooses one.
-  const [accountId, setAccountId] = useState(initial ? (initial.account?.id ?? NO_ACCOUNT) : oneTime ? NO_ACCOUNT : "");
+  const [accountId, setAccountId] = useState(initial?.account?.id ?? "");
   const { primary } = useCurrency();
-  const [currency, setCurrency] = useState(initial?.currency ?? primary);
-  const noAccount = accountId === NO_ACCOUNT;
   const [description, setDescription] = useState(initial?.description ?? "");
   const [newCat, setNewCat] = useState("");
   const [busy, setBusy] = useState(false);
@@ -126,14 +107,14 @@ function ExpenseForm({
 
   // Pre-select the account the category's budget is paid from.
   useEffect(() => {
-    if (oneTime || touchedAccount.current || !categoryId) return;
+    if (touchedAccount.current || !categoryId) return;
     const line = budget?.lines.find((l) => l.categoryId === categoryId);
     const preferred = line?.accountId ?? categories.find((c) => c.id === categoryId)?.defaultAccountId;
     if (preferred && accounts.some((a) => a.id === preferred)) setAccountId(preferred);
-  }, [categoryId, budget, categories, accounts, oneTime]);
+  }, [categoryId, budget, categories, accounts]);
   useEffect(() => {
-    if (!oneTime && !accountId && accounts[0]) setAccountId(accounts[0].id);
-  }, [accounts, accountId, oneTime]);
+    if (!accountId && accounts[0]) setAccountId(accounts[0].id);
+  }, [accounts, accountId]);
 
   const line = budget ? [...budget.lines, ...budget.unbudgeted].find((l) => l.categoryId === categoryId && l.id) : null;
   // Categories budgeted for the expense's own month come first; everything
@@ -142,7 +123,7 @@ function ExpenseForm({
   const budgetedCats = categories.filter((c) => budgetedIds.has(c.id));
   const otherCats = categories.filter((c) => !budgetedIds.has(c.id));
   const account = accounts.find((a) => a.id === accountId);
-  const cur = account?.currency ?? currency;
+  const cur = account?.currency ?? primary;
   const amt = Number(amount);
   const catName = categories.find((c) => c.id === categoryId)?.name;
   const today = localToday();
@@ -161,32 +142,16 @@ function ExpenseForm({
     }
   }
 
-  async function createGroup() {
-    if (!newGroup.trim()) return;
-    try {
-      const r = await api<{ project: Project }>("/api/expense-projects", { body: { name: newGroup.trim() } });
-      const p = { ...r.project, count: 0, byCurrency: [], total: 0, lastDate: null };
-      onProjectCreated?.(p);
-      setProjectId(p.id);
-      setNewGroup("");
-    } catch (e) {
-      toast.error((e as Error).message);
-    }
-  }
-
-  const groupPending = oneTime && projectId === NEW_GROUP;
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!(amt > 0) || !categoryId || categoryId === NEW_CAT || !accountId || groupPending) return;
-    const payFrom = noAccount ? null : accountId;
-    const extra = oneTime ? { oneTime: true, countInBudget, projectId: projectId === NO_GROUP ? null : projectId, notes: notes.trim() || null } : {};
+    if (!(amt > 0) || !categoryId || categoryId === NEW_CAT || !accountId) return;
     setBusy(true);
     try {
       if (editing) {
-        await api(`/api/expenses/${initial!.id}`, { method: "PATCH", body: { amount: amt, date, categoryId, accountId: payFrom, ...(noAccount ? { currency } : {}), description: description || null, ...extra } });
+        await api(`/api/expenses/${initial!.id}`, { method: "PATCH", body: { amount: amt, date, categoryId, accountId, description: description || null } });
         toast.success("Expense corrected. The original stays on the statement with its reversal.");
       } else {
-        const r = await api<{ duplicate: boolean; loanEmi?: { loanName: string; paidCount: number | null } }>("/api/expenses", { body: { amount: amt, date, categoryId, accountId: payFrom, description: description || undefined, currency: cur, idempotencyKey: key, ...extra, notes: oneTime ? notes.trim() || undefined : undefined } });
+        const r = await api<{ duplicate: boolean; loanEmi?: { loanName: string; paidCount: number | null } }>("/api/expenses", { body: { amount: amt, date, categoryId, accountId, description: description || undefined, currency: cur, idempotencyKey: key } });
         toast.success(
           r.duplicate
             ? "Already logged. We didn't add it twice."
@@ -196,7 +161,6 @@ function ExpenseForm({
         );
         setAmount("");
         setDescription("");
-        setNotes("");
         setKey(newKey());
         amountRef.current?.focus();
       }
@@ -243,27 +207,13 @@ function ExpenseForm({
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label>Paid from{oneTime && <span className="font-normal text-muted-foreground"> (optional)</span>}</Label>
+          <Label>Paid from</Label>
           <Select value={accountId} onValueChange={(v) => { touchedAccount.current = true; setAccountId(v); }}>
             <SelectTrigger className="h-10 w-full"><SelectValue placeholder="Choose account" /></SelectTrigger>
             <SelectContent>
-              {oneTime && (
-                <>
-                  <SelectItem value={NO_ACCOUNT}>Not specified</SelectItem>
-                  {accounts.length > 0 && <SelectSeparator />}
-                </>
-              )}
               {accounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} <span className="text-muted-foreground">· {formatMoney(a.currentBalance, a.currency)}</span></SelectItem>)}
             </SelectContent>
           </Select>
-          {noAccount && (
-            <Select value={currency} onValueChange={setCurrency}>
-              <SelectTrigger className="mt-2 h-9 w-full text-xs" aria-label="Currency"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code} · {c.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          )}
         </div>
       </div>
 
@@ -287,50 +237,14 @@ function ExpenseForm({
           </div>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="x-desc">{oneTime ? "What was it?" : "Note"}</Label>
-          <Input id="x-desc" value={description} onChange={(e) => setDescription(e.target.value)} placeholder={oneTime ? "Sofa, flights, deposit…" : "What was it? (optional)"} />
+          <Label htmlFor="x-desc">Note</Label>
+          <Input id="x-desc" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What was it? (optional)" />
         </div>
       </div>
 
-      {oneTime && (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label>Group <span className="font-normal text-muted-foreground">(optional)</span></Label>
-            <Select value={projectId} onValueChange={setProjectId}>
-              <SelectTrigger className="h-10 w-full"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value={NO_GROUP}>No group</SelectItem>
-                {projects.filter((p) => !p.archivedAt || p.id === projectId).map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
-                <SelectSeparator />
-                <SelectItem value={NEW_GROUP}>+ New group…</SelectItem>
-              </SelectContent>
-            </Select>
-            {projectId === NEW_GROUP && (
-              <div className="flex gap-2 pt-1">
-                <Input autoFocus value={newGroup} onChange={(e) => setNewGroup(e.target.value)} placeholder="Like Liverpool move" onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), createGroup())} />
-                <Button type="button" variant="outline" onClick={createGroup}>Create</Button>
-              </div>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="x-notes">Notes <span className="font-normal text-muted-foreground">(optional)</span></Label>
-            <Input id="x-notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Order number, warranty, who it was for" />
-          </div>
-          <label className="flex cursor-pointer items-start gap-2.5 text-sm sm:col-span-2">
-            <input type="checkbox" className="mt-0.5 accent-[var(--brass)]" checked={countInBudget} onChange={(e) => setCountInBudget(e.target.checked)} />
-            <span>
-              Count toward the {monthLabel(month)} budget
-              <span className="block text-xs text-muted-foreground">Off by default, so one-offs leave your monthly budget alone.</span>
-            </span>
-          </label>
-        </div>
-      )}
-
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
         <div className="min-h-5 text-xs text-muted-foreground">
-          {oneTime && !countInBudget ? (
-            <span>{noAccount ? "No account picked, so no balance changes." : "Paid from your balance."} Not counted in the {monthLabel(month, "short")} budget.</span>
-          ) : categoryId && categoryId !== NEW_CAT && (
+          {categoryId && categoryId !== NEW_CAT && (
             budget === null ? <span>Checking {monthLabel(month, "short")} budget…</span>
             : line ? (
               <span>
@@ -348,8 +262,8 @@ function ExpenseForm({
         </div>
         <div className="flex gap-2">
           {onCancel && <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>}
-          <Button type="submit" disabled={busy || !(amt > 0) || !categoryId || categoryId === NEW_CAT || !accountId || groupPending}>
-            {busy ? "Saving…" : editing ? "Save correction" : oneTime ? "Log purchase" : "Log expense"}
+          <Button type="submit" disabled={busy || !(amt > 0) || !categoryId || categoryId === NEW_CAT || !accountId}>
+            {busy ? "Saving…" : editing ? "Save correction" : "Log expense"}
           </Button>
         </div>
       </div>
@@ -357,321 +271,8 @@ function ExpenseForm({
   );
 }
 
-/** One-off purchases (a sofa, a move, a laptop): they come out of your
- * accounts like any expense but stay off monthly budgets unless opted in,
- * and can be grouped by occasion. */
-function OneTimeView({
-  accounts,
-  categories,
-  onCategoryCreated,
-  onBalancesChanged,
-}: {
-  accounts: Account[];
-  categories: Category[];
-  onCategoryCreated: (c: Category) => void;
-  onBalancesChanged: () => void;
-}) {
-  const [items, setItems] = useState<Expense[] | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [baseCurrency, setBaseCurrency] = useState("GBP");
-  const [error, setError] = useState<string | null>(null);
-  const [group, setGroup] = useState<string>("ALL");
-  const [composer, setComposer] = useState(false);
-  const [editing, setEditing] = useState<Expense | null>(null);
-  const [removing, setRemoving] = useState<Expense | null>(null);
-  const [showRemoved, setShowRemoved] = useState(false);
-  const [renaming, setRenaming] = useState<Project | null>(null);
-  const [newName, setNewName] = useState("");
-
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      const [x, p] = await Promise.all([
-        api<{ expenses: Expense[] }>("/api/expenses?kind=one_time&includeVoided=1"),
-        api<{ projects: Project[]; currency: string }>("/api/expense-projects?includeArchived=1"),
-      ]);
-      setItems(x.expenses);
-      setProjects(p.projects);
-      setBaseCurrency(p.currency);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }, []);
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  const refresh = () => {
-    load();
-    onBalancesChanged();
-  };
-  const visible = (items ?? []).filter((e) => (showRemoved || !e.voidedAt) && (group === "ALL" || (group === NO_GROUP ? !e.project : e.project?.id === group)));
-  const liveTotals = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const e of visible) if (!e.voidedAt) m.set(e.currency, (m.get(e.currency) ?? 0) + Number(e.amount));
-    return [...m.entries()];
-  }, [visible]);
-  const activeProjects = projects.filter((p) => !p.archivedAt);
-  const archivedProjects = projects.filter((p) => p.archivedAt);
-
-  async function remove(e: Expense, reason?: string) {
-    try {
-      await api(`/api/expenses/${e.id}`, { method: "DELETE", body: { reason } });
-      toast.success(e.account ? `Removed. ${formatMoney(e.amount, e.currency)} is back in ${e.account.name}.` : "Removed.");
-      refresh();
-    } catch (err) {
-      toast.error((err as Error).message);
-    }
-  }
-  async function patchProject(p: Project, body: Record<string, unknown>, done: string) {
-    try {
-      await api(`/api/expense-projects/${p.id}`, { method: "PATCH", body });
-      toast.success(done);
-      load();
-    } catch (err) {
-      toast.error((err as Error).message);
-    }
-  }
-  async function deleteProject(p: Project) {
-    try {
-      await api(`/api/expense-projects/${p.id}`, { method: "DELETE" });
-      toast.success(`Deleted ${p.name}.`);
-      if (group === p.id) setGroup("ALL");
-      load();
-    } catch (err) {
-      toast.error((err as Error).message);
-    }
-  }
-
-  const groupTotal = (p: Project) =>
-    p.byCurrency.length === 0 ? (
-      <span className="text-muted-foreground">Nothing yet</span>
-    ) : p.byCurrency.length === 1 ? (
-      <Money value={p.byCurrency[0].amount} currency={p.byCurrency[0].currency} equivalent="below" />
-    ) : p.total != null ? (
-      <>≈ {formatMoney(p.total, baseCurrency)}</>
-    ) : (
-      p.byCurrency.map((b) => formatMoney(b.amount, b.currency)).join(" + ")
-    );
-
-  return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <p className="max-w-xl text-sm text-muted-foreground">
-          For the big or unusual stuff: moving house, a new laptop, a wedding gift. Say which account paid and it comes off that balance; leave it blank and it&apos;s simply recorded. Either way, your monthly budget stays about your monthly life.
-        </p>
-        <Button onClick={() => setComposer((c) => !c)} variant={composer ? "outline" : "default"}>{composer ? "Close" : <><Plus /> Log one-time purchase</>}</Button>
-      </div>
-      {error && <ErrorState message={error} onRetry={load} />}
-
-      {composer && (
-        <Panel className="settle">
-          <ExpenseForm
-            oneTime
-            accounts={accounts}
-            categories={categories}
-            projects={projects}
-            defaultProjectId={group !== "ALL" && group !== NO_GROUP ? group : null}
-            onProjectCreated={(p) => setProjects((ps) => [p, ...ps])}
-            onSaved={refresh}
-            onCategoryCreated={onCategoryCreated}
-          />
-        </Panel>
-      )}
-
-      {activeProjects.length > 0 && (
-        <Section title="Groups" description="Related purchases added up, so you know what the whole thing really cost.">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {activeProjects.map((p) => (
-              <div
-                key={p.id}
-                className={cn(
-                  "group/card relative rounded-xl border bg-card p-4 text-left shadow-card transition-colors",
-                  group === p.id ? "border-foreground/40" : "border-border hover:border-foreground/20"
-                )}
-              >
-                <button type="button" className="absolute inset-0 cursor-pointer rounded-xl" aria-label={`Show purchases in ${p.name}`} onClick={() => setGroup(group === p.id ? "ALL" : p.id)} />
-                <div className="flex items-start justify-between gap-2">
-                  <p className="truncate font-medium">{p.name}</p>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon-sm" className="relative -mt-1 -mr-1" aria-label={`${p.name} actions`}><MoreHorizontal className="h-4 w-4" /></Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => { setRenaming(p); setNewName(p.name); }}>Rename…</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => patchProject(p, { archived: true }, `${p.name} archived. Its purchases stay where they are.`)}>Archive</DropdownMenuItem>
-                      {p.count === 0 && <DropdownMenuItem variant="destructive" onClick={() => deleteProject(p)}>Delete</DropdownMenuItem>}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-                <p className="mt-3 text-xl font-semibold tabular-nums tracking-tight">{groupTotal(p)}</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {p.count} {p.count === 1 ? "purchase" : "purchases"}
-                  {p.lastDate && ` · last ${formatDate(p.lastDate, { day: "numeric", month: "short", year: "numeric" })}`}
-                </p>
-              </div>
-            ))}
-          </div>
-          {archivedProjects.length > 0 && (
-            <p className="mt-3 text-xs text-muted-foreground">
-              Archived:{" "}
-              {archivedProjects.map((p, i) => (
-                <span key={p.id}>
-                  {i > 0 && ", "}
-                  <button className="cursor-pointer underline-offset-4 hover:text-foreground hover:underline" onClick={() => patchProject(p, { archived: false }, `${p.name} is back.`)}>{p.name}</button>
-                </span>
-              ))}
-              . Click one to bring it back.
-            </p>
-          )}
-        </Section>
-      )}
-
-      <Section
-        title="Purchases"
-        description={group === "ALL" ? "Every one-time purchase, newest first." : group === NO_GROUP ? "Purchases that aren't in a group." : `Purchases in ${projects.find((p) => p.id === group)?.name ?? "this group"}.`}
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Select value={group} onValueChange={setGroup}>
-              <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="ALL">All purchases</SelectItem>
-                <SelectItem value={NO_GROUP}>Not in a group</SelectItem>
-                {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.archivedAt ? " (archived)" : ""}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-              <input type="checkbox" className="accent-[var(--brass)]" checked={showRemoved} onChange={(e) => setShowRemoved(e.target.checked)} />
-              Show removed
-            </label>
-          </div>
-        }
-      >
-        <Panel padded={false}>
-          {items === null ? (
-            <div className="space-y-2 p-5">{[0, 1, 2].map((i) => <SkeletonBlock key={i} className="h-10" />)}</div>
-          ) : visible.length === 0 ? (
-            <div className="p-5">
-              <EmptyState icon={<ShoppingBag className="h-5 w-5" />} title={group === "ALL" ? "No one-time purchases yet" : "Nothing in here yet"} action={!composer ? <Button size="sm" variant="outline" onClick={() => setComposer(true)}>Log a purchase</Button> : undefined}>
-                Bought something that isn&apos;t part of a normal month? Log it here and your budget won&apos;t flinch.
-              </EmptyState>
-            </div>
-          ) : (
-            <>
-              <ul className="divide-y divide-border/70">
-                {visible.map((e) => (
-                  <li key={e.id} className={cn("flex items-center gap-3 px-5 py-3", e.voidedAt && "opacity-60")}>
-                    <div className="w-14 shrink-0 text-xs text-muted-foreground tabular-nums">{formatDate(e.date, { day: "numeric", month: "short" })}<span className="block text-[10px]">{e.date.slice(0, 4)}</span></div>
-                    <div className="min-w-0 flex-1">
-                      <p className={cn("truncate text-sm", e.voidedAt && "line-through")}>{e.description || e.category.name}</p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {e.project && <span className="text-foreground/80">{e.project.name} · </span>}
-                        {e.description ? `${e.category.name} · ` : ""}{e.account?.name ?? "No account"}
-                        {e.notes && ` · ${e.notes}`}
-                        {e.voidReason && ` · removed: ${e.voidReason}`}
-                      </p>
-                    </div>
-                    {e.countInBudget && !e.voidedAt && <StatusBadge tone="info">In budget</StatusBadge>}
-                    {e.voidedAt && <StatusBadge tone="neutral">Removed</StatusBadge>}
-                    <Money value={-Number(e.amount)} currency={e.currency} signed tone={e.voidedAt ? "muted" : "plain"} className="text-sm font-medium" />
-                    <div className="w-8">
-                      {!e.voidedAt && e.account?.status !== "CLOSED" && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label="Purchase actions"><MoreHorizontal className="h-4 w-4" /></Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onClick={() => setEditing(e)}>Edit…</DropdownMenuItem>
-                            <DropdownMenuItem variant="destructive" onClick={() => setRemoving(e)}>Remove…</DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-              {liveTotals.length > 0 && (
-                <div className="flex justify-between gap-3 border-t border-border bg-muted/40 px-5 py-2.5 text-sm">
-                  <span className="text-muted-foreground">Total shown</span>
-                  <span className="font-medium tabular-nums">{liveTotals.map(([cur, v]) => formatMoney(v, cur)).join(" + ")}</span>
-                </div>
-              )}
-            </>
-          )}
-        </Panel>
-      </Section>
-
-      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Edit purchase</DialogTitle>
-            <DialogDescription>Saving books a correction: the original is reversed on the statement and the corrected purchase is recorded.</DialogDescription>
-          </DialogHeader>
-          {editing && (
-            <ExpenseForm
-              oneTime
-              accounts={accounts}
-              categories={categories}
-              projects={projects}
-              initial={editing}
-              onProjectCreated={(p) => setProjects((ps) => [p, ...ps])}
-              onSaved={() => { setEditing(null); refresh(); }}
-              onCancel={() => setEditing(null)}
-              onCategoryCreated={onCategoryCreated}
-            />
-          )}
-          <DialogFooter className="hidden" />
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={!!renaming} onOpenChange={(o) => !o && setRenaming(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Rename group</DialogTitle>
-            <DialogDescription>Purchases in it move along with it.</DialogDescription>
-          </DialogHeader>
-          <form
-            onSubmit={(ev) => {
-              ev.preventDefault();
-              if (renaming && newName.trim()) patchProject(renaming, { name: newName.trim() }, "Renamed.").then(() => setRenaming(null));
-            }}
-            className="space-y-4"
-          >
-            <Input autoFocus value={newName} onChange={(ev) => setNewName(ev.target.value)} aria-label="Group name" />
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setRenaming(null)}>Cancel</Button>
-              <Button type="submit" disabled={!newName.trim()}>Save</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      <ConfirmAction
-        open={!!removing}
-        onOpenChange={(o) => !o && setRemoving(null)}
-        title="Remove this purchase?"
-        withReason="Reason"
-        description={
-          removing && (
-            <>
-              <p>
-                {removing.description || removing.category.name} · {formatMoney(removing.amount, removing.currency)} on {formatDate(removing.date)}.{removing.account ? <> The amount goes back to <b className="text-foreground">{removing.account.name}</b>.</> : null}
-              </p>
-              <p>The entry stays on the statement, struck through, with a reversal next to it.</p>
-            </>
-          )
-        }
-        confirmLabel="Remove purchase"
-        onConfirm={(reason) => remove(removing!, reason)}
-      />
-    </div>
-  );
-}
-
 export default function ExpensesPage() {
   const search = useSearchParams();
-  const router = useRouter();
-  const tab = search.get("tab") === "one-time" ? "one_time" : "monthly";
   const [month, setMonth] = useState(localMonth());
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -772,33 +373,6 @@ export default function ExpensesPage() {
     loadRefs();
   };
 
-  const tabs = (
-    <div className="settle -mt-2 flex gap-1 border-b border-border" role="tablist">
-      {(["monthly", "one_time"] as const).map((t) => (
-        <button
-          key={t}
-          role="tab"
-          aria-selected={tab === t}
-          onClick={() => router.replace(t === "monthly" ? "/expenses" : "/expenses?tab=one-time", { scroll: false })}
-          className={cn("relative -mb-px h-10 cursor-pointer px-3 text-sm transition-colors", tab === t ? "font-medium text-foreground" : "text-muted-foreground hover:text-foreground")}
-        >
-          {t === "monthly" ? "Monthly" : "One-time"}
-          {tab === t && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-brass" />}
-        </button>
-      ))}
-    </div>
-  );
-
-  if (tab === "one_time") {
-    return (
-      <div className="space-y-8">
-        <PageHeader title="Expenses" description="One-off purchases, kept apart from your monthly budget." />
-        {tabs}
-        <OneTimeView accounts={accounts} categories={categories} onCategoryCreated={(c) => setCategories((cs) => [...cs, c])} onBalancesChanged={() => loadRefs()} />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-8">
       <PageHeader
@@ -806,7 +380,6 @@ export default function ExpensesPage() {
         description="Log what you spend, on any date. Each expense counts toward the budget for its own month."
         actions={<Button onClick={() => setComposer((c) => !c)} variant={composer ? "outline" : "default"}>{composer ? "Close" : <><Plus /> Log expense</>}</Button>}
       />
-      {tabs}
       {error && <ErrorState message={error} onRetry={refreshAll} />}
 
       {composer && (
@@ -918,7 +491,7 @@ export default function ExpensesPage() {
               ) : (
                 totals.byCur.map(([cur, v]) => <p key={cur} className="mt-1.5 text-xl font-semibold tabular-nums">{formatMoney(v, cur)}</p>)
               )}
-              <p className="mt-1 text-xs text-muted-foreground">{live.length} {live.length === 1 ? "expense" : "expenses"}. One-time purchases are on their own tab.</p>
+              <p className="mt-1 text-xs text-muted-foreground">{live.length} {live.length === 1 ? "expense" : "expenses"}. Money spent outside your monthly routine goes in the <Link href="/notebook" className="underline underline-offset-2 hover:text-foreground">Notebook</Link>.</p>
               {totals.top.length > 0 && (
                 <ul className="mt-4 space-y-2 border-t border-border pt-4 text-xs">
                   {totals.top.map((t) => (

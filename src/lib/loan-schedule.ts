@@ -52,3 +52,23 @@ export async function createEmiSchedule(
   await tx.loan.update({ where: { id: loan.id }, data: { linkedAccountId: input.accountId } });
   return schedule;
 }
+
+/** The budget category for a loan named `name` ("Loan: <name>"). A category
+ * left behind by a deleted loan of the same name is reused rather than
+ * blocking the new one. */
+export async function loanCategory(
+  tx: Tx,
+  userId: string,
+  name: string,
+  data: { isDefault: boolean; defaultAmount: number; defaultSince: string }
+) {
+  const catName = `Loan: ${name}`;
+  const existing = await tx.category.findFirst({ where: { userId, name: catName } });
+  if (existing) {
+    const owner = await tx.loan.findFirst({ where: { userId, categoryId: existing.id }, select: { id: true } });
+    if (owner) throw new ValidationError(`You already have a loan called ${name}.`);
+    return tx.category.update({ where: { id: existing.id }, data });
+  }
+  const max = await tx.category.aggregate({ where: { userId }, _max: { sortOrder: true } });
+  return tx.category.create({ data: { userId, name: catName, ...data, sortOrder: (max._max.sortOrder ?? -1) + 1 } });
+}

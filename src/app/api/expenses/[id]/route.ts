@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
  * corrected one booked, in one transaction. */
 export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   const input = await parseJson(req, amendExpenseSchema);
+  if (input.oneTime) throw new ValidationError("One-time purchases now go in the Notebook.");
   const current = await db.expense.findFirst({ where: { id: params.id, userId }, select: { categoryId: true } });
   if (input.categoryId && current && input.categoryId !== current.categoryId && (await db.loan.findFirst({ where: { categoryId: input.categoryId, userId }, select: { id: true } }))) {
     throw new ValidationError("An expense can't be moved into a loan's category. Remove it and log the EMI as a new expense instead, so the loan records the payment.");

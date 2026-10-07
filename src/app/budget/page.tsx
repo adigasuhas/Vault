@@ -313,9 +313,9 @@ export default function BudgetPage() {
   }
   async function openSchedule(scheduleId: string) {
     try {
-      const d = await api<{ schedule: { id: string; kind: string; name: string; amount: number; receivingAccountId: string; categoryId: string | null; frequency: ScheduleFormValue["frequency"]; customIntervalDays: number | null; nextExecutionDate: string; endDate: string | null; requiresConfirmation: boolean; notes: string | null } }>(`/api/schedules/${scheduleId}`);
+      const d = await api<{ schedule: { id: string; kind: string; name: string; amount: number; currency: string; receivingAccountId: string; categoryId: string | null; frequency: ScheduleFormValue["frequency"]; customIntervalDays: number | null; nextExecutionDate: string; endDate: string | null; requiresConfirmation: boolean; notes: string | null } }>(`/api/schedules/${scheduleId}`);
       const s = d.schedule;
-      setScheduleEdit({ id: s.id, kind: s.kind, name: s.name, amount: s.amount, accountId: s.receivingAccountId, categoryId: s.categoryId, frequency: s.frequency, customIntervalDays: s.customIntervalDays, startDate: s.nextExecutionDate.slice(0, 10), endDate: s.endDate?.slice(0, 10) ?? null, requiresConfirmation: s.requiresConfirmation, notes: s.notes });
+      setScheduleEdit({ id: s.id, kind: s.kind, name: s.name, amount: s.amount, currency: s.currency, accountId: s.receivingAccountId, categoryId: s.categoryId, frequency: s.frequency, customIntervalDays: s.customIntervalDays, startDate: s.nextExecutionDate.slice(0, 10), endDate: s.endDate?.slice(0, 10) ?? null, requiresConfirmation: s.requiresConfirmation, notes: s.notes });
     } catch (e) {
       toast.error((e as Error).message);
     }

@@ -4,11 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { api, localToday } from "@/lib/client";
 import { formatMoney } from "@/lib/currencies";
+import { useCurrency } from "@/context/CurrencyContext";
 import { defaultStartDate, isoDate, neighbours, nthOccurrence, type Frequency } from "@/lib/dates";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { FxTicker } from "@/components/app/FxTicker";
 import { cn } from "@/lib/utils";
 
 export const KINDS = {
@@ -60,6 +62,8 @@ export interface ScheduleFormValue {
   kind: string;
   name: string;
   amount: number;
+  /** The amount's currency; may differ from the account's (converted when booked). */
+  currency?: string;
   accountId: string;
   categoryId: string | null;
   frequency: Frequency;
@@ -96,6 +100,9 @@ export function ScheduleForm({
   const [nameTouched, setNameTouched] = useState(!!initial);
   const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
   const [accountId, setAccountId] = useState(initial?.accountId ?? accounts[0]?.id ?? "");
+  // "" follows the account's currency.
+  const [currency, setCurrency] = useState(initial?.currency ?? "");
+  const fx = useCurrency();
   const [categoryId, setCategoryId] = useState<string | null>(initial?.categoryId ?? null);
   const [frequency, setFrequency] = useState<Frequency>(initial?.frequency ?? "MONTHLY");
   const [customDays, setCustomDays] = useState(String(initial?.customIntervalDays ?? 30));
@@ -125,6 +132,12 @@ export function ScheduleForm({
 
   const account = accounts.find((a) => a.id === accountId);
   const amt = Number(amount);
+  const cur = currency || account?.currency || fx.primary;
+  const currencyChoices = [...new Set([account?.currency, fx.primary, fx.secondary, cur].filter((c): c is string => !!c))];
+  // Today's rate from the amount's currency into the account's.
+  const crossRate = account && cur !== account.currency && fx.toPrimary[cur] != null && (account.currency === fx.primary || fx.toPrimary[account.currency])
+    ? (fx.toPrimary[cur] as number) / (account.currency === fx.primary ? 1 : (fx.toPrimary[account.currency] as number))
+    : null;
   const rule = useMemo(
     () => ({ startDate: new Date(startDate || today), frequency, customIntervalDays: Number(customDays) || 30 }),
     [startDate, frequency, customDays, today]
@@ -176,6 +189,7 @@ export function ScheduleForm({
       kind,
       name: name.trim(),
       amount: amt,
+      currency: cur,
       accountId,
       categoryId: direction === "PAYMENT" ? categoryId : null,
       frequency,
@@ -245,8 +259,21 @@ export function ScheduleForm({
           <Input id="s-name" required value={name} onChange={(e) => { setNameTouched(true); setName(e.target.value); }} placeholder={direction === "INCOME" ? "Monthly salary" : "Rent, Flat 4B"} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="s-amt">Amount{account ? ` (${account.currency})` : ""}</Label>
-          <Input id="s-amt" type="number" inputMode="decimal" min="0" step="0.01" required value={amount} onChange={(e) => setAmount(e.target.value)} className="tabular-nums" />
+          <Label htmlFor="s-amt">Amount</Label>
+          <div className="flex gap-1.5">
+            <Input id="s-amt" type="number" inputMode="decimal" min="0" step="0.01" required value={amount} onChange={(e) => setAmount(e.target.value)} className="tabular-nums" />
+            <Select value={cur} onValueChange={setCurrency}>
+              <SelectTrigger className="w-[86px] shrink-0" aria-label="Currency"><SelectValue /></SelectTrigger>
+              <SelectContent>{currencyChoices.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
+          {account && cur !== account.currency && (
+            <p className="text-[11px] text-muted-foreground">
+              {crossRate != null && amt > 0 ? <>≈ {formatMoney(amt * crossRate, account.currency)} at today&apos;s rate. </> : null}
+              Converted into {account.currency} when it&apos;s booked; you can enter the exact amount when you confirm.
+              <FxTicker compact className="mt-1 flex" />
+            </p>
+          )}
         </div>
       </div>
 
@@ -387,7 +414,7 @@ export function ScheduleForm({
 
       <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
         <p className="text-xs text-muted-foreground">
-          {amt > 0 && account && frequency !== "ONE_TIME" && `${formatMoney(amt, account.currency)} · ${frequencyLabel(frequency, Number(customDays)).toLowerCase()}`}
+          {amt > 0 && account && frequency !== "ONE_TIME" && `${formatMoney(amt, cur)} · ${frequencyLabel(frequency, Number(customDays)).toLowerCase()}`}
         </p>
         <div className="flex gap-2">
           <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>

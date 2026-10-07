@@ -3,22 +3,15 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { toast } from "sonner";
-import { useSession } from "@/context/SessionContext";
-import { api, localToday } from "@/lib/client";
-import { formatMoney, SUPPORTED_CURRENCIES } from "@/lib/currencies";
+import { api } from "@/lib/client";
+import { formatMoney } from "@/lib/currencies";
 import { formatDate } from "@/lib/format";
-import { amortizationSchedule, computeEmi, monthsBetween } from "@/lib/loans";
-import { addMonthsUTC } from "@/lib/dates";
 import { PageHeader, Section, EmptyState, SkeletonBlock } from "@/components/app/PageHeader";
 import { StatusBadge } from "@/components/app/StatusBadge";
 import { SchedulesBoard } from "@/components/schedules/SchedulesBoard";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Landmark, Plus } from "lucide-react";
+import { LoanDialog } from "@/components/loans/LoanDialog";
 import { cn } from "@/lib/utils";
 import { Equivalent } from "@/components/app/Money";
 
@@ -35,162 +28,6 @@ interface Loan {
   schedule: { id: string; isActive: boolean; requiresConfirmation: boolean; nextExecutionDate: string } | null;
   progress: { paidCount: number; totalInstallments: number; outstandingPrincipal: number; percentPaid: number; nextDue: { dueDate: string; emi: number } | null };
 }
-interface Account { id: string; name: string; currency: string; status: string }
-
-function LoanDialog({ open, onOpenChange, onDone }: { open: boolean; onOpenChange: (o: boolean) => void; onDone: () => void }) {
-  const { user } = useSession();
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [f, setF] = useState({ name: "", principal: "", rate: "", installments: "", startDate: localToday(), endDate: "", emi: "", currency: user?.baseCurrency ?? "INR", accountId: "", schedule: true, confirm: true });
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (open) api<{ accounts: Account[] }>("/api/accounts").then((d) => setAccounts(d.accounts.filter((a) => a.status !== "CLOSED")));
-  }, [open]);
-  const months = Number(f.installments);
-  // Default EMI: the computed one, an equal split of the amount when the rate is 0.
-  const autoEmi = Number(f.principal) > 0 && months > 0 ? Math.round(computeEmi(Number(f.principal), Number(f.rate) || 0, months) * 100) / 100 : 0;
-  const customEmi = f.emi !== "" && Number(f.emi) > 0 ? Number(f.emi) : null;
-  const emi = customEmi ?? autoEmi;
-  const rows = emi > 0 ? amortizationSchedule(Number(f.principal), Number(f.rate) || 0, months, new Date(`${f.startDate}T00:00:00Z`), emi) : [];
-  const lastEmi = rows.length ? rows[rows.length - 1].emi : 0;
-  const totalPaid = rows.reduce((t, r) => t + r.emi, 0);
-  const endFrom = (start: string, n: number) => (start && n > 0 ? addMonthsUTC(new Date(`${start}T00:00:00Z`), n).toISOString().slice(0, 10) : "");
-  const setMonths = (v: string) => setF({ ...f, installments: v, endDate: endFrom(f.startDate, Number(v)) });
-  const setStart = (v: string) => setF({ ...f, startDate: v, endDate: endFrom(v, months) });
-  const setEnd = (v: string) => {
-    const n = v && f.startDate ? monthsBetween(new Date(`${f.startDate}T00:00:00Z`), new Date(`${v}T00:00:00Z`)) : 0;
-    setF({ ...f, endDate: v, installments: n > 0 ? String(n) : "" });
-  };
-  const sameCur = accounts.filter((a) => a.currency === f.currency);
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      await api("/api/loans", {
-        body: {
-          name: f.name,
-          principal: Number(f.principal),
-          interestRate: Number(f.rate) || 0,
-          installments: months,
-          emiAmount: customEmi ?? undefined,
-          currency: f.currency,
-          startDate: f.startDate,
-          linkedAccountId: f.accountId || undefined,
-          scheduleEmis: f.schedule && !!f.accountId,
-          requiresConfirmation: f.confirm,
-        },
-      });
-      toast.success(`${f.name} added${f.schedule && f.accountId ? " with its EMI schedule" : ""}.`);
-      onOpenChange(false);
-      onDone();
-    } catch (err) {
-      toast.error((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
-      <DialogContent className="sm:max-w-lg">
-        <form onSubmit={submit} className="space-y-4">
-          <DialogHeader>
-            <DialogTitle>Add a loan</DialogTitle>
-            <DialogDescription>Education loan, a laptop on EMI, a personal loan. Enter the amount and dates: VAULT splits it into equal monthly EMIs, which you can change.</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-3 sm:grid-cols-[1.4fr_1fr]">
-            <div className="space-y-1.5">
-              <Label htmlFor="l-name">Name</Label>
-              <Input id="l-name" required value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="SBI education loan" />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Currency</Label>
-              <Select value={f.currency} onValueChange={(v) => setF({ ...f, currency: v, accountId: "" })}>
-                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>{SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="l-p">Loan amount</Label>
-              <Input id="l-p" type="number" min="0" step="0.01" required value={f.principal} onChange={(e) => setF({ ...f, principal: e.target.value })} />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="l-r">Interest (% / yr)</Label>
-              <Input id="l-r" type="number" min="0" step="0.01" value={f.rate} onChange={(e) => setF({ ...f, rate: e.target.value })} placeholder="0 (none)" />
-            </div>
-          </div>
-          <div className="grid grid-cols-[1fr_1fr_0.7fr] gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="l-s">Loan start</Label>
-              <Input id="l-s" type="date" value={f.startDate} onChange={(e) => setStart(e.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="l-e">Last EMI</Label>
-              <Input id="l-e" type="date" min={endFrom(f.startDate, 1)} value={f.endDate} onChange={(e) => setEnd(e.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="l-n">Months</Label>
-              <Input id="l-n" type="number" min="1" max="600" required value={f.installments} onChange={(e) => setMonths(e.target.value)} />
-            </div>
-          </div>
-          <p className="-mt-2 text-[11px] text-muted-foreground">First EMI falls a month after the start. Set the last EMI date or the number of months.</p>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="l-emi">Monthly EMI</Label>
-              <Input id="l-emi" type="number" min="0" step="0.01" value={f.emi === "" ? (autoEmi ? String(autoEmi) : "") : f.emi} onChange={(e) => setF({ ...f, emi: e.target.value })} />
-              {customEmi != null && Math.abs(customEmi - autoEmi) > 0.005 ? (
-                <button type="button" className="cursor-pointer text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground" onClick={() => setF({ ...f, emi: "" })}>
-                  Back to {Number(f.rate) > 0 ? "the calculated EMI" : "an equal split"} ({formatMoney(autoEmi, f.currency)})
-                </button>
-              ) : (
-                <p className="text-[11px] text-muted-foreground">{Number(f.rate) > 0 ? "Calculated from the rate." : "Amount split equally."} Change it if your lender bills differently.</p>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <Label>EMIs paid from</Label>
-              <Select value={f.accountId} onValueChange={(v) => setF({ ...f, accountId: v })}>
-                <SelectTrigger className="w-full"><SelectValue placeholder="Choose account" /></SelectTrigger>
-                <SelectContent>{sameCur.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-          </div>
-          {rows.length > 0 && (
-            <div className="space-y-0.5 rounded-lg bg-muted px-4 py-3 text-sm">
-              <p>
-                {rows.length > 1 && Math.abs(lastEmi - emi) > 0.005 ? (
-                  <><span className="font-semibold tabular-nums">{formatMoney(emi, f.currency)}</span> × {rows.length - 1}, then <span className="font-semibold tabular-nums">{formatMoney(lastEmi, f.currency)}</span> last</>
-                ) : (
-                  <><span className="font-semibold tabular-nums">{formatMoney(emi, f.currency)}</span> × {rows.length}</>
-                )}
-                {" · "}<span className="text-muted-foreground">{Number(f.rate) > 0 ? `total interest ${formatMoney(Math.round(totalPaid - Number(f.principal)), f.currency)}` : `total ${formatMoney(Math.round(totalPaid), f.currency)}`}</span>
-              </p>
-              {rows.length < months && <p className="text-xs text-warning">At this EMI the loan is paid off in {rows.length} months, not {months}.</p>}
-              {customEmi != null && rows.length > 1 && lastEmi > emi * 1.5 && <p className="text-xs text-warning">This EMI leaves a large final payment.</p>}
-            </div>
-          )}
-          <label className={cn("flex gap-2.5 rounded-lg border p-3", f.accountId ? "cursor-pointer border-border" : "border-border opacity-60")}>
-            <input type="checkbox" disabled={!f.accountId} className="mt-0.5 accent-[var(--brass)]" checked={f.schedule && !!f.accountId} onChange={(e) => setF({ ...f, schedule: e.target.checked })} />
-            <span>
-              <span className="block text-sm">Track EMIs as scheduled payments</span>
-              <span className="block text-xs text-muted-foreground">Each EMI from today on appears in its month&apos;s budget and in the list below. Past EMIs can be recorded on the loan page.</span>
-            </span>
-          </label>
-          {f.schedule && f.accountId && (
-            <label className="flex cursor-pointer items-center gap-2 pl-1 text-xs text-muted-foreground">
-              <input type="checkbox" className="accent-[var(--brass)]" checked={!f.confirm} onChange={(e) => setF({ ...f, confirm: !e.target.checked })} />
-              Book EMIs automatically on the due date (otherwise you confirm each)
-            </label>
-          )}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={busy || !f.name.trim() || !(Number(f.principal) > 0) || !(Number(f.installments) > 0)}>{busy ? "Adding…" : "Add loan"}</Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 function LoansSection({ onNew }: { onNew: () => void }) {
   const [loans, setLoans] = useState<Loan[] | null>(null);
   const load = useCallback(() => api<{ loans: Loan[] }>("/api/loans").then((d) => setLoans(d.loans)).catch(() => setLoans([])), []);

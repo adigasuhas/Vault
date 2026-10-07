@@ -80,8 +80,8 @@ describe("projectSchedule", () => {
         ...base,
         overrides: [{ id: "o", scheduledCreditId: "s1", occurrenceDate: d("2026-10-05"), date: d("2026-10-12"), amount: 40000 as never, createdAt: new Date(), updatedAt: new Date() }],
         executions: [
-          { id: "x1", scheduledCreditId: "s1", executedDate: d("2026-01-05"), occurrenceDate: d("2026-01-05"), confirmedAt: new Date(), reversedAt: null, amount: 36500 as never, status: "CONFIRMED", note: null, failureReason: null },
-          { id: "x2", scheduledCreditId: "s1", executedDate: d("2026-04-05"), occurrenceDate: d("2026-04-05"), confirmedAt: new Date(), reversedAt: null, amount: 37000 as never, status: "SKIPPED", note: null, failureReason: null },
+          { id: "x1", scheduledCreditId: "s1", executedDate: d("2026-01-05"), occurrenceDate: d("2026-01-05"), confirmedAt: new Date(), reversedAt: null, amount: 36500 as never, status: "CONFIRMED", note: null, failureReason: null, bookedAmount: null, bookedCurrency: null },
+          { id: "x2", scheduledCreditId: "s1", executedDate: d("2026-04-05"), occurrenceDate: d("2026-04-05"), confirmedAt: new Date(), reversedAt: null, amount: 37000 as never, status: "SKIPPED", note: null, failureReason: null, bookedAmount: null, bookedCurrency: null },
         ],
       },
       d("2026-01-01"),

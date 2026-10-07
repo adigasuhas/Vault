@@ -4,6 +4,7 @@ import React, { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useSession } from "@/context/SessionContext";
+import { FxTicker } from "@/components/app/FxTicker";
 import { Logo } from "@/components/brand/Logo";
 import { RemindersBell } from "@/components/app/RemindersBell";
 import { cn } from "@/lib/utils";
@@ -25,6 +26,7 @@ import {
   Plus,
   PanelLeftClose,
   PanelLeftOpen,
+  NotebookPen,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -50,6 +52,7 @@ const NAV: { heading: string | null; items: Item[] }[] = [
     items: [
       { href: "/budget", label: "Budget", icon: PiggyBank },
       { href: "/expenses", label: "Expenses", icon: Receipt },
+      { href: "/notebook", label: "Notebook", icon: NotebookPen },
     ],
   },
   {
@@ -255,6 +258,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         </nav>
 
         <div className="border-t border-sidebar-border p-2.5">
+          <FxTicker className="mb-2 px-1.5 md:hidden" />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button className={cn("flex w-full cursor-pointer items-center gap-2.5 rounded-lg p-1.5 text-left transition-colors hover:bg-sidebar-accent", collapsed && "md:justify-center")}>
@@ -292,6 +296,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         </header>
 
         <div className="sticky top-0 z-30 hidden h-14 items-center justify-end gap-2 border-b border-border/70 bg-background/80 px-8 backdrop-blur-md md:flex">
+          <FxTicker className="mr-auto" />
           <RemindersBell align="end" />
           {quickAdd}
         </div>

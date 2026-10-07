@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { toast } from "sonner";
 import { api, localMonth, localToday } from "@/lib/client";
 import { formatMoney } from "@/lib/currencies";
+import { useCurrency } from "@/context/CurrencyContext";
 import { formatDate } from "@/lib/format";
 import { monthLabel } from "@/lib/dates";
 import { Panel, Section, EmptyState, SkeletonBlock, ErrorState } from "@/components/app/PageHeader";
@@ -21,6 +22,7 @@ import { CalendarClock, Check, MoreHorizontal, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Occurrence } from "@/lib/schedules";
 import { Equivalent } from "@/components/app/Money";
+import { FxTicker } from "@/components/app/FxTicker";
 
 interface Account { id: string; name: string; currency: string; status: string; currentBalance: string }
 interface Category { id: string; name: string }
@@ -56,16 +58,35 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
   const [date, setDate] = useState("");
   const [accountId, setAccountId] = useState("");
   const [busy, setBusy] = useState(false);
+  const fx = useCurrency();
+  // The schedule's amount expressed in `to` at today's rate (null: no rate).
+  const inCurrency = (o: Occurrence, to: string) => {
+    if (o.currency === to) return o.amount;
+    const from = o.currency === fx.primary ? 1 : fx.toPrimary[o.currency];
+    const into = to === fx.primary ? 1 : fx.toPrimary[to];
+    return from != null && into ? Math.round(((o.amount * from) / into) * 100) / 100 : null;
+  };
+  const pickAccount = (o: Occurrence, id: string) => {
+    setAccountId(id);
+    const cur = accounts.find((a) => a.id === id)?.currency ?? o.currency;
+    const v = inCurrency(o, cur);
+    setAmount(v == null ? "" : String(v));
+  };
   useEffect(() => {
     if (occ) {
-      setAmount(String(occ.amount));
       setDate(occ.date > localToday() ? localToday() : occ.date);
-      setAccountId(occ.accountId);
+      pickAccount(occ, occ.accountId);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [occ]);
   if (!occ) return null;
   const income = occ.direction === "INCOME";
-  const sameCurrency = accounts.filter((a) => a.currency === occ.currency);
+  // A loan's EMI stays in the loan's currency; anything else can be paid
+  // from (or into) an account in another currency, converted.
+  const choices = occ.kind === "EMI" ? accounts.filter((a) => a.currency === occ.currency) : accounts;
+  const accountCur = accounts.find((a) => a.id === accountId)?.currency ?? occ.currency;
+  const cross = accountCur !== occ.currency;
+  const expected = inCurrency(occ, accountCur);
   async function submit() {
     setBusy(true);
     try {
@@ -89,7 +110,7 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="c-amt">Amount ({occ.currency})</Label>
+              <Label htmlFor="c-amt">Amount ({accountCur})</Label>
               <Input id="c-amt" type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className="tabular-nums" />
             </div>
             <div className="space-y-1.5">
@@ -99,15 +120,22 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
           </div>
           <div className="space-y-1.5">
             <Label>{income ? "Into" : "From"}</Label>
-            <Select value={accountId} onValueChange={setAccountId}>
+            <Select value={accountId} onValueChange={(v) => pickAccount(occ, v)}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {sameCurrency.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {formatMoney(a.currentBalance, a.currency)}</SelectItem>)}
+                {choices.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {formatMoney(a.currentBalance, a.currency)}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
-          {Number(amount) > 0 && Number(amount) !== occ.amount && (
-            <p className="text-xs text-warning">Differs from the scheduled {formatMoney(occ.amount, occ.currency)}. The amount you enter here is what gets booked.</p>
+          {cross ? (
+            <p className="text-xs text-muted-foreground">
+              Scheduled as {formatMoney(occ.amount, occ.currency)}{expected != null ? <>, about {formatMoney(expected, accountCur)} at today&apos;s rate</> : null}. Enter the {accountCur} amount that actually {income ? "arrived" : "left the account"}.
+              <FxTicker compact className="mt-1 flex" />
+            </p>
+          ) : (
+            Number(amount) > 0 && Number(amount) !== occ.amount && (
+              <p className="text-xs text-warning">Differs from the scheduled {formatMoney(occ.amount, occ.currency)}. The amount you enter here is what gets booked.</p>
+            )
           )}
         </div>
         <DialogFooter>
@@ -281,6 +309,7 @@ export function SchedulesBoard({
       name: s.name,
       amount: s.amount,
       accountId: s.receivingAccount.id,
+      currency: s.currency,
       categoryId: s.categoryId,
       frequency: s.frequency as ScheduleFormValue["frequency"],
       customIntervalDays: s.customIntervalDays,

@@ -232,7 +232,7 @@ async function processSchedule(tx: Tx, scheduleId: string, today: Date) {
         });
         r.pending++;
       } else {
-        const problem = await autoPostProblem(tx, s, amount);
+        const { problem, booked } = await autoPostProblem(tx, s, amount);
         const x = await tx.creditExecution.create({
           data: {
             scheduledCreditId: s.id,
@@ -247,7 +247,7 @@ async function processSchedule(tx: Tx, scheduleId: string, today: Date) {
         if (problem) {
           r.failed++;
         } else {
-          await postOccurrence(tx, s, { id: x.id, amount, date: effective });
+          await postOccurrence(tx, s, { id: x.id, amount, date: effective, booked: booked ?? undefined });
           r.executed++;
         }
       }
@@ -266,26 +266,42 @@ async function processSchedule(tx: Tx, scheduleId: string, today: Date) {
   return r;
 }
 
+/** `amount` in `from` converted into `to` at the user's current rate,
+ * rounded to the cent; null when no rate is known. */
+export async function convertForAccount(tx: Tx, userId: string, amount: number, from: string, to: string): Promise<number | null> {
+  if (from === to) return amount;
+  const fx = await createFxConverter(userId, to, { refresh: false, client: tx });
+  const v = fx.convertTo(amount, from, to);
+  return v == null ? null : Math.round(v * 100) / 100;
+}
+
 /** Why an auto-post would fail, checked up front — a throw inside the
- * transaction would abort the whole schedule run. */
-async function autoPostProblem(tx: Tx, s: ScheduledCredit, amount: number): Promise<string | null> {
+ * transaction would abort the whole schedule run. For a schedule in another
+ * currency than its account, also works out the amount to book. */
+async function autoPostProblem(tx: Tx, s: ScheduledCredit, amount: number): Promise<{ problem: string | null; booked: number | null }> {
+  const fail = (problem: string) => ({ problem, booked: null });
   const account = await tx.account.findUnique({ where: { id: s.receivingAccountId } });
-  if (!account) return "Account no longer exists.";
-  if (account.status === "CLOSED") return `${account.name} is closed.`;
-  if (account.currency !== s.currency) return `Currency mismatch (${s.currency} vs ${account.currency}).`;
-  if (!(amount > 0)) return "Amount must be greater than zero.";
+  if (!account) return fail("Account no longer exists.");
+  if (account.status === "CLOSED") return fail(`${account.name} is closed.`);
+  if (!(amount > 0)) return fail("Amount must be greater than zero.");
+  let booked: number | null = null;
+  if (account.currency !== s.currency) {
+    if (s.loanId) return fail(`Currency mismatch (${s.currency} vs ${account.currency}).`);
+    booked = await convertForAccount(tx, s.userId, amount, s.currency, account.currency);
+    if (booked == null) return fail(`No ${s.currency} → ${account.currency} exchange rate to convert with. Confirm it by hand with the amount that moved.`);
+  }
   if (s.direction === "PAYMENT") {
     try {
-      assertSufficientFunds(account, amount);
+      assertSufficientFunds(account, booked ?? amount);
     } catch (e) {
-      return e instanceof Error ? e.message : "Insufficient balance.";
+      return fail(e instanceof Error ? e.message : "Insufficient balance.");
     }
   }
   if (s.loanId) {
     const loan = await tx.loan.findUnique({ where: { id: s.loanId } });
-    if (!loan || loan.status === "CLOSED") return "The loan is closed.";
+    if (!loan || loan.status === "CLOSED") return fail("The loan is closed.");
   }
-  return null;
+  return { problem: null, booked };
 }
 
 // ------------------------------------------------------------- occurrence actions
@@ -300,7 +316,10 @@ async function loadExecution(tx: Tx, userId: string, executionId: string) {
 }
 
 /** Books a PENDING (or retries a FAILED) occurrence. The user may correct the
- * amount actually received/paid, the date it happened, and the account. */
+ * amount actually received/paid, the date it happened, and the account.
+ * `amount` is in the paying/receiving account's currency: for a schedule in
+ * another currency it's what actually moved (defaulting to a conversion at
+ * the current rate), and the scheduled amount itself stays as set. */
 export async function confirmOccurrence(
   userId: string,
   executionId: string,
@@ -311,14 +330,21 @@ export async function confirmOccurrence(
     if (x.status !== "PENDING" && x.status !== "FAILED") {
       throw new ValidationError("This one has already been dealt with.");
     }
-    const amount = input.amount ?? Number(x.amount);
     const date = input.date ? dateOnly(input.date) : dateOnly(x.executedDate);
     const schedule = { ...x.scheduledCredit, receivingAccountId: input.accountId ?? x.scheduledCredit.receivingAccountId };
-    if (schedule.direction === "PAYMENT") {
-      const acct = await tx.account.findFirst({ where: { id: schedule.receivingAccountId, userId } });
-      if (acct) assertSufficientFunds(acct, amount);
+    const acct = await tx.account.findFirst({ where: { id: schedule.receivingAccountId, userId } });
+    if (!acct) throw new ValidationError("Account not found.");
+    const cross = acct.currency !== schedule.currency;
+    let amount = input.amount ?? Number(x.amount);
+    let booked: number | undefined;
+    if (cross) {
+      amount = Number(x.amount);
+      const b = input.amount ?? (await convertForAccount(tx, userId, amount, schedule.currency, acct.currency));
+      if (b == null) throw new ValidationError(`Enter the amount in ${acct.currency} that actually moved; there's no exchange rate to work it out.`);
+      booked = b;
     }
-    await postOccurrence(tx, schedule, { id: x.id, amount, date });
+    if (schedule.direction === "PAYMENT") assertSufficientFunds(acct, booked ?? amount);
+    await postOccurrence(tx, schedule, { id: x.id, amount, date, booked });
     const updated = await tx.creditExecution.update({
       where: { id: x.id },
       data: { status: "CONFIRMED", confirmedAt: new Date(), amount, executedDate: date, failureReason: null },
@@ -579,6 +605,9 @@ export interface ScheduleInput {
   requiresConfirmation: boolean;
   notes?: string | null;
   loanId?: string | null;
+  /** The amount's currency; defaults to the account's. Another currency is
+   * converted into the account's when each occurrence is booked. */
+  currency?: string;
   /** Per-occurrence date/amount changes, keyed by nominal date. */
   overrides?: { occurrenceDate: Date; date?: Date | null; amount?: number | null }[];
 }
@@ -589,6 +618,8 @@ export async function createSchedule(userId: string, input: ScheduleInput, txIn?
     if (!account) throw new ValidationError("Account not found.");
     if (account.status === "CLOSED") throw new ValidationError(`${account.name} is closed.`);
     if (input.endDate && input.endDate < input.startDate) throw new ValidationError("End date is before the start date.");
+    const currency = input.currency ?? account.currency;
+    if (input.loanId && currency !== account.currency) throw new ValidationError(`The loan's EMIs have to be paid from a ${currency} account.`);
     let categoryId: string | null = null;
     if (input.direction === "PAYMENT") {
       if (!input.categoryId) throw new ValidationError("Choose a budget category for this payment.");
@@ -605,7 +636,7 @@ export async function createSchedule(userId: string, input: ScheduleInput, txIn?
         name: input.name,
         notes: input.notes ?? null,
         amount: input.amount,
-        currency: account.currency,
+        currency,
         receivingAccountId: account.id,
         categoryId,
         loanId: input.loanId ?? null,
@@ -644,6 +675,8 @@ export interface ScheduleChanges {
   name?: string;
   kind?: string;
   amount?: number;
+  /** Applies to occurrences not booked yet. */
+  currency?: string;
   accountId?: string;
   categoryId?: string | null;
   requiresConfirmation?: boolean;
@@ -680,6 +713,17 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
       data.amount = changes.amount;
       track("amount", Number(s.amount), changes.amount);
     }
+    if (changes.currency !== undefined && changes.currency !== s.currency) {
+      if (s.loanId) throw new ValidationError("A loan's EMIs stay in the loan's currency.");
+      data.currency = changes.currency;
+      track("currency", s.currency, changes.currency);
+      // Due-but-unconfirmed ones were set in the old currency: re-express them.
+      const due = await tx.creditExecution.findMany({ where: { scheduledCreditId: s.id, status: { in: ["PENDING", "FAILED"] } } });
+      for (const x of due) {
+        const v = await convertForAccount(tx, userId, Number(x.amount), s.currency, changes.currency);
+        if (v != null) await tx.creditExecution.update({ where: { id: x.id }, data: { amount: v } });
+      }
+    }
     if (changes.requiresConfirmation !== undefined && changes.requiresConfirmation !== s.requiresConfirmation) {
       data.requiresConfirmation = changes.requiresConfirmation;
       track("requiresConfirmation", s.requiresConfirmation, changes.requiresConfirmation);
@@ -687,7 +731,7 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
     if (changes.accountId && changes.accountId !== s.receivingAccountId) {
       const account = await tx.account.findFirst({ where: { id: changes.accountId, userId } });
       if (!account || account.status === "CLOSED") throw new ValidationError("Choose an open account.");
-      if (account.currency !== s.currency) throw new ValidationError(`This schedule is in ${s.currency}; ${account.name} is in ${account.currency}.`);
+      if (s.loanId && account.currency !== s.currency) throw new ValidationError(`This loan is in ${s.currency}; ${account.name} is in ${account.currency}.`);
       data.receivingAccount = { connect: { id: account.id } };
       track("accountId", s.receivingAccountId, account.id);
     }

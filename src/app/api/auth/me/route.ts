@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/auth";
+import { moveOneTimeExpensesToNotebook } from "@/lib/notebook";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,8 @@ export async function GET() {
     return NextResponse.json({ authenticated: false, user: null });
   }
 
+  // One-time expenses now live in the Notebook; move any left over (once).
+  await moveOneTimeExpensesToNotebook(user.id);
   const isDeveloper = user.role === "DEVELOPER";
   const otherUsers = isDeveloper ? await db.user.count({ where: { id: { not: user.id } } }) : 0;
 

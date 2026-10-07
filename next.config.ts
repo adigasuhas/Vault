@@ -57,6 +57,7 @@ const nextConfig: NextConfig = {
       { source: "/loans", destination: "/payments", permanent: false },
       { source: "/transfers", destination: "/accounts?tab=transfers", permanent: false },
       { source: "/reports", destination: "/analytics?tab=reports", permanent: false },
+      { source: "/expenses", has: [{ type: "query", key: "tab", value: "one-time" }], destination: "/notebook", permanent: false },
     ];
   },
   async headers() {

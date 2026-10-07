@@ -6,15 +6,15 @@ import { createFxConverter } from "@/lib/fx";
 
 export const dynamic = "force-dynamic";
 
-/** Named groups of one-time purchases ("Liverpool move"), each with what's
- * been spent on it: per currency, plus a total in the user's main currency. */
+/** Named groups of Notebook entries ("Liverpool move"), each with what it
+ * added up to: per currency, plus a total in the user's main currency. */
 export const GET = authed(async (req, { userId }) => {
   const includeArchived = req.nextUrl.searchParams.get("includeArchived") === "1";
   const [projects, sums, user] = await Promise.all([
     db.expenseProject.findMany({ where: { userId, ...(includeArchived ? {} : { archivedAt: null }) }, orderBy: { createdAt: "desc" } }),
-    db.expense.groupBy({
+    db.notebookEntry.groupBy({
       by: ["projectId", "currency"],
-      where: { userId, oneTime: true, voidedAt: null, projectId: { not: null } },
+      where: { userId, projectId: { not: null } },
       _sum: { amount: true },
       _count: { _all: true },
       _max: { date: true },

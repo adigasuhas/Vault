@@ -15,7 +15,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ConfirmAction } from "@/components/ConfirmAction";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Pencil } from "lucide-react";
+import { LoanDialog } from "@/components/loans/LoanDialog";
 import { cn } from "@/lib/utils";
 import { Equivalent } from "@/components/app/Money";
 
@@ -40,6 +41,7 @@ interface Detail {
   schedule: AmortRow[];
   progress: { paidCount: number; totalInstallments: number; principalPaid: number; interestPaid: number; totalPaid: number; outstandingPrincipal: number; percentPaid: number; nextDue: AmortRow | null };
   totalInterest: number;
+  termsLocked: boolean;
 }
 interface Account { id: string; name: string; currency: string; status: string }
 
@@ -55,6 +57,7 @@ export default function LoanDetailPage() {
   const [schedAccount, setSchedAccount] = useState("");
   const [busy, setBusy] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -131,6 +134,7 @@ export default function LoanDetailPage() {
         title={loan.name}
         actions={
           <>
+            <Button variant="outline" onClick={() => setEditOpen(true)}><Pencil /> Edit</Button>
             {loan.status === "ACTIVE" && !loan.schedule && <Button variant="outline" onClick={() => { setSchedAccount(loan.linkedAccount?.id ?? accounts[0]?.id ?? ""); setSchedOpen(true); }}>Set up EMI schedule</Button>}
             {loan.status === "ACTIVE" && <Button variant="outline" onClick={() => { setPay({ amount: String(Math.round((progress.nextDue?.emi ?? Number(loan.emiAmount)) * 100) / 100), date: localToday(), accountId: loan.linkedAccount?.id ?? "", note: "" }); setPayOpen(true); }}>Record a payment</Button>}
             {loan.status === "ACTIVE" ? (
@@ -263,6 +267,12 @@ export default function LoanDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <LoanDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        onDone={load}
+        editing={{ ...loan, linkedAccountId: loan.linkedAccount?.id ?? null, termsLocked: data.termsLocked }}
+      />
     </div>
   );
 }

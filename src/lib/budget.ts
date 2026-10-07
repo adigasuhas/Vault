@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { roundMoney } from "@/lib/validate";
 import { ensureDefaultCategories } from "@/lib/defaults";
@@ -31,6 +32,18 @@ export async function ensureMonthPlan(userId: string, month: string) {
   await ensureDefaultCategories(userId);
   const owner = await db.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true } });
   const fxOutside = await createFxConverter(userId, owner.baseCurrency);
+  try {
+    return await createOrSyncPlan(userId, month, fxOutside);
+  } catch (err) {
+    // Two requests opening a new month at once: the other one created it.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return db.budgetPlan.findUniqueOrThrow({ where: { userId_month: { userId, month } } });
+    }
+    throw err;
+  }
+}
+
+async function createOrSyncPlan(userId: string, month: string, fxOutside: FxConverter) {
   return db.$transaction(async (tx: Tx) => {
     const existing = await tx.budgetPlan.findUnique({ where: { userId_month: { userId, month } } });
     if (existing) {

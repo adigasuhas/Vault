@@ -161,6 +161,7 @@ model User {
   netWorthSnapshots NetWorthSnapshot[]
   auditEvents       AuditEvent[]
   expenseProjects   ExpenseProject[]
+  notebookEntries   NotebookEntry[]
 
   auditLogsActed      AdminAuditLog[]      @relation("AuditActor")
   auditLogsTargeted   AdminAuditLog[]      @relation("AuditTarget")
@@ -372,9 +373,48 @@ model ExpenseProject {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
-  expenses Expense[]
+  expenses        Expense[]
+  notebookEntries NotebookEntry[]
 
   @@unique([userId, name])
+  @@index([userId])
+}
+
+// ---------- Notebook ----------
+// Planning notes for money spent outside the monthly routine — paid by the
+// user or by someone on their behalf. Entries never touch the ledger, account
+// balances, outflow or budgets. One can later be turned into a loan, a real
+// expense, or an expected incoming payment (receivable).
+
+enum NotebookStatus {
+  OPEN
+  CONVERTED
+}
+
+model NotebookEntry {
+  id              String          @id @default(uuid())
+  userId          String
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title           String
+  amount          Decimal
+  currency        String
+  date            DateTime
+  // ME: the user paid. OTHER: someone paid on the user's behalf (`person`).
+  paidBy          String          @default("ME")
+  person          String?
+  notes           String?
+  projectId       String?
+  project         ExpenseProject? @relation(fields: [projectId], references: [id])
+  status          NotebookStatus  @default(OPEN)
+  // LOAN | EXPENSE | RECEIVABLE, and the id of what it became.
+  convertedTo     String?
+  convertedId     String?
+  convertedAt     DateTime?
+  // Set when the entry was moved over from a former one-time expense.
+  sourceExpenseId String?         @unique
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
   @@index([userId])
 }
 
@@ -488,6 +528,10 @@ model CreditExecution {
   status            CreditExecutionStatus @default(PENDING)
   note              String?
   failureReason     String?
+  // When the schedule's currency differs from the account's (fees set in GBP,
+  // paid from an INR account): what actually moved, in the account's currency.
+  bookedAmount      Decimal?
+  bookedCurrency    String?
   ledgerEntry       LedgerEntry?
   loanPayment       LoanPayment?
 

@@ -11,7 +11,6 @@ coverage
 pre-acquisition-review
 VAULT_PRODUCTION_READINESS_REPORT.*
 docs/DEVELOPER.md
-.claude
 .vercel
 .netlify
 Dockerfile

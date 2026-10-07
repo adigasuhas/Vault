@@ -13,8 +13,21 @@ interface FxState {
   toSecondary: Record<string, number | null>;
 }
 
+/** Live secondary → primary market rate: 1 `secondary` = `rate` `primary`. */
+export interface LiveRate {
+  primary: string;
+  secondary: string;
+  rate: number;
+  asOf: string;
+  source: string;
+}
+
+const LIVE_EVERY_MS = 5 * 60 * 1000;
+
 interface CurrencyApi extends FxState {
   ready: boolean;
+  /** Null without a secondary currency, or until the first fetch. */
+  live: LiveRate | null;
   /** The "other" currency an amount should be shown in alongside its native
    * one: primary, unless it's already in primary — then secondary. */
   equivalent: (amount: number, currency: string) => { amount: number; currency: string } | null;
@@ -31,6 +44,7 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
   const { user } = useSession();
   const [state, setState] = useState<FxState | null>(null);
   const [nonce, setNonce] = useState(0);
+  const [live, setLive] = useState<LiveRate | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -46,6 +60,34 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
+  // Live rate every five minutes while the tab is visible; each new rate is
+  // saved server-side, so the ≈ conversions are reloaded with it.
+  useEffect(() => {
+    if (!user) return;
+    let alive = true;
+    let lastRate: number | null = null;
+    const tick = () => {
+      if (document.visibilityState === "hidden") return;
+      fetch("/api/fx/live", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: { live: LiveRate | null } | null) => {
+          if (!alive || !d) return;
+          setLive(d.live);
+          if (d.live && d.live.rate !== lastRate) setNonce((n) => n + 1);
+          lastRate = d.live?.rate ?? null;
+        })
+        .catch(() => {});
+    };
+    tick();
+    const id = window.setInterval(tick, LIVE_EVERY_MS);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [user]);
+
   const api = useMemo<CurrencyApi>(() => {
     const s: FxState = state ?? {
       primary: user?.baseCurrency ?? "INR",
@@ -59,6 +101,7 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
     return {
       ...s,
       ready: !!state,
+      live,
       reload,
       toPrimaryAmount: (amount, currency) => {
         if (currency === s.primary) return amount;
@@ -84,7 +127,7 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
         return null;
       },
     };
-  }, [state, user, reload]);
+  }, [state, user, reload, live]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

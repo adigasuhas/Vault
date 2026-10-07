@@ -820,7 +820,11 @@ export async function recordLoanPayment(
 
 /** Books one schedule occurrence: INCOME into the account for a receivable,
  * EXPENSE out of it (under the schedule's category) for a payment, or an EMI
- * via recordLoanPayment for a loan's schedule. Runs in the caller's tx. */
+ * via recordLoanPayment for a loan's schedule. Runs in the caller's tx.
+ *
+ * A schedule in another currency than its account (fees set in GBP, paid from
+ * INR) books `occurrence.booked` — the amount in the account's currency — and
+ * notes the original amount in the entry's description. */
 export async function postOccurrence(
   tx: Tx,
   schedule: {
@@ -833,22 +837,32 @@ export async function postOccurrence(
     categoryId: string | null;
     loanId: string | null;
   },
-  occurrence: { id: string; amount: number; date: Date }
+  occurrence: { id: string; amount: number; date: Date; booked?: number }
 ) {
   const account = await tx.account.findFirst({ where: { id: schedule.receivingAccountId, userId: schedule.userId } });
   if (!account) throw new ValidationError("The schedule's account no longer exists.");
   assertOpen(account);
-  assertPostable(occurrence.amount, schedule.currency, account.currency);
+  const cross = schedule.currency !== account.currency;
+  if (cross) {
+    if (schedule.loanId) throw new ValidationError(`The loan is in ${schedule.currency} but that account is in ${account.currency}.`);
+    if (occurrence.booked == null) throw new ValidationError(`Enter the amount in ${account.currency} that actually moved.`);
+    assertPostable(occurrence.booked, account.currency, account.currency);
+    await tx.creditExecution.update({ where: { id: occurrence.id }, data: { bookedAmount: occurrence.booked, bookedCurrency: account.currency } });
+  } else {
+    assertPostable(occurrence.amount, schedule.currency, account.currency);
+  }
+  const amount = cross ? occurrence.booked! : occurrence.amount;
+  const description = cross ? `${schedule.name} (${occurrence.amount.toFixed(2)} ${schedule.currency})` : schedule.name;
 
   if (schedule.direction === "INCOME") {
     return post(tx, {
       userId: schedule.userId,
       accountId: account.id,
       type: "INCOME",
-      amount: occurrence.amount,
-      currency: schedule.currency,
+      amount,
+      currency: account.currency,
       date: occurrence.date,
-      description: schedule.name,
+      description,
       creditExecutionId: occurrence.id,
     });
   }
@@ -871,10 +885,10 @@ export async function postOccurrence(
     userId: schedule.userId,
     accountId: account.id,
     type: "EXPENSE",
-    amount: occurrence.amount,
-    currency: schedule.currency,
+    amount,
+    currency: account.currency,
     date: occurrence.date,
-    description: schedule.name,
+    description,
     creditExecutionId: occurrence.id,
     categoryId: schedule.categoryId,
   });

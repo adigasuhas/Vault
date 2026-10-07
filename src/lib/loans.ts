@@ -1,5 +1,5 @@
 import { addMonthsUTC as addMonths } from "@/lib/dates";
-import { roundMoney } from "@/lib/validate";
+import { roundMoney, ValidationError } from "@/lib/validate";
 
 /** Standard reducing-balance EMI: EMI = P × r × (1+r)^n / ((1+r)^n − 1),
  * where r is the monthly rate. Falls back to a plain equal split when the
@@ -119,4 +119,16 @@ export function loanProgress(
     percentPaid: totalInstallments ? Math.min(100, Math.round((paidCount / totalInstallments) * 100)) : 0,
     nextDue,
   };
+}
+
+/** Validated loan terms: the EMI (the user's own, or computed — an equal
+ * split at 0%), the number of installments it actually takes, and the date of
+ * the last one. */
+export function resolveLoanTerms(input: { principal: number; interestRate: number; installments: number; startDate: Date; emiAmount?: number | null }) {
+  const emiAmount = roundMoney(input.emiAmount ?? computeEmi(input.principal, input.interestRate, input.installments));
+  const firstInterest = roundMoney((input.principal * input.interestRate) / 1200);
+  if (emiAmount <= firstInterest) throw new ValidationError("The EMI has to be more than the month's interest, or the loan never gets paid down.");
+  // A larger EMI clears the loan in fewer months than asked for.
+  const installments = amortizationSchedule(input.principal, input.interestRate, input.installments, input.startDate, emiAmount).length;
+  return { emiAmount, installments, endDate: computeLoanEndDate(input.startDate, installments) };
 }
