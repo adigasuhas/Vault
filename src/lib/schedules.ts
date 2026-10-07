@@ -45,7 +45,8 @@ export interface Occurrence {
   date: string; // effective (override or nominal)
   amount: number;
   currency: string;
-  accountId: string;
+  /** Null: a payment with no account set yet (see accountForOccurrence). */
+  accountId: string | null;
   categoryId: string | null;
   status: OccurrenceStatus;
   executionId: string | null;
@@ -226,13 +227,16 @@ async function processSchedule(tx: Tx, scheduleId: string, today: Date) {
     });
     if (!exists) {
       const amount = ov?.amount != null ? Number(ov.amount) : Number(s.amount);
-      if (s.requiresConfirmation) {
+      // No account on the schedule or that month's budget line: it waits for
+      // the user to say which account paid, even when set to auto-book.
+      const accountId = s.requiresConfirmation ? null : await accountForOccurrence(tx, s, effective);
+      if (s.requiresConfirmation || !accountId) {
         await tx.creditExecution.create({
           data: { scheduledCreditId: s.id, occurrenceDate: nominal, executedDate: effective, amount, status: "PENDING" },
         });
         r.pending++;
       } else {
-        const { problem, booked } = await autoPostProblem(tx, s, amount);
+        const { problem, booked } = await autoPostProblem(tx, { ...s, receivingAccountId: accountId }, amount);
         const x = await tx.creditExecution.create({
           data: {
             scheduledCreditId: s.id,
@@ -247,7 +251,7 @@ async function processSchedule(tx: Tx, scheduleId: string, today: Date) {
         if (problem) {
           r.failed++;
         } else {
-          await postOccurrence(tx, s, { id: x.id, amount, date: effective, booked: booked ?? undefined });
+          await postOccurrence(tx, { ...s, receivingAccountId: accountId }, { id: x.id, amount, date: effective, booked: booked ?? undefined });
           r.executed++;
         }
       }
@@ -275,10 +279,27 @@ export async function convertForAccount(tx: Tx, userId: string, amount: number, 
   return v == null ? null : Math.round(v * 100) / 100;
 }
 
+/** The account an occurrence is paid from (or into): the schedule's own, or
+ * — for a payment set up without one — the account on that month's budget
+ * line for its category. Null when neither is set. */
+export async function accountForOccurrence(
+  tx: Tx,
+  s: Pick<ScheduledCredit, "userId" | "receivingAccountId" | "categoryId">,
+  date: Date
+): Promise<string | null> {
+  if (s.receivingAccountId) return s.receivingAccountId;
+  if (!s.categoryId) return null;
+  const line = await tx.budgetCategoryAllocation.findFirst({
+    where: { categoryId: s.categoryId, accountId: { not: null }, budgetPlan: { userId: s.userId, month: monthKey(date) } },
+    select: { accountId: true },
+  });
+  return line?.accountId ?? null;
+}
+
 /** Why an auto-post would fail, checked up front — a throw inside the
  * transaction would abort the whole schedule run. For a schedule in another
  * currency than its account, also works out the amount to book. */
-async function autoPostProblem(tx: Tx, s: ScheduledCredit, amount: number): Promise<{ problem: string | null; booked: number | null }> {
+async function autoPostProblem(tx: Tx, s: ScheduledCredit & { receivingAccountId: string }, amount: number): Promise<{ problem: string | null; booked: number | null }> {
   const fail = (problem: string) => ({ problem, booked: null });
   const account = await tx.account.findUnique({ where: { id: s.receivingAccountId } });
   if (!account) return fail("Account no longer exists.");
@@ -331,8 +352,10 @@ export async function confirmOccurrence(
       throw new ValidationError("This one has already been dealt with.");
     }
     const date = input.date ? dateOnly(input.date) : dateOnly(x.executedDate);
-    const schedule = { ...x.scheduledCredit, receivingAccountId: input.accountId ?? x.scheduledCredit.receivingAccountId };
-    const acct = await tx.account.findFirst({ where: { id: schedule.receivingAccountId, userId } });
+    const accountId = input.accountId ?? (await accountForOccurrence(tx, x.scheduledCredit, date));
+    if (!accountId) throw new ValidationError(x.scheduledCredit.direction === "INCOME" ? "Choose the account it arrived in." : "Choose the account it was paid from.");
+    const schedule = { ...x.scheduledCredit, receivingAccountId: accountId };
+    const acct = await tx.account.findFirst({ where: { id: accountId, userId } });
     if (!acct) throw new ValidationError("Account not found.");
     const cross = acct.currency !== schedule.currency;
     let amount = input.amount ?? Number(x.amount);
@@ -349,6 +372,8 @@ export async function confirmOccurrence(
       where: { id: x.id },
       data: { status: "CONFIRMED", confirmedAt: new Date(), amount, executedDate: date, failureReason: null },
     });
+    // Paying a loan's last EMI closes it and ends its schedule.
+    if (schedule.loanId && schedule.categoryId) await syncScheduledBudgets(tx, userId, [schedule.categoryId]);
     await audit(tx, userId, "occurrence", x.id, "occurrence.confirm", `${x.scheduledCredit.name}: ${schedule.direction === "INCOME" ? "received" : "paid"}`, {
       amount,
       date: isoDate(date),
@@ -596,7 +621,8 @@ export interface ScheduleInput {
   kind: string;
   name: string;
   amount: number;
-  accountId: string;
+  /** Optional for a payment (not a loan's EMIs or income). */
+  accountId?: string | null;
   categoryId?: string | null;
   frequency: Frequency;
   customIntervalDays?: number | null;
@@ -614,12 +640,15 @@ export interface ScheduleInput {
 
 export async function createSchedule(userId: string, input: ScheduleInput, txIn?: Tx) {
   const run = async (tx: Tx) => {
-    const account = await tx.account.findFirst({ where: { id: input.accountId, userId } });
-    if (!account) throw new ValidationError("Account not found.");
-    if (account.status === "CLOSED") throw new ValidationError(`${account.name} is closed.`);
+    // A payment can be set up before deciding which account pays it.
+    if (!input.accountId && (input.direction === "INCOME" || input.loanId)) throw new ValidationError("Choose the account it's paid into.");
+    const account = input.accountId ? await tx.account.findFirst({ where: { id: input.accountId, userId } }) : null;
+    if (input.accountId && !account) throw new ValidationError("Account not found.");
+    if (account?.status === "CLOSED") throw new ValidationError(`${account.name} is closed.`);
     if (input.endDate && input.endDate < input.startDate) throw new ValidationError("End date is before the start date.");
-    const currency = input.currency ?? account.currency;
-    if (input.loanId && currency !== account.currency) throw new ValidationError(`The loan's EMIs have to be paid from a ${currency} account.`);
+    const currency =
+      input.currency ?? account?.currency ?? (await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true } })).baseCurrency;
+    if (input.loanId && account && currency !== account.currency) throw new ValidationError(`The loan's EMIs have to be paid from a ${currency} account.`);
     let categoryId: string | null = null;
     if (input.direction === "PAYMENT") {
       if (!input.categoryId) throw new ValidationError("Choose a budget category for this payment.");
@@ -637,7 +666,7 @@ export async function createSchedule(userId: string, input: ScheduleInput, txIn?
         notes: input.notes ?? null,
         amount: input.amount,
         currency,
-        receivingAccountId: account.id,
+        receivingAccountId: account?.id ?? null,
         categoryId,
         loanId: input.loanId ?? null,
         frequency: input.frequency,
@@ -677,7 +706,8 @@ export interface ScheduleChanges {
   amount?: number;
   /** Applies to occurrences not booked yet. */
   currency?: string;
-  accountId?: string;
+  /** null clears it (payments only): each one is then paid from the budget line's account. */
+  accountId?: string | null;
   categoryId?: string | null;
   requiresConfirmation?: boolean;
   endDate?: Date | null;
@@ -712,6 +742,16 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
       if (!(changes.amount > 0)) throw new ValidationError("Amount must be greater than zero.");
       data.amount = changes.amount;
       track("amount", Number(s.amount), changes.amount);
+      // Ones already due but not yet confirmed take the new amount too,
+      // unless that date's amount was set by hand.
+      const due = await tx.creditExecution.findMany({ where: { scheduledCreditId: s.id, status: { in: ["PENDING", "FAILED"] } } });
+      const fixed = new Set(
+        (await tx.scheduleOverride.findMany({ where: { scheduledCreditId: s.id, amount: { not: null } }, select: { occurrenceDate: true } })).map((o) => dateOnly(o.occurrenceDate).getTime())
+      );
+      for (const x of due) {
+        if (x.occurrenceDate && fixed.has(dateOnly(x.occurrenceDate).getTime())) continue;
+        await tx.creditExecution.update({ where: { id: x.id }, data: { amount: changes.amount } });
+      }
     }
     if (changes.currency !== undefined && changes.currency !== s.currency) {
       if (s.loanId) throw new ValidationError("A loan's EMIs stay in the loan's currency.");
@@ -734,6 +774,10 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
       if (s.loanId && account.currency !== s.currency) throw new ValidationError(`This loan is in ${s.currency}; ${account.name} is in ${account.currency}.`);
       data.receivingAccount = { connect: { id: account.id } };
       track("accountId", s.receivingAccountId, account.id);
+    } else if (changes.accountId === null && s.receivingAccountId) {
+      if (s.direction === "INCOME" || s.loanId) throw new ValidationError("This one needs an account.");
+      data.receivingAccount = { disconnect: true };
+      track("accountId", s.receivingAccountId, null);
     }
     const oldCategory = s.categoryId;
     if (changes.categoryId !== undefined && changes.categoryId !== s.categoryId && s.direction === "PAYMENT") {
@@ -826,7 +870,7 @@ export async function syncScheduledBudgets(tx: Tx, userId: string, categoryIds?:
   for (const plan of plans) {
     const { start, end } = monthRange(plan.month);
     const last = new Date(end.getTime() - 86_400_000);
-    const committed = new Map<string, { amount: number; accountId: string }>();
+    const committed = new Map<string, { amount: number; accountId: string | null }>();
     for (const s of schedules) {
       if (!s.categoryId) continue;
       for (const o of projectSchedule(s, start, last)) {

@@ -63,7 +63,7 @@ export function LoanDialog({
         rate: rate ? String(rate) : "",
         installments: String(editing.installments),
         startDate: start,
-        endDate: addMonthsUTC(new Date(`${start}T00:00:00Z`), editing.installments).toISOString().slice(0, 10),
+        endDate: addMonthsUTC(new Date(`${start}T00:00:00Z`), editing.installments - 1).toISOString().slice(0, 10),
         emi: Math.abs(stored - auto) > 0.005 ? String(stored) : "",
         currency: editing.currency,
         accountId: editing.linkedAccountId ?? "",
@@ -94,11 +94,12 @@ export function LoanDialog({
   const lastEmi = rows.length ? rows[rows.length - 1].emi : 0;
   const totalPaid = rows.reduce((t, r) => t + r.emi, 0);
   const pastDue = rows.filter((r) => r.dueDate.toISOString().slice(0, 10) < localToday()).length;
-  const endFrom = (start: string, n: number) => (start && n > 0 ? addMonthsUTC(new Date(`${start}T00:00:00Z`), n).toISOString().slice(0, 10) : "");
+  // The first EMI falls on the start date, so n EMIs end n-1 months later.
+  const endFrom = (start: string, n: number) => (start && n > 0 ? addMonthsUTC(new Date(`${start}T00:00:00Z`), n - 1).toISOString().slice(0, 10) : "");
   const setMonths = (v: string) => setF({ ...f, installments: v, endDate: endFrom(f.startDate, Number(v)) });
   const setStart = (v: string) => setF({ ...f, startDate: v, endDate: endFrom(v, months) });
   const setEnd = (v: string) => {
-    const n = v && f.startDate ? monthsBetween(new Date(`${f.startDate}T00:00:00Z`), new Date(`${v}T00:00:00Z`)) : 0;
+    const n = v && f.startDate ? monthsBetween(new Date(`${f.startDate}T00:00:00Z`), new Date(`${v}T00:00:00Z`)) + 1 : 0;
     setF({ ...f, endDate: v, installments: n > 0 ? String(n) : "" });
   };
   const sameCur = accounts.filter((a) => a.currency === f.currency);
@@ -185,19 +186,19 @@ export function LoanDialog({
           </div>
           <div className="grid grid-cols-[1fr_1fr_0.7fr] gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="l-s">Loan start</Label>
+              <Label htmlFor="l-s">First EMI</Label>
               <Input id="l-s" disabled={locked} type="date" value={f.startDate} onChange={(e) => setStart(e.target.value)} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="l-e">Last EMI</Label>
-              <Input id="l-e" disabled={locked} type="date" min={endFrom(f.startDate, 1)} value={f.endDate} onChange={(e) => setEnd(e.target.value)} />
+              <Input id="l-e" disabled={locked} type="date" min={f.startDate} value={f.endDate} onChange={(e) => setEnd(e.target.value)} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="l-n">Months</Label>
               <Input id="l-n" disabled={locked} type="number" min="1" max="600" required value={f.installments} onChange={(e) => setMonths(e.target.value)} />
             </div>
           </div>
-          <p className="-mt-2 text-[11px] text-muted-foreground">First EMI falls a month after the start. Set the last EMI date or the number of months.</p>
+          <p className="-mt-2 text-[11px] text-muted-foreground">Set the last EMI date or the number of months; the other fills in.</p>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label htmlFor="l-emi">Monthly EMI</Label>

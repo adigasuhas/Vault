@@ -137,30 +137,11 @@ export function neighbours(
   return { prev, next: null };
 }
 
-/** A sensible first date for a new schedule of the given frequency — what the
- * form pre-fills when the user picks a frequency. */
-export function defaultStartDate(frequency: Frequency, today: Date): Date {
-  const y = today.getUTCFullYear();
-  const m = today.getUTCMonth();
-  switch (frequency) {
-    case "ONE_TIME":
-      return today;
-    case "WEEKLY": {
-      // next Monday
-      const dow = today.getUTCDay();
-      return addDaysUTC(today, ((8 - dow) % 7) || 7);
-    }
-    case "MONTHLY":
-      return new Date(Date.UTC(y, m + 1, 1));
-    case "QUARTERLY":
-      return new Date(Date.UTC(y, Math.floor(m / 3) * 3 + 3, 1));
-    case "HALF_YEARLY":
-      return new Date(Date.UTC(y, m < 6 ? 6 : 12, 1));
-    case "YEARLY":
-      return new Date(Date.UTC(y + 1, 0, 1));
-    case "CUSTOM":
-      return addDaysUTC(today, 30);
-  }
+/** The first date a new schedule pre-fills: today, whatever the frequency,
+ * so the first payment lands in the month it's set up for (the user picks
+ * another date if it starts later). */
+export function defaultStartDate(_frequency: Frequency, today: Date): Date {
+  return today;
 }
 
 export function monthLabel(month: string, style: "long" | "short" = "long"): string {

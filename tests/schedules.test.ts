@@ -28,11 +28,9 @@ describe("calendar arithmetic", () => {
   });
   it("suggests sensible first dates", () => {
     const today = d("2026-10-06"); // a Tuesday
-    expect(iso(defaultStartDate("MONTHLY", today))).toBe("2026-11-01");
-    expect(iso(defaultStartDate("QUARTERLY", today))).toBe("2027-01-01");
-    expect(iso(defaultStartDate("HALF_YEARLY", today))).toBe("2027-01-01");
-    expect(iso(defaultStartDate("YEARLY", today))).toBe("2027-01-01");
-    expect(iso(defaultStartDate("WEEKLY", today))).toBe("2026-10-12");
+    for (const f of ["MONTHLY", "QUARTERLY", "HALF_YEARLY", "YEARLY", "WEEKLY", "ONE_TIME"] as const) {
+      expect(iso(defaultStartDate(f, today))).toBe(iso(today));
+    }
   });
   it("lists months inclusively", () => {
     expect(monthsBetween("2026-11", "2027-02")).toEqual(["2026-11", "2026-12", "2027-01", "2027-02"]);

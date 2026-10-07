@@ -322,7 +322,7 @@ export async function buildReport(userId: string, type: ReportType, p: ReportPar
     case "recurring": {
       const occ = await loadOccurrences(userId, start, new Date(end.getTime() - 86_400_000));
       const schedules = await db.scheduledCredit.findMany({ where: { userId }, select: { id: true, receivingAccount: { select: { name: true } } } });
-      const acct = new Map(schedules.map((s) => [s.id, s.receivingAccount.name]));
+      const acct = new Map(schedules.map((s) => [s.id, s.receivingAccount?.name ?? "Not set"]));
       const label: Record<string, string> = { SCHEDULED: "Scheduled", PENDING: "Awaiting confirmation", CONFIRMED: "Booked", SKIPPED: "Skipped", FAILED: "Failed", REVERSED: "Reversed" };
       const booked = (d: "INCOME" | "PAYMENT") => occ.filter((o) => o.direction === d && o.status === "CONFIRMED").reduce((s, o) => s + fx.convert(o.amount, o.currency), 0);
       return {

@@ -25,10 +25,10 @@ describe("computeEmi", () => {
 });
 
 describe("computeLoanEndDate", () => {
-  it("adds the installment count in months", () => {
+  it("is the last EMI's date: the first falls on the start date", () => {
     const end = computeLoanEndDate(new Date("2026-01-15T00:00:00Z"), 18);
     expect(end.getUTCFullYear()).toBe(2027);
-    expect(end.getUTCMonth()).toBe(6); // July (0-indexed)
+    expect(end.getUTCMonth()).toBe(5); // June (0-indexed): Jan 2026 + 17 months
   });
 });
 
@@ -60,8 +60,11 @@ describe("amortizationSchedule with the user's own EMI", () => {
     expect(rows.reduce((t, r) => t + r.principal, 0)).toBeCloseTo(12000, 2);
   });
 
-  it("monthsBetween counts whole months to the last EMI", () => {
+  it("first EMI is on the start date; first to last EMI date round-trips", () => {
+    expect(amortizationSchedule(12000, 0, 12, start)[0].dueDate.toISOString().slice(0, 10)).toBe("2026-01-15");
     expect(monthsBetween(start, new Date("2027-01-15T00:00:00Z"))).toBe(12);
-    expect(computeLoanEndDate(start, monthsBetween(start, new Date("2026-07-15T00:00:00Z"))).toISOString().slice(0, 10)).toBe("2026-07-15");
+    const n = monthsBetween(start, new Date("2026-07-15T00:00:00Z")) + 1;
+    expect(n).toBe(7);
+    expect(computeLoanEndDate(start, n).toISOString().slice(0, 10)).toBe("2026-07-15");
   });
 });

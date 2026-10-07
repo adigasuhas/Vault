@@ -43,7 +43,7 @@ export interface Schedule {
   requiresConfirmation: boolean;
   notes: string | null;
   categoryId: string | null;
-  receivingAccount: { id: string; name: string; currency: string; status: string };
+  receivingAccount: { id: string; name: string; currency: string; status: string } | null;
   category: { id: string; name: string } | null;
   loan: { id: string; name: string } | null;
   upcoming: Occurrence[];
@@ -67,6 +67,11 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
     return from != null && into ? Math.round(((o.amount * from) / into) * 100) / 100 : null;
   };
   const pickAccount = (o: Occurrence, id: string) => {
+    if (!id) {
+      setAccountId("");
+      setAmount(String(o.amount));
+      return;
+    }
     setAccountId(id);
     const cur = accounts.find((a) => a.id === id)?.currency ?? o.currency;
     const v = inCurrency(o, cur);
@@ -75,7 +80,16 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
   useEffect(() => {
     if (occ) {
       setDate(occ.date > localToday() ? localToday() : occ.date);
-      pickAccount(occ, occ.accountId);
+      pickAccount(occ, occ.accountId ?? "");
+      // No account on the schedule: suggest the one on that month's budget line.
+      if (!occ.accountId && occ.categoryId) {
+        api<{ lines: { categoryId: string; accountId: string | null }[] }>(`/api/budget?month=${occ.date.slice(0, 7)}`)
+          .then((b) => {
+            const id = b.lines.find((l) => l.categoryId === occ.categoryId)?.accountId;
+            if (id && accounts.some((a) => a.id === id)) pickAccount(occ, id);
+          })
+          .catch(() => {});
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [occ]);
@@ -121,7 +135,7 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
           <div className="space-y-1.5">
             <Label>{income ? "Into" : "From"}</Label>
             <Select value={accountId} onValueChange={(v) => pickAccount(occ, v)}>
-              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Choose account" /></SelectTrigger>
               <SelectContent>
                 {choices.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {formatMoney(a.currentBalance, a.currency)}</SelectItem>)}
               </SelectContent>
@@ -140,7 +154,7 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button onClick={submit} disabled={busy || !(Number(amount) > 0) || !date}><Check /> {busy ? "Booking…" : income ? "Mark received" : "Mark paid"}</Button>
+          <Button onClick={submit} disabled={busy || !(Number(amount) > 0) || !date || !accountId}><Check /> {busy ? "Booking…" : income ? "Mark received" : "Mark paid"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -308,7 +322,7 @@ export function SchedulesBoard({
       kind: s.kind,
       name: s.name,
       amount: s.amount,
-      accountId: s.receivingAccount.id,
+      accountId: s.receivingAccount?.id ?? null,
       currency: s.currency,
       categoryId: s.categoryId,
       frequency: s.frequency as ScheduleFormValue["frequency"],
@@ -353,7 +367,7 @@ export function SchedulesBoard({
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm">{o.scheduleName}</p>
           <p className="truncate text-xs text-muted-foreground">
-            {accounts.find((a) => a.id === o.accountId)?.name ?? "–"}
+            {accounts.find((a) => a.id === o.accountId)?.name ?? "Account not set"}
             {o.overridden && <span className="text-brass"> · moved from {formatDate(o.occurrenceDate, { day: "numeric", month: "short" })}</span>}
             {o.failureReason && <span className="text-negative"> · {o.failureReason}</span>}
             {o.note && ` · ${o.note}`}
@@ -461,7 +475,7 @@ export function SchedulesBoard({
                   <div>
                     <p className="text-xl font-semibold tabular-nums tracking-tight">{formatMoney(s.amount, s.currency)}</p>
                     <Equivalent value={s.amount} currency={s.currency} className="text-xs" />
-                    <p className="mt-0.5 text-xs text-muted-foreground">{income ? "into" : "from"} {s.receivingAccount.name}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{income ? "into" : "from"} {s.receivingAccount?.name ?? "the budget line's account"}</p>
                   </div>
                   <div className="flex flex-col items-end gap-1.5 text-right">
                     {s.isActive ? (

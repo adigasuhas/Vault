@@ -159,7 +159,8 @@ export const createScheduleSchema = z
     amount: zMoney,
     /** Defaults to the account's currency. */
     currency: CURRENCY.optional(),
-    accountId: zId,
+    /** Optional for payments: decided per month on the budget, or when paid. */
+    accountId: zId.nullish(),
     categoryId: zId.nullish(),
     frequency: FREQUENCY,
     customIntervalDays: zInt.refine((n) => n >= 1 && n <= 3650, "out of range").nullish(),
@@ -178,7 +179,7 @@ export const patchScheduleSchema = z.object({
   kind: KIND.optional(),
   amount: zMoney.optional(),
   currency: CURRENCY.optional(),
-  accountId: zId.optional(),
+  accountId: zId.nullish(),
   categoryId: zId.nullish(),
   requiresConfirmation: z.boolean().optional(),
   endDate: zIsoDate.nullish(),

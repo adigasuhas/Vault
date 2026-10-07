@@ -64,7 +64,7 @@ export interface ScheduleFormValue {
   amount: number;
   /** The amount's currency; may differ from the account's (converted when booked). */
   currency?: string;
-  accountId: string;
+  accountId: string | null;
   categoryId: string | null;
   frequency: Frequency;
   customIntervalDays: number | null;
@@ -99,7 +99,13 @@ export function ScheduleForm({
   const [name, setName] = useState(initial?.name ?? "");
   const [nameTouched, setNameTouched] = useState(!!initial);
   const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
-  const [accountId, setAccountId] = useState(initial?.accountId ?? accounts[0]?.id ?? "");
+  // "" = decide later (payments only): each one is paid from that month's
+  // budget-line account, or picked when it's confirmed.
+  const [accountId, setAccountId] = useState(initial ? (initial.accountId ?? "") : direction === "PAYMENT" ? "" : (accounts[0]?.id ?? ""));
+  // "EACH": the amount is per payment. "TOTAL": split across every payment
+  // between the first date and the end date (the default once there's an end).
+  const [amountMode, setAmountMode] = useState<"EACH" | "TOTAL">("EACH");
+  const [modeTouched, setModeTouched] = useState(!!initial);
   // "" follows the account's currency.
   const [currency, setCurrency] = useState(initial?.currency ?? "");
   const fx = useCurrency();
@@ -142,11 +148,13 @@ export function ScheduleForm({
     () => ({ startDate: new Date(startDate || today), frequency, customIntervalDays: Number(customDays) || 30 }),
     [startDate, frequency, customDays, today]
   );
+  // Every date up to the end (capped), or the next few when open-ended.
   const preview = useMemo(() => {
     if (!startDate) return [];
     const out: Date[] = [];
     const end = endDate ? new Date(endDate) : null;
-    for (let n = 0; n < PREVIEW_COUNT[frequency]; n++) {
+    const count = end ? 120 : PREVIEW_COUNT[frequency];
+    for (let n = 0; n < count; n++) {
       const d = nthOccurrence(rule.startDate, frequency, n, rule.customIntervalDays);
       if (end && d > end) break;
       out.push(d);
@@ -154,6 +162,16 @@ export function ScheduleForm({
     }
     return out;
   }, [rule, frequency, startDate, endDate]);
+
+  useEffect(() => {
+    if (!modeTouched) setAmountMode(endDate && frequency !== "ONE_TIME" ? "TOTAL" : "EACH");
+  }, [endDate, frequency, modeTouched]);
+  // A total is split evenly; the last payment absorbs the rounding.
+  const splitting = amountMode === "TOTAL" && !editing && frequency !== "ONE_TIME" && !!endDate && preview.length > 0;
+  const each = splitting ? Math.floor((amt / preview.length) * 100) / 100 : amt;
+  const lastAmount = splitting ? Math.round((amt - each * (preview.length - 1)) * 100) / 100 : amt;
+  const defaultFor = (i: number) => (splitting && i === preview.length - 1 ? lastAmount : each);
+  const plannedTotal = preview.reduce((t, d, i) => t + (Number(overrides[isoDate(d)]?.amount) || defaultFor(i)), 0);
 
   const overrideErrors = useMemo(() => {
     const errs: Record<string, string> = {};
@@ -179,7 +197,7 @@ export function ScheduleForm({
   }
 
   const valid =
-    name.trim() && amt > 0 && accountId && startDate && (direction === "INCOME" || (categoryId && categoryId !== "__new__")) && Object.keys(overrideErrors).length === 0 && (!endDate || endDate >= startDate);
+    name.trim() && amt > 0 && (accountId || direction === "PAYMENT") && startDate && (direction === "INCOME" || (categoryId && categoryId !== "__new__")) && Object.keys(overrideErrors).length === 0 && (!endDate || endDate >= startDate);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -188,9 +206,9 @@ export function ScheduleForm({
     const body = {
       kind,
       name: name.trim(),
-      amount: amt,
+      amount: each,
       currency: cur,
-      accountId,
+      accountId: accountId || null,
       categoryId: direction === "PAYMENT" ? categoryId : null,
       frequency,
       customIntervalDays: frequency === "CUSTOM" ? Number(customDays) : null,
@@ -208,15 +226,26 @@ export function ScheduleForm({
           method: "PATCH",
           body: changed ? body : { ...body, startDate: undefined, frequency: undefined, customIntervalDays: undefined },
         });
+        // Per-date changes made in the list below.
+        for (const [nominal, o] of Object.entries(overrides)) {
+          if (!o.date && !o.amount) continue;
+          await api(`/api/schedules/${initial!.id}/override`, { method: "PUT", body: { occurrenceDate: nominal, date: o.date || null, amount: o.amount ? Number(o.amount) : null } });
+        }
         toast.success("Schedule updated. Anything in the past stays exactly as it was.");
       } else {
         const r = await api<{ due: { pending: number; executed: number } }>("/api/schedules", {
           body: {
             ...body,
             direction,
-            overrides: Object.entries(overrides)
-              .filter(([, o]) => o.date || o.amount)
-              .map(([nominal, o]) => ({ occurrenceDate: nominal, date: o.date || null, amount: o.amount ? Number(o.amount) : null })),
+            overrides: [
+              ...Object.entries(overrides)
+                .filter(([, o]) => o.date || o.amount)
+                .map(([nominal, o]) => ({ occurrenceDate: nominal, date: o.date || null, amount: o.amount ? Number(o.amount) : null })),
+              // The split's last payment carries the rounding.
+              ...(splitting && Math.abs(lastAmount - each) > 0.004 && !overrides[isoDate(preview[preview.length - 1])]?.amount
+                ? [{ occurrenceDate: isoDate(preview[preview.length - 1]), date: overrides[isoDate(preview[preview.length - 1])]?.date || null, amount: lastAmount }]
+                : []),
+            ].filter((o, i, all) => all.findIndex((x) => x.occurrenceDate === o.occurrenceDate) === i),
           },
         });
         toast.success(
@@ -259,7 +288,26 @@ export function ScheduleForm({
           <Input id="s-name" required value={name} onChange={(e) => { setNameTouched(true); setName(e.target.value); }} placeholder={direction === "INCOME" ? "Monthly salary" : "Rent, Flat 4B"} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="s-amt">Amount</Label>
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="s-amt">{splitting ? "Total amount" : "Amount"}</Label>
+            {!editing && frequency !== "ONE_TIME" && (
+              <div className="flex rounded-md border border-border p-0.5 text-[11px]" role="radiogroup" aria-label="Amount is">
+                {(["EACH", "TOTAL"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    role="radio"
+                    aria-checked={amountMode === m}
+                    title={m === "TOTAL" && !endDate ? "Set an end date to split a total" : undefined}
+                    onClick={() => { setModeTouched(true); setAmountMode(m); }}
+                    className={cn("cursor-pointer rounded px-1.5 py-0.5", amountMode === m ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground")}
+                  >
+                    {m === "EACH" ? "Each payment" : "Total"}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="flex gap-1.5">
             <Input id="s-amt" type="number" inputMode="decimal" min="0" step="0.01" required value={amount} onChange={(e) => setAmount(e.target.value)} className="tabular-nums" />
             <Select value={cur} onValueChange={setCurrency}>
@@ -267,6 +315,13 @@ export function ScheduleForm({
               <SelectContent>{currencyChoices.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
             </Select>
           </div>
+          {amountMode === "TOTAL" && !editing && frequency !== "ONE_TIME" && (
+            <p className="text-[11px] text-muted-foreground">
+              {splitting && amt > 0
+                ? <>Split into {preview.length} payments of {formatMoney(each, cur)}{Math.abs(lastAmount - each) > 0.004 ? <> (last {formatMoney(lastAmount, cur)})</> : null}. Change any of them below.</>
+                : "Set an end date and the total is split across every payment."}
+            </p>
+          )}
           {account && cur !== account.currency && (
             <p className="text-[11px] text-muted-foreground">
               {crossRate != null && amt > 0 ? <>≈ {formatMoney(amt * crossRate, account.currency)} at today&apos;s rate. </> : null}
@@ -279,13 +334,17 @@ export function ScheduleForm({
 
       <div className={cn("grid gap-3", direction === "PAYMENT" && "sm:grid-cols-2")}>
         <div className="space-y-1.5">
-          <Label>{direction === "INCOME" ? "Credited to" : "Paid from"}</Label>
-          <Select value={accountId} onValueChange={setAccountId}>
+          <Label>{direction === "INCOME" ? "Credited to" : <>Paid from <span className="font-normal text-muted-foreground">(optional)</span></>}</Label>
+          <Select value={accountId || (direction === "PAYMENT" ? "__later__" : "")} onValueChange={(v) => setAccountId(v === "__later__" ? "" : v)}>
             <SelectTrigger className="w-full"><SelectValue placeholder="Choose account" /></SelectTrigger>
             <SelectContent>
+              {direction === "PAYMENT" && <SelectItem value="__later__">Decide later</SelectItem>}
               {accounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {a.currency}</SelectItem>)}
             </SelectContent>
           </Select>
+          {direction === "PAYMENT" && !accountId && (
+            <p className="text-[11px] text-muted-foreground">Each payment comes from the account on that month&apos;s budget line, or the one you pick when you confirm it.</p>
+          )}
         </div>
         {direction === "PAYMENT" && (
           <div className="space-y-1.5">
@@ -344,14 +403,14 @@ export function ScheduleForm({
         )}
       </div>
 
-      {!editing && preview.length > 0 && amt > 0 && (
+      {preview.length > 0 && amt > 0 && (
         <div className="rounded-lg border border-border">
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <p className="text-xs font-medium">Upcoming dates</p>
             <p className="text-[11px] text-muted-foreground">Change any date or amount that differs</p>
           </div>
           <ul className="divide-y divide-border/70">
-            {preview.map((d) => {
+            {preview.map((d, i) => {
               const key = isoDate(d);
               const o = overrides[key] ?? {};
               return (
@@ -372,7 +431,7 @@ export function ScheduleForm({
                     min="0"
                     step="0.01"
                     aria-label={`Amount for ${key}`}
-                    placeholder={String(amt)}
+                    placeholder={String(defaultFor(i))}
                     value={o.amount ?? ""}
                     onChange={(e) => setOverrides((s) => ({ ...s, [key]: { ...s[key], amount: e.target.value || undefined } }))}
                     className="h-8 text-right text-xs tabular-nums"
@@ -381,7 +440,14 @@ export function ScheduleForm({
               );
             })}
           </ul>
-          {frequency !== "ONE_TIME" && <p className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">You can move later dates from the schedule any time.</p>}
+          {endDate && frequency !== "ONE_TIME" ? (
+            <p className={cn("border-t border-border px-3 py-2 text-[11px]", splitting && Math.abs(plannedTotal - amt) > 0.004 ? "text-warning" : "text-muted-foreground")}>
+              {preview.length} payments · {formatMoney(Math.round(plannedTotal * 100) / 100, cur)} in all
+              {splitting && Math.abs(plannedTotal - amt) > 0.004 && <> (the total is {formatMoney(amt, cur)})</>}
+            </p>
+          ) : (
+            frequency !== "ONE_TIME" && <p className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">You can move later dates from the schedule any time.</p>
+          )}
         </div>
       )}
 

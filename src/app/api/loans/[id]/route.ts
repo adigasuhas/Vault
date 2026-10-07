@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { authed, notFound } from "@/lib/api";
 import { loanAmortization, loanProgress, resolveLoanTerms } from "@/lib/loans";
 import { createEmiSchedule } from "@/lib/loan-schedule";
+import { syncScheduledBudgets } from "@/lib/schedules";
 import { dateOnly } from "@/lib/dates";
 import { parseJson, ValidationError } from "@/lib/validate";
 import { patchLoanSchema } from "@/lib/schemas";
@@ -58,6 +59,7 @@ export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
         await tx.category.update({ where: { id: existing.categoryId }, data: { isDefault: true, defaultAmount: existing.emiAmount } });
       }
       const loan = await tx.loan.update({ where: { id: existing.id }, data: { status } });
+      if (existing.categoryId) await syncScheduledBudgets(tx, userId, [existing.categoryId]);
       await audit(tx, userId, "loan", existing.id, status === "CLOSED" ? "loan.close" : "loan.reopen", `${status === "CLOSED" ? "Closed" : "Re-opened"} loan ${existing.name}`);
       return { loan };
     });
@@ -122,6 +124,8 @@ export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
         await tx.scheduledCredit.update({ where: { id: existing.schedule.id }, data: { receivingAccountId: input.linkedAccountId } });
       }
       loan = await tx.loan.findUniqueOrThrow({ where: { id: existing.id } });
+      // Coming months' budget lines follow the rebuilt (or renamed) EMI schedule.
+      if (existing.categoryId) await syncScheduledBudgets(tx, userId, [existing.categoryId]);
       await audit(tx, userId, "loan", existing.id, "loan.edit", `Edited loan ${loan.name}`, {
         name: loan.name,
         principal: Number(loan.principal),
@@ -155,6 +159,7 @@ export const DELETE = authed<{ id: string }>(async (_req, { userId, params }) =>
     if (existing.schedule) await tx.scheduledCredit.delete({ where: { id: existing.schedule.id } });
     if (existing.categoryId) await tx.category.update({ where: { id: existing.categoryId }, data: { isDefault: false, defaultAmount: 0 } });
     await tx.loan.delete({ where: { id: existing.id } });
+    if (existing.categoryId) await syncScheduledBudgets(tx, userId, [existing.categoryId]);
     await audit(tx, userId, "loan", existing.id, "loan.delete", `Deleted loan ${existing.name} (no payments)`);
     return { ok: true };
   });

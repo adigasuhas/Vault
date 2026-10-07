@@ -473,8 +473,10 @@ model ScheduledCredit {
   loan                 Loan?               @relation(fields: [loanId], references: [id])
   amount               Decimal
   currency             String
-  receivingAccountId   String
-  receivingAccount     Account             @relation(fields: [receivingAccountId], references: [id], onDelete: NoAction)
+  // Optional for payments: without one, each occurrence is paid from the
+  // account on that month's budget line, or chosen when it's confirmed.
+  receivingAccountId   String?
+  receivingAccount     Account?            @relation(fields: [receivingAccountId], references: [id], onDelete: NoAction)
   frequency            RecurrenceFrequency
   customIntervalDays   Int?
   startDate            DateTime

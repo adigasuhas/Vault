@@ -12,8 +12,9 @@ export function computeEmi(principal: number, annualRatePercent: number, install
   return (principal * monthlyRate * factor) / (factor - 1);
 }
 
+/** Date of the last EMI. A loan's start date is its first EMI's due date. */
 export function computeLoanEndDate(startDate: Date, installments: number): Date {
-  return addMonths(startDate, installments);
+  return addMonths(startDate, Math.max(0, installments - 1));
 }
 
 export interface AmortizationRow {
@@ -58,7 +59,7 @@ export function amortizationSchedule(
     balance = Math.max(0, roundMoney(balance - principalComponent));
     rows.push({
       n,
-      dueDate: addMonths(startDate, n),
+      dueDate: addMonths(startDate, n - 1),
       emi: thisEmi,
       interest,
       principal: principalComponent,
@@ -75,8 +76,8 @@ export function loanAmortization(loan: { principal: unknown; interestRate: unkno
   return amortizationSchedule(Number(loan.principal), Number(loan.interestRate), loan.installments, loan.startDate, Number(loan.emiAmount));
 }
 
-/** Whole months from a loan's start to its last EMI (first EMI falls a month
- * after the start). */
+/** Whole months from `start` to `end`. A loan with its first EMI on `start`
+ * and its last on `end` has monthsBetween + 1 EMIs. */
 export function monthsBetween(start: Date, end: Date): number {
   return (end.getUTCFullYear() - start.getUTCFullYear()) * 12 + (end.getUTCMonth() - start.getUTCMonth());
 }
