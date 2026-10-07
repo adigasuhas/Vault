@@ -20,6 +20,7 @@ import { ConfirmAction } from "@/components/ConfirmAction";
 import { ScheduleForm, type ScheduleFormValue } from "@/components/schedules/ScheduleForm";
 import { MoreHorizontal, PiggyBank, Plus, Repeat, CalendarClock } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCurrency } from "@/context/CurrencyContext";
 import type { Occurrence } from "@/lib/schedules";
 
 interface Line {
@@ -239,6 +240,7 @@ function InlineAmount({ value, currency, onSave }: { value: number; currency: st
 }
 
 export default function BudgetPage() {
+  const fx = useCurrency();
   const [month, setMonth] = useState(localMonth());
   const [data, setData] = useState<Budget | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -295,9 +297,10 @@ export default function BudgetPage() {
   }
   async function switchCurrency(currency: string) {
     try {
-      await api("/api/budget", { method: "PATCH", body: { month, currency } });
-      toast.success(`${monthLabel(month)} is now planned in ${currency}. Amounts were converted at today's rate.`);
+      await api("/api/budget", { method: "PATCH", body: { currency } });
+      toast.success(`Every month is now planned in ${currency}. Amounts were converted at today's rate.`);
       load();
+      fx.reload();
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -498,8 +501,8 @@ export default function BudgetPage() {
         open={!!pendingCurrency}
         onOpenChange={(o) => !o && setPendingCurrency(null)}
         destructive={false}
-        title={`Plan ${monthLabel(month)} in ${pendingCurrency}?`}
-        description={<p>Every amount on this month&apos;s budget, including planned income, is converted from {data?.currency} at today&apos;s rate. Other months don&apos;t change. Your actual spending isn&apos;t touched.</p>}
+        title={`Plan every month in ${pendingCurrency}?`}
+        description={<p>Every month&apos;s budget, including planned income, is converted to {pendingCurrency} at today&apos;s rate, and new months start in {pendingCurrency} too. Your actual spending isn&apos;t touched.</p>}
         confirmLabel={`Switch to ${pendingCurrency}`}
         onConfirm={() => switchCurrency(pendingCurrency!)}
       />

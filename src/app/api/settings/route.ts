@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { switchBudgetCurrency } from "@/lib/budget";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { ensureDefaultCategories } from "@/lib/defaults";
@@ -62,7 +63,6 @@ export async function POST(req: NextRequest) {
       ...(baseCurrency !== undefined ? { baseCurrency } : {}),
       // A secondary equal to the primary adds nothing — store it as unset.
       ...(secondaryCurrency !== undefined ? { secondaryCurrency: secondaryCurrency && secondaryCurrency !== (baseCurrency ?? before.baseCurrency) ? secondaryCurrency : null } : {}),
-      ...(budgetCurrency !== undefined ? { budgetCurrency: budgetCurrency || null } : {}),
       ...(exchangeRateMode !== undefined ? { exchangeRateMode } : {}),
       ...(isOnboarded !== undefined ? { isOnboarded } : {}),
     },
@@ -73,6 +73,19 @@ export async function POST(req: NextRequest) {
   // dashboards don't silently fall back to 1:1 (finding F16). Best-effort.
   if (baseCurrency && baseCurrency !== before.baseCurrency && user.exchangeRateMode === "AUTOMATIC") {
     await refreshAutomaticExchangeRates(user.id).catch((e) => console.error("post-settings FX refresh failed:", e));
+  }
+
+  // The budget currency applies to every month (converted at today's rate),
+  // the same as switching it on the Budget page; months still planned in an
+  // older currency are brought over too.
+  if (budgetCurrency !== undefined) {
+    try {
+      await switchBudgetCurrency(user.id, budgetCurrency || user.baseCurrency);
+      if (!budgetCurrency) await db.user.update({ where: { id: user.id }, data: { budgetCurrency: null } });
+    } catch (err) {
+      const { body: errBody, status } = toErrorResponse(err);
+      return NextResponse.json(errBody, { status });
+    }
   }
 
   await db.setting.upsert({

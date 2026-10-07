@@ -1,11 +1,11 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { roundMoney } from "@/lib/validate";
+import { roundMoney, ValidationError } from "@/lib/validate";
 import { ensureDefaultCategories } from "@/lib/defaults";
 import { loadOccurrences, syncScheduledBudgets, userToday, type Occurrence } from "@/lib/schedules";
 import { monthKey, monthRange } from "@/lib/dates";
 import { createFxConverter, type FxConverter } from "@/lib/fx";
-import type { Tx } from "@/lib/ledger";
+import { audit, type Tx } from "@/lib/ledger";
 
 /**
  * Budgets are per month. A month's plan holds the allocations that apply to
@@ -231,4 +231,44 @@ export function convertOr(fx: FxConverter, amount: number, from: string, to: str
 export async function newPlanCurrency(userId: string) {
   const u = await db.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true, budgetCurrency: true } });
   return u.budgetCurrency ?? u.baseCurrency;
+}
+
+/** Plans every month's budget in `currency`: converts each month's planned
+ * income and lines at today's rate (each line change kept as an adjustment)
+ * and makes it the currency for months created later. Actual spending isn't
+ * touched. Returns how many months were converted. */
+export async function switchBudgetCurrency(userId: string, currency: string) {
+  const [user, plans] = await Promise.all([
+    db.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true } }),
+    db.budgetPlan.findMany({ where: { userId, currency: { not: currency } }, include: { allocations: true } }),
+  ]);
+  if (plans.length === 0) {
+    await db.user.update({ where: { id: userId }, data: { budgetCurrency: currency } });
+    return 0;
+  }
+  const fx = await createFxConverter(userId, user.baseCurrency);
+  const rates = new Map<string, number>();
+  for (const from of new Set(plans.map((p) => p.currency))) {
+    const r = fx.rate(from, currency);
+    if (r == null) throw new ValidationError(`No exchange rate between ${from} and ${currency} yet. Try again shortly.`);
+    rates.set(from, r);
+  }
+  const round = (n: number) => Math.round(n * 100) / 100;
+  await db.$transaction(
+    async (tx: Tx) => {
+      for (const plan of plans) {
+        const r = rates.get(plan.currency)!;
+        for (const a of plan.allocations) {
+          const next = round(Number(a.budgetAmount) * r);
+          await tx.budgetCategoryAllocation.update({ where: { id: a.id }, data: { budgetAmount: next } });
+          await tx.budgetAdjustment.create({ data: { budgetCategoryAllocationId: a.id, oldAmount: a.budgetAmount, newAmount: next, note: `Converted ${plan.currency} → ${currency} at ${r.toFixed(4)}` } });
+        }
+        await tx.budgetPlan.update({ where: { id: plan.id }, data: { currency, totalIncome: round(Number(plan.totalIncome) * r) } });
+      }
+      await tx.user.update({ where: { id: userId }, data: { budgetCurrency: currency } });
+      await audit(tx, userId, "budget", userId, "budget.currency", `Budgets switched to ${currency}`, { months: plans.map((p) => p.month), rates: Object.fromEntries(rates) });
+    },
+    { timeout: 60_000 }
+  );
+  return plans.length;
 }
