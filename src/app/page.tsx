@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useSession } from "@/context/SessionContext";
 import { useSignupOpen } from "@/lib/use-signup-open";
-import { Logo } from "@/components/brand/Logo";
+import { SiteHeader } from "@/components/marketing/SiteHeader";
+import { SiteFooter } from "@/components/marketing/SiteFooter";
 import { Sparkline } from "@/components/app/Sparkline";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,9 +48,10 @@ function Showcase() {
   return (
     <div className="rounded-2xl border border-border bg-muted/60 p-2 shadow-pop">
       <div className="flex items-center gap-1.5 px-3 py-2">
-        <span className="h-2.5 w-2.5 rounded-full bg-border" />
-        <span className="h-2.5 w-2.5 rounded-full bg-border" />
-        <span className="h-2.5 w-2.5 rounded-full bg-border" />
+        {/* macOS window controls: close, minimise, zoom */}
+        <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57] ring-1 ring-black/10 ring-inset" />
+        <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e] ring-1 ring-black/10 ring-inset" />
+        <span className="h-2.5 w-2.5 rounded-full bg-[#28c840] ring-1 ring-black/10 ring-inset" />
         <span className="ml-3 text-[11px] text-muted-foreground">Overview · October</span>
       </div>
       <div className="grid gap-2 rounded-xl bg-background p-2 sm:grid-cols-2 lg:grid-cols-[1.15fr_1fr_1fr]">
@@ -180,23 +182,7 @@ export default function LandingPage() {
 
   return (
     <div className="grain relative min-h-screen overflow-x-hidden bg-background text-foreground">
-      <header className="relative z-10 mx-auto flex h-16 max-w-[1200px] items-center justify-between px-5 md:px-8">
-        <Link href="/" aria-label="VAULT home"><Logo /></Link>
-        <nav className="hidden items-center gap-8 text-sm text-muted-foreground md:flex">
-          <a href="#features" className="transition-colors hover:text-foreground">Features</a>
-          <a href="#ledger" className="transition-colors hover:text-foreground">How it stays accurate</a>
-        </nav>
-        <div className="flex items-center gap-2">
-          {signedIn ? (
-            <Button asChild><Link href="/dashboard">Open VAULT</Link></Button>
-          ) : (
-            <>
-              <Button asChild variant="ghost"><Link href="/login">Sign in</Link></Button>
-              {signupOpen && <Button asChild><Link href="/signup">Create account</Link></Button>}
-            </>
-          )}
-        </div>
-      </header>
+      <SiteHeader />
 
       <main className="relative z-10">
         <section className="mx-auto max-w-[1200px] px-5 pt-16 pb-20 md:px-8 md:pt-24">
@@ -271,12 +257,7 @@ export default function LandingPage() {
         </section>
       </main>
 
-      <footer className="relative z-10 border-t border-border">
-        <div className="mx-auto flex max-w-[1200px] flex-wrap items-center justify-between gap-4 px-5 py-8 text-xs text-muted-foreground md:px-8">
-          <Logo className="opacity-80" />
-          <p>Self-hosted. Export everything, any time.</p>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

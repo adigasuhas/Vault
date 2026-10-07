@@ -14,6 +14,8 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%2B-336791?logo=postgresql&logoColor=white)
 ![Prisma](https://img.shields.io/badge/Prisma-7-2d3748?logo=prisma)
 
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/adigasuhas)
+
 </div>
 
 ---
@@ -123,6 +125,14 @@ Step-by-step instructions for every host are in [`docs/DEPLOYMENT.md`](docs/DEPL
 ## Tech stack
 
 Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4, shadcn/ui, Prisma 7 with PostgreSQL, Recharts, `@react-pdf/renderer` and Vitest.
+
+## Support
+
+VAULT is free. The coffee wasn't. It was built on a questionable amount of coffee and a frankly irresponsible number of AI tokens. If it saves you an afternoon, you can buy the next cup. If not, use it anyway. That was the point.
+
+<a href="https://buymeacoffee.com/adigasuhas"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=adigasuhas&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" height="44"></a>
+
+Optional, and nothing unlocks. Not a coffee person? A star on GitHub helps too.
 
 ## License
 

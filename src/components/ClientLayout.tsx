@@ -75,7 +75,7 @@ const MOBILE_TABS: Item[] = [
   { href: "/accounts", label: "Accounts", icon: Landmark },
 ];
 
-const PUBLIC_ROUTES = ["/", "/login", "/signup", "/forgot-password", "/reset-password"];
+const PUBLIC_ROUTES = ["/", "/pricing", "/login", "/signup", "/forgot-password", "/reset-password"];
 const CHROME_LESS_ROUTES = [...PUBLIC_ROUTES, "/onboarding"];
 
 function isActive(pathname: string, href: string) {

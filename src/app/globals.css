@@ -378,3 +378,21 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* Espresso machine (pricing CoffeeNote): one 6s shot on a loop. Resting
+   styles are the finished cup, which is what reduced motion shows. */
+.espresso .esp-needle { transform-box: view-box; transform-origin: 32px 12.2px; transform: rotate(70deg); animation: esp-needle 6s ease-in-out infinite; }
+.espresso .esp-stream { transform-box: fill-box; transform-origin: 50% 0; opacity: 0; animation: esp-stream 6s ease-in-out infinite; }
+.espresso .esp-fill { transform-box: fill-box; transform-origin: 50% 100%; animation: esp-fill 6s ease-in-out infinite; }
+.espresso .esp-steam { transform-box: view-box; opacity: .6; animation: esp-steam 6s ease-in-out infinite; }
+@keyframes esp-needle { 0%, 10% { transform: rotate(0); } 18%, 60% { transform: rotate(70deg); } 70%, 100% { transform: rotate(0); } }
+@keyframes esp-stream { 0%, 17% { opacity: 0; transform: scaleY(0); } 22%, 57% { opacity: 1; transform: scaleY(1); } 62%, 100% { opacity: 0; transform: scaleY(1); } }
+@keyframes esp-fill { 0%, 20% { opacity: .85; transform: scaleY(0); } 60%, 88% { opacity: .85; transform: scaleY(1); } 95% { opacity: 0; transform: scaleY(1); } 100% { opacity: 0; transform: scaleY(0); } }
+@keyframes esp-steam { 0%, 60% { opacity: 0; transform: translateY(1.5px); } 70%, 80% { opacity: .7; } 90%, 100% { opacity: 0; transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .espresso * { animation: none !important; } }
+
+/* Pricing: the currency in front of the zero changes, gently. */
+@keyframes cur-in { from { opacity: 0; transform: translateY(45%); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes cur-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-45%); filter: blur(2px); } }
+.cur-in { animation: cur-in .55s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.cur-out { animation: cur-out .45s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
