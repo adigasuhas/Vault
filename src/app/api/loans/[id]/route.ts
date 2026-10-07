@@ -7,7 +7,7 @@ import { syncScheduledBudgets } from "@/lib/schedules";
 import { dateOnly } from "@/lib/dates";
 import { parseJson, ValidationError } from "@/lib/validate";
 import { patchLoanSchema } from "@/lib/schemas";
-import { audit, type Tx } from "@/lib/ledger";
+import { audit, loanOutstanding, type Tx } from "@/lib/ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +49,11 @@ export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   const input = await parseJson(req, patchLoanSchema);
   if (input.status) {
     const { status } = input;
+    // A loan with something still owed is closed by paying it off
+    // (POST /api/loans/:id/payoff), not just marked closed.
+    if (status === "CLOSED" && existing.status === "ACTIVE" && (await loanOutstanding(db, existing)) > 0.004) {
+      throw new ValidationError("This loan still has money owed on it. Pay it off to close it.");
+    }
     return db.$transaction(async (tx: Tx) => {
       if (status === "CLOSED") {
         if (existing.schedule?.isActive) {
@@ -144,16 +149,20 @@ export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   }
 });
 
-/** Only a loan with no recorded payments can be deleted (a mistaken entry);
- * anything with history is closed instead. */
+/** A loan with nothing paid on it can be deleted outright (its EMI schedule
+ * and any EMIs merely waiting go with it); one with payments is closed by
+ * paying it off instead. */
 export const DELETE = authed<{ id: string }>(async (_req, { userId, params }) => {
   const existing = await db.loan.findFirst({
     where: { id: params.id, userId },
-    include: { _count: { select: { payments: true } }, schedule: { include: { _count: { select: { executions: true } } } } },
+    include: {
+      _count: { select: { payments: true } },
+      schedule: { include: { _count: { select: { executions: { where: { status: { in: ["CONFIRMED", "REVERSED"] } } } } } } },
+    },
   });
   if (!existing) return notFound("Loan not found.");
   if (existing._count.payments > 0 || (existing.schedule?._count.executions ?? 0) > 0) {
-    throw new ValidationError("This loan has payments on record, so it can't be deleted. Close it instead and the history stays.");
+    throw new ValidationError("This loan has payments on record, so it can't be deleted. Pay it off to close it; the history stays.");
   }
   return db.$transaction(async (tx: Tx) => {
     if (existing.schedule) await tx.scheduledCredit.delete({ where: { id: existing.schedule.id } });

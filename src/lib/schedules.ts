@@ -826,22 +826,96 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
   });
 }
 
-/** Removes a schedule that never produced an occurrence; one with history is
- * ended instead (kept, inactive) so its record survives. */
+/** Removes a schedule. Nothing paid yet: it's deleted outright, with any
+ * occurrences that were merely due or skipped. Payments made: an open-ended
+ * one is ended (nothing more is owed); one with an end date and payments
+ * still to come has to be paid off instead (payOffSchedule). A loan's EMI
+ * schedule is managed through the loan. */
 export async function deleteOrEndSchedule(userId: string, scheduleId: string) {
   return db.$transaction(async (tx: Tx) => {
-    const s = await tx.scheduledCredit.findFirst({ where: { id: scheduleId, userId }, include: { executions: { select: { id: true } } } });
+    const s = await tx.scheduledCredit.findFirst({ where: { id: scheduleId, userId }, include: { overrides: true, executions: true } });
     if (!s) throw new ValidationError("Schedule not found.");
-    if (s.executions.length === 0) {
+    if (s.loanId) throw new ValidationError("This is a loan's EMI schedule. Pay off or delete the loan instead.");
+    const booked = s.executions.some((x) => x.status === "CONFIRMED" || x.status === "REVERSED");
+    if (!booked) {
       await tx.scheduledCredit.delete({ where: { id: s.id } });
-      await audit(tx, userId, "schedule", s.id, "schedule.delete", `Deleted ${s.name} (never ran)`);
+      await audit(tx, userId, "schedule", s.id, "schedule.delete", `Deleted ${s.name} (nothing paid)`);
       if (s.categoryId) await syncScheduledBudgets(tx, userId, [s.categoryId]);
       return { deleted: true };
+    }
+    if (s.endDate && (await remainingOccurrences(tx, s)).length > 0) {
+      throw new ValidationError(`${s.name} has payments made and more still to come. Pay off what's left to close it.`);
     }
     await tx.scheduledCredit.update({ where: { id: s.id }, data: { isActive: false, cancelledAt: new Date() } });
     await audit(tx, userId, "schedule", s.id, "schedule.end", `Ended ${s.name}`);
     if (s.categoryId) await syncScheduledBudgets(tx, userId, [s.categoryId]);
     return { deleted: false };
+  });
+}
+
+/** Occurrences of a schedule still to be paid: those already due but not
+ * confirmed, then every upcoming one up to the end date. */
+async function remainingOccurrences(tx: Tx, s: ScheduleWithRelations) {
+  const today = await userTodayTx(tx, s.userId);
+  const due = s.executions
+    .filter((x) => x.status === "PENDING" || x.status === "FAILED")
+    .map((x) => ({ nominal: dateOnly(x.occurrenceDate ?? x.executedDate), amount: Number(x.amount), executionId: x.id as string | null }));
+  if (!s.endDate || !s.isActive) return due;
+  const upcoming = projectSchedule(s, today, dateOnly(s.endDate))
+    .filter((o) => o.status === "SCHEDULED")
+    .map((o) => ({ nominal: dateOnly(new Date(o.occurrenceDate)), amount: o.amount, executionId: null as string | null }));
+  return [...due, ...upcoming];
+}
+
+/** What's left on a schedule with an end date, and the total. */
+export async function scheduleRemaining(userId: string, scheduleId: string) {
+  const s = await db.scheduledCredit.findFirst({ where: { id: scheduleId, userId }, include: { overrides: true, executions: true } });
+  if (!s) throw new ValidationError("Schedule not found.");
+  const rest = await db.$transaction((tx: Tx) => remainingOccurrences(tx, s));
+  return { count: rest.length, total: Math.round(rest.reduce((t, o) => t + o.amount, 0) * 100) / 100, currency: s.currency };
+}
+
+/** Pays everything left on a schedule in one go (each remaining payment is
+ * booked on `date` from the account) and ends it. */
+export async function payOffSchedule(userId: string, scheduleId: string, input: { accountId?: string; date: Date }) {
+  return db.$transaction(async (tx: Tx) => {
+    const s = await tx.scheduledCredit.findFirst({ where: { id: scheduleId, userId }, include: { overrides: true, executions: true } });
+    if (!s) throw new ValidationError("Schedule not found.");
+    if (s.loanId) throw new ValidationError("This is a loan's EMI schedule. Pay off the loan instead.");
+    const date = dateOnly(input.date);
+    const rest = await remainingOccurrences(tx, s);
+    if (rest.length === 0) throw new ValidationError("Nothing is left to pay on this one.");
+    const accountId = input.accountId ?? (await accountForOccurrence(tx, s, date));
+    if (!accountId) throw new ValidationError(s.direction === "INCOME" ? "Choose the account it arrived in." : "Choose the account it was paid from.");
+    const account = await tx.account.findFirst({ where: { id: accountId, userId } });
+    if (!account) throw new ValidationError("Account not found.");
+    const sched = { ...s, receivingAccountId: account.id };
+    let total = 0;
+    const bookings: { id: string; amount: number; booked?: number }[] = [];
+    for (const o of rest) {
+      const id =
+        o.executionId ??
+        (await tx.creditExecution.create({
+          data: { scheduledCreditId: s.id, occurrenceDate: o.nominal, executedDate: date, amount: o.amount, status: "PENDING" },
+        })).id;
+      let booked: number | undefined;
+      if (account.currency !== s.currency) {
+        const b = await convertForAccount(tx, userId, o.amount, s.currency, account.currency);
+        if (b == null) throw new ValidationError(`No ${s.currency} → ${account.currency} exchange rate to convert with.`);
+        booked = b;
+      }
+      total += booked ?? o.amount;
+      bookings.push({ id, amount: o.amount, booked });
+    }
+    if (s.direction === "PAYMENT") assertSufficientFunds(account, total);
+    for (const b of bookings) {
+      await postOccurrence(tx, sched, { id: b.id, amount: b.amount, date, booked: b.booked });
+      await tx.creditExecution.update({ where: { id: b.id }, data: { status: "CONFIRMED", confirmedAt: new Date(), executedDate: date, failureReason: null } });
+    }
+    await tx.scheduledCredit.update({ where: { id: s.id }, data: { isActive: false, cancelledAt: new Date() } });
+    await audit(tx, userId, "schedule", s.id, "schedule.payoff", `Paid off ${s.name}`, { payments: bookings.length, total, accountId: account.id });
+    if (s.categoryId) await syncScheduledBudgets(tx, userId, [s.categoryId]);
+    return { payments: bookings.length, total: Math.round(total * 100) / 100, currency: account.currency };
   });
 }
 

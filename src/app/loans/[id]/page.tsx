@@ -58,6 +58,8 @@ export default function LoanDetailPage() {
   const [busy, setBusy] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [payoffOpen, setPayoffOpen] = useState(false);
+  const [payoff, setPayoff] = useState({ amount: "", date: localToday(), accountId: "" });
 
   const load = useCallback(async () => {
     setError(null);
@@ -113,6 +115,19 @@ export default function LoanDetailPage() {
       toast.error((e as Error).message);
     }
   }
+  async function payOff() {
+    setBusy(true);
+    try {
+      await api(`/api/loans/${id}/payoff`, { body: { accountId: payoff.accountId, date: payoff.date, amount: Number(payoff.amount) } });
+      toast.success("Loan paid off and closed. Its EMI schedule has ended.");
+      setPayoffOpen(false);
+      load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   async function remove() {
     try {
       await api(`/api/loans/${id}`, { method: "DELETE" });
@@ -138,15 +153,9 @@ export default function LoanDetailPage() {
             {loan.status === "ACTIVE" && !loan.schedule && <Button variant="outline" onClick={() => { setSchedAccount(loan.linkedAccount?.id ?? accounts[0]?.id ?? ""); setSchedOpen(true); }}>Set up EMI schedule</Button>}
             {loan.status === "ACTIVE" && <Button variant="outline" onClick={() => { setPay({ amount: String(Math.round((progress.nextDue?.emi ?? Number(loan.emiAmount)) * 100) / 100), date: localToday(), accountId: loan.linkedAccount?.id ?? "", note: "" }); setPayOpen(true); }}>Record a payment</Button>}
             {loan.status === "ACTIVE" ? (
-              <ConfirmAction
-                title="Close this loan?"
-                description={<p>Use this when the loan is settled (for example, paid off early). Its EMI schedule ends and future budgets stop including it. Payment history stays.</p>}
-                confirmLabel="Close loan"
-                onConfirm={() => setStatus("CLOSED")}
-                trigger={<Button variant="ghost">Close loan</Button>}
-              />
+              <Button variant="ghost" onClick={() => { setPayoff({ amount: String(Math.round(progress.outstandingPrincipal * 100) / 100), date: localToday(), accountId: loan.linkedAccount?.id ?? "" }); setPayoffOpen(true); }}>Pay off & close</Button>
             ) : (
-              <Button variant="ghost" onClick={() => setStatus("ACTIVE")}>Re-open</Button>
+              progress.outstandingPrincipal > 0.004 && <Button variant="ghost" onClick={() => setStatus("ACTIVE")}>Re-open</Button>
             )}
             {!hasHistory && (
               <ConfirmAction
@@ -264,6 +273,39 @@ export default function LoanDetailPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setSchedOpen(false)} disabled={busy}>Cancel</Button>
             <Button onClick={setupSchedule} disabled={busy || !schedAccount}>Set up</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={payoffOpen} onOpenChange={(o) => !busy && setPayoffOpen(o)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Pay off {loan.name}</DialogTitle>
+            <DialogDescription>
+              Pays what&apos;s still owed in one payment and closes the loan. {formatMoney(Math.round(progress.outstandingPrincipal * 100) / 100, c)} of principal is outstanding; add any final interest or foreclosure charges on top. EMIs still waiting are marked skipped.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="po-amt">Amount ({c})</Label>
+                <Input id="po-amt" type="number" min={progress.outstandingPrincipal} step="0.01" value={payoff.amount} onChange={(e) => setPayoff({ ...payoff, amount: e.target.value })} className="tabular-nums" />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="po-date">Paid on</Label>
+                <Input id="po-date" type="date" max={localToday()} value={payoff.date} onChange={(e) => setPayoff({ ...payoff, date: e.target.value })} />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Paid from</Label>
+              <Select value={payoff.accountId} onValueChange={(v) => setPayoff({ ...payoff, accountId: v })}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Choose account" /></SelectTrigger>
+                <SelectContent>{accounts.filter((a) => a.currency === c).map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPayoffOpen(false)} disabled={busy}>Cancel</Button>
+            <Button onClick={payOff} disabled={busy || !payoff.accountId || !(Number(payoff.amount) + 0.004 >= progress.outstandingPrincipal)}>{busy ? "Paying…" : "Pay off & close"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

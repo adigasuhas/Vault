@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { Prisma, type LedgerEntryType } from "@prisma/client";
 import { ValidationError, MAX_AMOUNT } from "@/lib/validate";
-import { loanAmortization } from "@/lib/loans";
+import { loanAmortization, loanProgress } from "@/lib/loans";
 import { dateOnly, nthOccurrence, type Frequency } from "@/lib/dates";
 
 export type Tx = Prisma.TransactionClient;
@@ -814,6 +814,73 @@ export async function recordLoanPayment(
     return payment;
   };
   return txIn ? run(txIn) : db.$transaction(run);
+}
+
+/** What's still owed on a loan's principal, from its recorded payments. */
+export async function loanOutstanding(tx: Pick<Tx, "loanPayment">, loan: Parameters<typeof loanAmortization>[0] & { id: string }) {
+  const payments = await tx.loanPayment.findMany({ where: { loanId: loan.id, reversedAt: null } });
+  const progress = loanProgress(
+    loanAmortization(loan),
+    payments.map((p) => ({ principalComponent: Number(p.principalComponent), interestComponent: Number(p.interestComponent), amount: Number(p.amount) }))
+  );
+  return Math.round(progress.outstandingPrincipal * 100) / 100;
+}
+
+/** Pays a loan off in one payment and closes it: the outstanding principal,
+ * plus anything above it (final interest, foreclosure charges) booked as
+ * interest. Its EMI schedule ends; EMIs still waiting are marked skipped. */
+export async function payOffLoan(
+  userId: string,
+  input: { loanId: string; accountId: string; date: Date; amount?: number },
+  tx: Tx
+) {
+  const loan = await tx.loan.findFirst({ where: { id: input.loanId, userId } });
+  if (!loan) throw new ValidationError("Loan not found.");
+  if (loan.status === "CLOSED") throw new ValidationError(`${loan.name} is already closed.`);
+  const outstanding = await loanOutstanding(tx, loan);
+  const amount = input.amount ?? outstanding;
+  if (amount + 0.004 < outstanding) throw new ValidationError(`Paying it off takes at least ${outstanding.toFixed(2)} ${loan.currency}, what's still owed.`);
+  const account = await tx.account.findFirst({ where: { id: input.accountId, userId } });
+  if (!account) throw new ValidationError("Account not found.");
+  assertOpen(account);
+  if (account.currency !== loan.currency) throw new ValidationError(`The loan is in ${loan.currency} but that account is in ${account.currency}.`);
+  if (amount > 0) {
+    assertPostable(amount, loan.currency, account.currency);
+    assertSufficientFunds(account, amount);
+    const payment = await tx.loanPayment.create({
+      data: {
+        loanId: loan.id,
+        amount,
+        principalComponent: outstanding,
+        interestComponent: Math.round((amount - outstanding) * 100) / 100,
+        paidOn: input.date,
+        note: "Paid off",
+      },
+    });
+    await post(tx, {
+      userId,
+      accountId: account.id,
+      type: "EXPENSE",
+      amount,
+      currency: loan.currency,
+      date: input.date,
+      description: `${loan.name}: paid off`,
+      loanPaymentId: payment.id,
+      categoryId: loan.categoryId,
+    });
+  }
+  await tx.loan.update({ where: { id: loan.id }, data: { status: "CLOSED" } });
+  const schedule = await tx.scheduledCredit.findUnique({ where: { loanId: loan.id } });
+  if (schedule) {
+    await tx.creditExecution.updateMany({
+      where: { scheduledCreditId: schedule.id, status: { in: ["PENDING", "FAILED"] } },
+      data: { status: "SKIPPED", confirmedAt: new Date(), note: "Loan paid off" },
+    });
+    if (schedule.isActive) await tx.scheduledCredit.update({ where: { id: schedule.id }, data: { isActive: false, cancelledAt: new Date() } });
+  }
+  if (loan.categoryId) await tx.category.update({ where: { id: loan.categoryId }, data: { isDefault: false, defaultAmount: 0 } });
+  await audit(tx, userId, "loan", loan.id, "loan.payoff", `Paid off ${loan.name}`, { amount, outstanding, accountId: account.id });
+  return { loan, amount, outstanding };
 }
 
 // ---------------------------------------------------------------- schedules (shared posting)

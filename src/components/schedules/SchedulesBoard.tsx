@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { api, localMonth, localToday } from "@/lib/client";
@@ -161,6 +162,66 @@ function ConfirmDialog({ occ, accounts, onClose, onDone }: { occ: Occurrence | n
   );
 }
 
+/** Pays everything left on a schedule in one go and ends it. */
+function PayoffDialog({ schedule, accounts, onClose, onDone }: { schedule: Schedule | null; accounts: Account[]; onClose: () => void; onDone: () => void }) {
+  const [left, setLeft] = useState<{ count: number; total: number; currency: string } | null>(null);
+  const [accountId, setAccountId] = useState("");
+  const [date, setDate] = useState(localToday());
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!schedule) return;
+    setLeft(null);
+    setAccountId(schedule.receivingAccount?.id ?? "");
+    setDate(localToday());
+    api<{ count: number; total: number; currency: string }>(`/api/schedules/${schedule.id}/payoff`).then(setLeft).catch((e) => toast.error((e as Error).message));
+  }, [schedule]);
+  if (!schedule) return null;
+  const income = schedule.direction === "INCOME";
+  async function submit() {
+    setBusy(true);
+    try {
+      const r = await api<{ payments: number; total: number; currency: string }>(`/api/schedules/${schedule!.id}/payoff`, { body: { accountId, date } });
+      toast.success(`${schedule!.name} closed: ${r.payments} ${r.payments === 1 ? "payment" : "payments"} of ${formatMoney(r.total, r.currency)} booked.`);
+      onClose();
+      onDone();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Dialog open onOpenChange={(o) => !o && !busy && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{income ? `Settle ${schedule.name}` : `Pay off ${schedule.name}`}</DialogTitle>
+          <DialogDescription>
+            Payments have already been made on this one, so it closes by settling what&apos;s left.{" "}
+            {left ? (left.count ? <>{left.count} remaining {left.count === 1 ? "payment" : "payments"}: <b className="text-foreground">{formatMoney(left.total, left.currency)}</b>, booked on the date below.</> : "Nothing is left to pay.") : "Working out what's left…"}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>{income ? "Into" : "Paid from"}</Label>
+            <Select value={accountId} onValueChange={setAccountId}>
+              <SelectTrigger className="w-full"><SelectValue placeholder="Choose account" /></SelectTrigger>
+              <SelectContent>{accounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {formatMoney(a.currentBalance, a.currency)}</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="po-date">{income ? "Received on" : "Paid on"}</Label>
+            <Input id="po-date" type="date" max={localToday()} value={date} onChange={(e) => setDate(e.target.value)} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={submit} disabled={busy || !accountId || !left?.count}><Check /> {busy ? "Booking…" : income ? "Settle & close" : "Pay off & close"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** Move an upcoming occurrence or change its amount. */
 function OverrideDialog({ occ, onClose, onDone }: { occ: Occurrence | null; onClose: () => void; onDone: () => void }) {
   const [date, setDate] = useState("");
@@ -254,6 +315,9 @@ export function SchedulesBoard({
   const [skipping, setSkipping] = useState<Occurrence | null>(null);
   const [reversing, setReversing] = useState<Occurrence | null>(null);
   const [ending, setEnding] = useState<Schedule | null>(null);
+  const [payingOff, setPayingOff] = useState<Schedule | null>(null);
+  // Something actually booked: deleting would orphan it from the ledger.
+  const hasPaid = (s: Schedule) => s.history.some((h) => h.status === "CONFIRMED" || h.status === "REVERSED");
   const income = direction === "INCOME";
 
   const load = useCallback(async () => {
@@ -348,7 +412,7 @@ export function SchedulesBoard({
   async function endSchedule(s: Schedule) {
     try {
       const r = await api<{ deleted: boolean }>(`/api/schedules/${s.id}`, { method: "DELETE" });
-      toast.success(r.deleted ? `${s.name} deleted. It had never run.` : `${s.name} ended. Its history is kept.`);
+      toast.success(r.deleted ? `${s.name} deleted.` : `${s.name} ended. Its history is kept.`);
       refresh();
     } catch (e) {
       toast.error((e as Error).message);
@@ -467,7 +531,15 @@ export function SchedulesBoard({
                       {!s.cancelledAt || s.isActive ? <DropdownMenuItem onClick={() => edit(s)}>Edit…</DropdownMenuItem> : null}
                       <DropdownMenuItem onClick={() => toggleActive(s)}>{s.isActive ? "Pause" : "Resume"}</DropdownMenuItem>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem variant="destructive" onClick={() => setEnding(s)}>{s.history.length ? "End schedule…" : "Delete…"}</DropdownMenuItem>
+                      {s.loan ? (
+                        <DropdownMenuItem asChild><Link href={`/loans/${s.loan.id}`}>Pay off or delete on the loan…</Link></DropdownMenuItem>
+                      ) : !hasPaid(s) ? (
+                        <DropdownMenuItem variant="destructive" onClick={() => setEnding(s)}>Delete…</DropdownMenuItem>
+                      ) : s.endDate && s.isActive ? (
+                        <DropdownMenuItem onClick={() => setPayingOff(s)}>{income ? "Settle & close…" : "Pay off & close…"}</DropdownMenuItem>
+                      ) : s.isActive ? (
+                        <DropdownMenuItem variant="destructive" onClick={() => setEnding(s)}>End schedule…</DropdownMenuItem>
+                      ) : null}
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
@@ -531,6 +603,7 @@ export function SchedulesBoard({
         </DialogContent>
       </Dialog>
 
+      {payingOff && <PayoffDialog schedule={payingOff} accounts={accounts} onClose={() => setPayingOff(null)} onDone={refresh} />}
       {confirming && <ConfirmDialog occ={confirming} accounts={accounts} onClose={() => setConfirming(null)} onDone={refresh} />}
       {overriding && <OverrideDialog occ={overriding} onClose={() => setOverriding(null)} onDone={refresh} />}
 
@@ -567,13 +640,13 @@ export function SchedulesBoard({
       <ConfirmAction
         open={!!ending}
         onOpenChange={(o) => !o && setEnding(null)}
-        title={ending?.history.length ? `End ${ending?.name}?` : `Delete ${ending?.name}?`}
+        title={ending && hasPaid(ending) ? `End ${ending.name}?` : `Delete ${ending?.name}?`}
         description={
-          ending && (ending.history.length
-            ? <p>Nothing new will come due. Everything already received, paid or skipped stays on record. {direction === "PAYMENT" && "Coming months' budgets drop the scheduled amount."}</p>
-            : <p>It has never come due, so it can be removed entirely.</p>)
+          ending && (hasPaid(ending)
+            ? <p>It has no end date, so nothing more is owed: nothing new will come due. Everything already {income ? "received" : "paid"} stays on record. {direction === "PAYMENT" && "Coming months' budgets drop the scheduled amount."}</p>
+            : <p>Nothing has been {income ? "received" : "paid"} on it yet, so it&apos;s removed entirely, including anything waiting to be confirmed. {direction === "PAYMENT" && "Coming months' budgets drop it too."}</p>)
         }
-        confirmLabel={ending?.history.length ? "End schedule" : "Delete"}
+        confirmLabel={ending && hasPaid(ending) ? "End schedule" : "Delete"}
         onConfirm={() => endSchedule(ending!)}
       />
     </>
