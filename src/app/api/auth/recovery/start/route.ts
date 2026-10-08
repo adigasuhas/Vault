@@ -16,7 +16,7 @@ const schema = z.object({ email: z.string().trim().toLowerCase().email("Enter th
  * succeed, so the response doesn't reveal whether an account exists.
  */
 export async function POST(req: NextRequest) {
-  if (!rateLimit(`recovery-start:ip:${clientIp(req)}`, 10, 15 * 60 * 1000).ok) {
+  if (!(await rateLimit(`recovery-start:ip:${clientIp(req)}`, 10, 15 * 60 * 1000)).ok) {
     return NextResponse.json({ error: "Too many attempts. Try again in a few minutes." }, { status: 429 });
   }
   const parsed = schema.safeParse(await req.json().catch(() => null));

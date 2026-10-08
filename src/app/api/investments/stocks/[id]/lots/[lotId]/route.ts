@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
+import { refundPurchase, unfundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 import { parseJson, toErrorResponse } from "@/lib/validate";
 import { patchLotSchema } from "@/lib/schemas";
 
@@ -35,17 +37,31 @@ export async function PATCH(req: NextRequest, context: { params: Promise<{ id: s
     return NextResponse.json(errBody, { status });
   }
 
-  await db.stockPurchaseLot.update({
-    where: { id: lotId },
-    data: {
-      ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
-      ...(input.price !== undefined ? { price: input.price } : {}),
-      ...(input.purchaseDate !== undefined ? { purchaseDate: input.purchaseDate } : {}),
-    },
-  });
-
-  const holding = await recomputeHoldingFromLots(id);
-  return NextResponse.json({ holding });
+  try {
+    const holding = await db.$transaction(async (tx: Tx) => {
+      const updated = await tx.stockPurchaseLot.update({
+        where: { id: lotId },
+        data: {
+          ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
+          ...(input.price !== undefined ? { price: input.price } : {}),
+          ...(input.purchaseDate !== undefined ? { purchaseDate: input.purchaseDate } : {}),
+        },
+        include: { stockHolding: true },
+      });
+      // Whatever paid for it is re-booked at the corrected cost.
+      await refundPurchase(tx, session.userId, `STOCK_LOT:${lotId}`, {
+        cost: Number(updated.quantity) * Number(updated.price),
+        currency: updated.stockHolding.currency,
+        date: updated.purchaseDate,
+        label: `${Number(updated.quantity)} ${updated.stockHolding.ticker}`,
+      });
+      return recomputeHoldingFromLots(id, tx);
+    });
+    return NextResponse.json({ holding });
+  } catch (err) {
+    const { body: errBody, status } = toErrorResponse(err);
+    return NextResponse.json(errBody, { status });
+  }
 }
 
 /** Removes one purchase from a holding — if it was the only one, the whole
@@ -58,7 +74,16 @@ export async function DELETE(_req: NextRequest, context: { params: Promise<{ id:
   const lot = await getOwnedLot(session.userId, id, lotId);
   if (!lot) return NextResponse.json({ error: "Purchase not found." }, { status: 404 });
 
-  await db.stockPurchaseLot.delete({ where: { id: lotId } });
-  const holding = await recomputeHoldingFromLots(id);
-  return NextResponse.json({ holding, holdingDeleted: holding === null });
+  try {
+    const holding = await db.$transaction(async (tx: Tx) => {
+      // A purchase entered by mistake: what paid for it goes back.
+      await unfundPurchase(tx, session.userId, `STOCK_LOT:${lotId}`, "Stock purchase");
+      await tx.stockPurchaseLot.delete({ where: { id: lotId } });
+      return recomputeHoldingFromLots(id, tx);
+    });
+    return NextResponse.json({ holding, holdingDeleted: holding === null });
+  } catch (err) {
+    const { body: errBody, status } = toErrorResponse(err);
+    return NextResponse.json(errBody, { status });
+  }
 }

@@ -1,5 +1,7 @@
 import { loanAmortization } from "@/lib/loans";
-import { createSchedule } from "@/lib/schedules";
+import { createSchedule, loanScheduleDates, retireLoanBudget } from "@/lib/schedules";
+import { db } from "@/lib/db";
+import type { AmortizationRow } from "@/lib/loans";
 import { ValidationError } from "@/lib/validate";
 import type { Tx } from "@/lib/ledger";
 import type { Loan } from "@prisma/client";
@@ -16,8 +18,9 @@ export async function createEmiSchedule(
   input: { accountId: string; requiresConfirmation: boolean }
 ) {
   if (!loan.categoryId) throw new ValidationError("This loan has no budget category.");
-  const rows = loanAmortization(loan);
-  const paid = await tx.loanPayment.count({ where: { loanId: loan.id, reversedAt: null } });
+  const live = await tx.loanPayment.findMany({ where: { loanId: loan.id, reversedAt: null } });
+  const rows = loanAmortization(loan, live);
+  const paid = live.filter((p) => p.kind !== "PREPAYMENT").length;
   // Installments already past are left for the user to record (or not) by
   // hand — the schedule only drives EMIs from today on.
   const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { timezone: true } });
@@ -36,7 +39,10 @@ export async function createEmiSchedule(
       accountId: input.accountId,
       categoryId: loan.categoryId,
       frequency: "MONTHLY",
-      startDate: dateOnly(first.dueDate),
+      // Anchored on the loan's first EMI so the day of the month holds (a
+      // 31st stays the 31st after February); processing starts at `first`.
+      startDate: dateOnly(loan.startDate),
+      firstDue: dateOnly(first.dueDate),
       endDate: dateOnly(last.dueDate),
       requiresConfirmation: input.requiresConfirmation,
       loanId: loan.id,
@@ -47,8 +53,10 @@ export async function createEmiSchedule(
     },
     tx
   );
-  // The schedule now carries the EMI into each month's budget.
+  // The schedule now carries the EMI into each month's budget; lines the
+  // category stamped as a recurring EMI give way to it.
   await tx.category.update({ where: { id: loan.categoryId }, data: { isDefault: false, defaultAmount: 0 } });
+  await retireLoanBudget(tx, userId, loan.categoryId);
   await tx.loan.update({ where: { id: loan.id }, data: { linkedAccountId: input.accountId } });
   return schedule;
 }
@@ -60,7 +68,7 @@ export async function loanCategory(
   tx: Tx,
   userId: string,
   name: string,
-  data: { isDefault: boolean; defaultAmount: number; defaultSince: string }
+  data: { isDefault: boolean; defaultAmount: number; defaultSince: string; defaultCurrency?: string }
 ) {
   const catName = `Loan: ${name}`;
   const existing = await tx.category.findFirst({ where: { userId, name: catName } });
@@ -71,4 +79,14 @@ export async function loanCategory(
   }
   const max = await tx.category.aggregate({ where: { userId }, _max: { sortOrder: true } });
   return tx.category.create({ data: { userId, name: catName, ...data, sortOrder: (max._max.sortOrder ?? -1) + 1 } });
+}
+
+/** The loan's plan with its remaining EMIs dated by its live EMI schedule,
+ * so the loan page and Loans & payments agree on when each one is due (e.g.
+ * when an early EMI was never scheduled, or a date was moved). */
+export async function withScheduleDates(loanId: string, rows: AmortizationRow[], payments: { kind?: string | null }[]) {
+  const paid = payments.filter((p) => p.kind !== "PREPAYMENT").length;
+  const dates = await loanScheduleDates(db, loanId, rows.length - paid);
+  if (!dates) return rows;
+  return rows.map((r, i) => (i >= paid && dates[i - paid] ? { ...r, dueDate: dates[i - paid] } : r));
 }

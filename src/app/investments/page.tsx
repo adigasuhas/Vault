@@ -8,6 +8,7 @@ import { useCurrency } from "@/context/CurrencyContext";
 import { StockTable, FundTable, StockBreakdown, DepositTable, AssetTable } from "@/components/investments/Holdings";
 import { SellContext, SellDialog, type SellTarget } from "@/components/investments/SellDialog";
 import { SalesHistory, type SaleRow } from "@/components/investments/SalesHistory";
+import { FundingFields, emptyFunding, fundingBody, type FundingValue } from "@/components/investments/FundingFields";
 import { useSession } from "@/context/SessionContext";
 import { formatMoney } from "@/lib/currencies";
 import { SUPPORTED_CURRENCIES } from "@/lib/currencies";
@@ -58,6 +59,7 @@ interface MutualFundHolding {
   currency: string;
   purchaseDate: string;
   lastNav: string | null;
+  lots?: { id: string; units: string; nav: string; purchaseDate: string }[];
 }
 
 interface FixedDeposit {
@@ -262,6 +264,9 @@ export default function InvestmentsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [sales, setSales] = useState<SaleRow[]>([]);
   const [sellTarget, setSellTarget] = useState<SellTarget | null>(null);
+  // Date range ("" = open-ended). Holdings narrow to those bought in it,
+  // sales to those made in it, and the summary shows the period's activity.
+  const [range, setRange] = useState<{ from: string; to: string }>({ from: "", to: "" });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -362,9 +367,65 @@ export default function InvestmentsPage() {
   );
 
   const liveSales = sales.filter((x) => !x.reversedAt).length;
-  const totalValue = stockValue + fundValue + depositValue + otherValue;
+  // Sale proceeds kept for reinvestment are still part of the portfolio (as in net worth).
+  const keptProceeds = useMemo(() => sales.reduce((t, x) => t + (x.reversedAt || x.account ? 0 : toBase(x.proceedsLeft ?? 0, x.currency)), 0), [sales, toBase]);
+  const totalValue = stockValue + fundValue + depositValue + otherValue + keptProceeds;
   const totalInvested = stockCost + fundCost + depositCost + otherCost;
   const totalGain = stockValue - stockCost + (fundValue - fundCost) + (depositValue - depositCost) + (otherValue - otherCost);
+
+  const ranged = !!(range.from || range.to);
+  const inRange = useCallback((d: string) => {
+    const day = d.slice(0, 10);
+    return (!range.from || day >= range.from) && (!range.to || day <= range.to);
+  }, [range]);
+  // The period's activity, from the dated purchases and sales themselves.
+  const period = useMemo(() => {
+    if (!ranged) return null;
+    let bought = 0, worth = 0, boughtCount = 0;
+    for (const h of stocks) for (const l of h.lots) if (inRange(l.purchaseDate)) {
+      bought += toBase(Number(l.quantity) * Number(l.price), h.currency);
+      worth += toBase(Number(l.quantity) * Number(h.lastPrice ?? h.avgBuyPrice), h.currency);
+      boughtCount++;
+    }
+    for (const f of funds) for (const l of f.lots ?? []) if (inRange(l.purchaseDate)) {
+      bought += toBase(Number(l.units) * Number(l.nav), f.currency);
+      worth += toBase(Number(l.units) * Number(f.lastNav ?? f.avgNav), f.currency);
+      boughtCount++;
+    }
+    for (const d of deposits) if (inRange(d.startDate)) {
+      bought += toBase(Number(d.principal), d.currency);
+      worth += toBase(fdCurrentValue(Number(d.principal), Number(d.interestRate), d.startDate, d.maturityDate), d.currency);
+      boughtCount++;
+    }
+    for (const a of otherAssets) if (inRange(a.purchaseDate)) {
+      bought += toBase(Number(a.purchasePrice), a.currency);
+      worth += toBase(Number(a.currentValue), a.currency);
+      boughtCount++;
+    }
+    // Purchases made in the period but sold since still count as bought then.
+    let boughtSince = 0;
+    for (const x of sales) if (!x.reversedAt) for (const l of x.lots) if (inRange(l.purchaseDate)) boughtSince += toBase(Number(l.cost), x.currency);
+    const sold = sales.filter((x) => !x.reversedAt && inRange(x.soldOn));
+    return {
+      bought: bought + boughtSince,
+      boughtSince,
+      worth,
+      boughtCount,
+      soldCount: sold.length,
+      received: sold.reduce((t, x) => t + toBase(Number(x.netProceeds), x.currency), 0),
+      realized: sold.reduce((t, x) => t + toBase(Number(x.realizedPnl), x.currency), 0),
+    };
+  }, [ranged, inRange, stocks, funds, deposits, otherAssets, sales, toBase]);
+  const view = useMemo(() => {
+    if (!ranged) return { stocks, funds, deposits, otherAssets, sales };
+    return {
+      stocks: stocks.filter((h) => h.lots.some((l) => inRange(l.purchaseDate))),
+      funds: funds.filter((f) => (f.lots?.length ? f.lots.some((l) => inRange(l.purchaseDate)) : inRange(f.purchaseDate))),
+      deposits: deposits.filter((d) => inRange(d.startDate)),
+      otherAssets: otherAssets.filter((a) => inRange(a.purchaseDate)),
+      sales: sales.filter((x) => inRange(x.soldOn)),
+    };
+  }, [ranged, inRange, stocks, funds, deposits, otherAssets, sales]);
 
   return (
     <div className="space-y-6">
@@ -379,6 +440,42 @@ export default function InvestmentsPage() {
         }
       />
 
+      <RangeBar range={range} onChange={setRange} />
+
+      {period ? (
+        <Panel className="settle overflow-hidden p-0">
+          <div className="grid grid-cols-2 gap-px bg-border lg:grid-cols-4">
+            <div className="bg-card p-5">
+              <Stat
+                label="Bought in this period"
+                value={formatMoney(Math.round(period.bought), currency)}
+                hint={<><Equivalent both value={period.bought} currency={currency} className="block text-xs" /><span className="block">{period.boughtCount} {period.boughtCount === 1 ? "purchase" : "purchases"} still held{period.boughtSince > 0 ? `, plus ${formatMoney(Math.round(period.boughtSince), currency)} since sold` : ""}</span></>}
+              />
+            </div>
+            <div className="bg-card p-5">
+              <Stat
+                label="Those still held are worth"
+                value={formatMoney(Math.round(period.worth), currency)}
+                hint={<><Equivalent both value={period.worth} currency={currency} className="block text-xs" /><span className="block">At today&apos;s prices</span></>}
+              />
+            </div>
+            <div className="bg-card p-5">
+              <Stat
+                label="Sold in this period"
+                value={formatMoney(Math.round(period.received), currency)}
+                hint={<><Equivalent both value={period.received} currency={currency} className="block text-xs" /><span className="block">{period.soldCount ? `${period.soldCount} ${period.soldCount === 1 ? "sale or closure" : "sales and closures"}, after charges` : "Nothing sold in this period"}</span></>}
+              />
+            </div>
+            <div className="bg-card p-5">
+              <Stat
+                label="Realised in this period"
+                value={<span className={gainClass(period.realized)}>{period.realized >= 0 ? "+" : "−"}{formatMoney(Math.abs(Math.round(period.realized)), currency)}</span>}
+                hint={<><Equivalent both signed value={period.realized} currency={currency} className="block text-xs" /><span className="block">Profit or loss on what was sold</span></>}
+              />
+            </div>
+          </div>
+        </Panel>
+      ) : (
       <Panel className="settle overflow-hidden p-0">
         <div className="grid grid-cols-2 gap-px bg-border lg:grid-cols-4">
           <div className="bg-card p-5">
@@ -392,7 +489,7 @@ export default function InvestmentsPage() {
             <Stat
               label="Current value"
               value={formatMoney(Math.round(totalValue), currency)}
-              hint={<><Equivalent both value={totalValue} currency={currency} className="block text-xs" /><span className="block">Stocks and funds {formatMoney(Math.round(stockValue + fundValue), currency)} · deposits and other {formatMoney(Math.round(depositValue + otherValue), currency)}</span></>}
+              hint={<><Equivalent both value={totalValue} currency={currency} className="block text-xs" /><span className="block">Stocks and funds {formatMoney(Math.round(stockValue + fundValue), currency)} · deposits and other {formatMoney(Math.round(depositValue + otherValue), currency)}{keptProceeds > 0.5 ? ` · ${formatMoney(Math.round(keptProceeds), currency)} waiting to be reinvested` : ""}</span></>}
             />
           </div>
           <div className="bg-card p-5">
@@ -411,31 +508,37 @@ export default function InvestmentsPage() {
           </div>
         </div>
       </Panel>
+      )}
+      {ranged && (
+        <p className="-mt-2 text-xs text-muted-foreground">
+          The tabs show holdings with a purchase in this period (each row still shows the whole holding, so editing stays safe) and sales made in it.
+        </p>
+      )}
 
       <SellContext.Provider value={setSellTarget}>
       <Tabs defaultValue="stocks">
-        <TabsList>
-          <TabsTrigger value="stocks" className="cursor-pointer">Stocks</TabsTrigger>
-          <TabsTrigger value="funds" className="cursor-pointer">Mutual funds</TabsTrigger>
-          <TabsTrigger value="fds" className="cursor-pointer">Fixed deposits</TabsTrigger>
-          <TabsTrigger value="other" className="cursor-pointer">Other assets</TabsTrigger>
-          <TabsTrigger value="sold" className="cursor-pointer">Sold &amp; closed{liveSales ? ` (${liveSales})` : ""}</TabsTrigger>
+        <TabsList className="max-w-full justify-start overflow-x-auto">
+          <TabsTrigger value="stocks" className="cursor-pointer">Stocks{ranged ? ` (${view.stocks.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="funds" className="cursor-pointer">Mutual funds{ranged ? ` (${view.funds.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="fds" className="cursor-pointer">Fixed deposits{ranged ? ` (${view.deposits.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="other" className="cursor-pointer">Other assets{ranged ? ` (${view.otherAssets.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="sold" className="cursor-pointer">Sold &amp; closed{ranged ? ` (${view.sales.filter((x) => !x.reversedAt).length})` : liveSales ? ` (${liveSales})` : ""}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="stocks" className="space-y-4">
-          <StockTab stocks={stocks} loading={loading} defaultCurrency={currency} onChange={load} />
+          <StockTab stocks={view.stocks} loading={loading} defaultCurrency={currency} onChange={load} />
         </TabsContent>
         <TabsContent value="funds" className="space-y-4">
-          <FundTab funds={funds} loading={loading} defaultCurrency={currency} onChange={load} />
+          <FundTab funds={view.funds} loading={loading} defaultCurrency={currency} onChange={load} />
         </TabsContent>
         <TabsContent value="fds" className="space-y-4">
-          <FixedDepositTab deposits={deposits} loading={loading} defaultCurrency={currency} onChange={load} />
+          <FixedDepositTab deposits={view.deposits} loading={loading} defaultCurrency={currency} onChange={load} />
         </TabsContent>
         <TabsContent value="other" className="space-y-4">
-          <OtherAssetTab assets={otherAssets} loading={loading} defaultCurrency={currency} onChange={load} />
+          <OtherAssetTab assets={view.otherAssets} loading={loading} defaultCurrency={currency} onChange={load} />
         </TabsContent>
         <TabsContent value="sold" className="space-y-4">
-          <SalesHistory sales={sales} loading={loading} onChanged={load} />
+          <SalesHistory sales={view.sales} loading={loading} onChanged={load} />
         </TabsContent>
       </Tabs>
       </SellContext.Provider>
@@ -457,6 +560,7 @@ function StockTab({
 }) {
   const series = usePriceSeries();
   const [open, setOpen] = useState(false);
+  const [funding, setFunding] = useState<FundingValue>(emptyFunding);
   const [saving, setSaving] = useState(false);
   const [ticker, setTicker] = useState("");
   const [exchange, setExchange] = useState("");
@@ -490,12 +594,13 @@ function StockTab({
     const res = await fetch("/api/investments/stocks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticker, exchange, quantity, price, currency, purchaseDate }),
+      body: JSON.stringify({ ticker, exchange, quantity, price, currency, purchaseDate, ...fundingBody(funding) }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add stock.");
     setOpen(false);
+    setFunding(emptyFunding());
     setTicker("");
     setQuantity("");
     setPrice("");
@@ -646,6 +751,7 @@ function StockTab({
                 Already own this stock? Adding it again with the same ticker, exchange, and currency combines it into
                 your existing holding and averages the price. No duplicate row.
               </p>
+              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(quantity) * Number(price)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
@@ -740,6 +846,7 @@ function FundTab({
 }) {
   const series = usePriceSeries();
   const [open, setOpen] = useState(false);
+  const [funding, setFunding] = useState<FundingValue>(emptyFunding);
   const [saving, setSaving] = useState(false);
   const [fundName, setFundName] = useState("");
   const [schemeCode, setSchemeCode] = useState("");
@@ -754,12 +861,13 @@ function FundTab({
     const res = await fetch("/api/investments/mutual-funds", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fundName, schemeCode, units, avgNav, currency, purchaseDate }),
+      body: JSON.stringify({ fundName, schemeCode, units, avgNav, currency, purchaseDate, ...fundingBody(funding) }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add fund.");
     setOpen(false);
+    setFunding(emptyFunding());
     setFundName("");
     setUnits("");
     setAvgNav("");
@@ -818,6 +926,7 @@ function FundTab({
                 <Label>Bought on</Label>
                 <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
               </div>
+              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(units) * Number(avgNav)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
@@ -843,6 +952,7 @@ function FixedDepositTab({
   onChange: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [funding, setFunding] = useState<FundingValue>(emptyFunding);
   const [saving, setSaving] = useState(false);
   const [bank, setBank] = useState("");
   const [principal, setPrincipal] = useState("");
@@ -857,12 +967,13 @@ function FixedDepositTab({
     const res = await fetch("/api/investments/fixed-deposits", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bank, principal, interestRate, currency, startDate, maturityDate }),
+      body: JSON.stringify({ bank, principal, interestRate, currency, startDate, maturityDate, ...fundingBody(funding) }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add fixed deposit.");
     setOpen(false);
+    setFunding(emptyFunding());
     setBank("");
     setPrincipal("");
     setInterestRate("");
@@ -922,6 +1033,7 @@ function FixedDepositTab({
                   </SelectContent>
                 </Select>
               </div>
+              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(principal)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
@@ -947,6 +1059,7 @@ function OtherAssetTab({
   onChange: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [funding, setFunding] = useState<FundingValue>(emptyFunding);
   const [saving, setSaving] = useState(false);
   const [assetType, setAssetType] = useState("GOLD");
   const [name, setName] = useState("");
@@ -961,12 +1074,13 @@ function OtherAssetTab({
     const res = await fetch("/api/investments/other", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ assetType, name, purchasePrice, currentValue, currency, purchaseDate }),
+      body: JSON.stringify({ assetType, name, purchasePrice, currentValue, currency, purchaseDate, ...fundingBody(funding) }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add asset.");
     setOpen(false);
+    setFunding(emptyFunding());
     setName("");
     setPurchasePrice("");
     setCurrentValue("");
@@ -1032,6 +1146,7 @@ function OtherAssetTab({
                   <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
                 </div>
               </div>
+              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(purchasePrice)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
@@ -1041,6 +1156,36 @@ function OtherAssetTab({
       </div>
 
       <AssetTable assets={assets} loading={loading} typeLabel={(t) => OTHER_ASSET_TYPES.find((x) => x.value === t)?.label ?? t} onDelete={handleDelete} onChanged={onChange} />
+    </div>
+  );
+}
+
+/** Start → end date filter with quick presets. */
+function RangeBar({ range, onChange }: { range: { from: string; to: string }; onChange: (r: { from: string; to: string }) => void }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const y = today.slice(0, 4);
+  const yearAgo = new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10);
+  const presets: [string, { from: string; to: string }][] = [
+    ["All time", { from: "", to: "" }],
+    ["This year", { from: `${y}-01-01`, to: today }],
+    ["Last 12 months", { from: yearAgo, to: today }],
+    ["Last year", { from: `${Number(y) - 1}-01-01`, to: `${Number(y) - 1}-12-31` }],
+  ];
+  const active = presets.find(([, r]) => r.from === range.from && r.to === range.to)?.[0];
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div role="radiogroup" aria-label="Period" className="inline-flex rounded-lg bg-muted p-0.5 text-xs">
+        {presets.map(([label, r]) => (
+          <button key={label} role="radio" aria-checked={active === label} onClick={() => onChange(r)} className={`h-7 cursor-pointer rounded-md px-2.5 transition-colors ${active === label ? "bg-card font-medium shadow-card" : "text-muted-foreground hover:text-foreground"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Input type="date" aria-label="From" value={range.from} max={range.to || undefined} onChange={(e) => onChange({ ...range, from: e.target.value })} className="h-8 w-[150px]" />
+        <span aria-hidden>→</span>
+        <Input type="date" aria-label="To" value={range.to} min={range.from || undefined} onChange={(e) => onChange({ ...range, to: e.target.value })} className="h-8 w-[150px]" />
+      </div>
     </div>
   );
 }

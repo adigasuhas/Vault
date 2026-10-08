@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
   if (process.env.ALLOW_SIGNUP === "false") {
     return NextResponse.json({ error: "Sign-ups are closed on this VAULT. Ask the owner for an account." }, { status: 403 });
   }
-  const limit = rateLimit(`register:ip:${clientIp(req)}`, 5, 60 * 60 * 1000);
+  const limit = await rateLimit(`register:ip:${clientIp(req)}`, 5, 60 * 60 * 1000);
   if (!limit.ok) {
     return NextResponse.json({ error: "Too many sign-ups from here. Try again in a while." }, { status: 429, headers: { "Retry-After": String(limit.retryAfterSeconds) } });
   }

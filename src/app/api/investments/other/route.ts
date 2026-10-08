@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { fundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { parseJson, toErrorResponse } from "@/lib/validate";
@@ -29,20 +31,36 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(errBody, { status });
   }
 
-  const asset = await db.otherAsset.create({
-    data: {
-      userId: session.userId,
-      assetType: input.assetType,
-      name: input.name,
-      quantity: input.quantity,
-      unit: input.unit,
-      purchasePrice: input.purchasePrice,
-      currentValue: input.currentValue,
-      currency: input.currency,
-      purchaseDate: input.purchaseDate,
-      notes: input.notes,
-    },
-  });
+  let asset;
+  try {
+    asset = await db.$transaction(async (tx: Tx) => {
+      const a = await tx.otherAsset.create({
+        data: {
+          userId: session.userId,
+          assetType: input.assetType,
+          name: input.name,
+          quantity: input.quantity,
+          unit: input.unit,
+          purchasePrice: input.purchasePrice,
+          currentValue: input.currentValue,
+          currency: input.currency,
+          purchaseDate: input.purchaseDate,
+          notes: input.notes,
+        },
+      });
+      await fundPurchase(
+        tx,
+        session.userId,
+        `ASSET:${a.id}`,
+        { cost: input.purchasePrice, currency: input.currency, date: input.purchaseDate, label: input.name },
+        { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount }
+      );
+      return a;
+    });
+  } catch (err) {
+    const { body: errBody, status } = toErrorResponse(err);
+    return NextResponse.json(errBody, { status });
+  }
 
   return NextResponse.json({ asset }, { status: 201 });
 }

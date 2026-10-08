@@ -51,6 +51,7 @@ const TYPE_LABEL: Record<string, string> = {
   OPENING: "Opening balance",
   REVERSAL: "Reversal",
   INVESTMENT_SALE: "Investment sale",
+  INVESTMENT_PURCHASE: "Investment purchase",
 };
 
 function describe(r: Row) {

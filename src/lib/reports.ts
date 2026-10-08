@@ -60,6 +60,7 @@ const TYPE_LABEL: Record<string, string> = {
   OPENING: "Opening balance",
   REVERSAL: "Reversal",
   INVESTMENT_SALE: "Investment sale",
+  INVESTMENT_PURCHASE: "Investment purchase",
 };
 
 export async function buildReport(userId: string, type: ReportType, p: ReportParams): Promise<Report> {

@@ -1,4 +1,6 @@
 import { db } from "@/lib/db";
+import { fundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 import { authed } from "@/lib/api";
 import { fetchMutualFundNav } from "@/lib/market-data";
 import { parseJson } from "@/lib/validate";
@@ -28,27 +30,31 @@ export const POST = authed(async (req, { userId }) => {
       ...(input.schemeCode ? { schemeCode: input.schemeCode } : { fundName: { equals: input.fundName, mode: "insensitive" } }),
     },
   });
-  if (existing) {
-    await db.mutualFundLot.create({ data: { holdingId: existing.id, units: input.units, nav: input.avgNav, purchaseDate: input.purchaseDate } });
-    const holding = await recomputeFundFromLots(existing.id);
-    return Response.json({ holding, merged: true }, { status: 201 });
-  }
   // Best effort: an unreachable NAV feed shouldn't block adding the holding.
-  const initialNav = input.schemeCode ? await fetchMutualFundNav(input.schemeCode) : null;
-  const holding = await db.mutualFundHolding.create({
-    data: {
-      userId,
-      fundName: input.fundName,
-      schemeCode: input.schemeCode,
-      units: input.units,
-      avgNav: input.avgNav,
-      currency: input.currency,
-      purchaseDate: input.purchaseDate,
-      lastNav: initialNav,
-      lastNavAt: initialNav != null ? new Date() : null,
-      lots: { create: { units: input.units, nav: input.avgNav, purchaseDate: input.purchaseDate } },
-    },
-    include: { lots: true },
+  const initialNav = !existing && input.schemeCode ? await fetchMutualFundNav(input.schemeCode) : null;
+  const funding = { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount };
+  const holding = await db.$transaction(async (tx: Tx) => {
+    const holdingId =
+      existing?.id ??
+      (
+        await tx.mutualFundHolding.create({
+          data: {
+            userId,
+            fundName: input.fundName,
+            schemeCode: input.schemeCode,
+            units: input.units,
+            avgNav: input.avgNav,
+            currency: input.currency,
+            purchaseDate: input.purchaseDate,
+            lastNav: initialNav,
+            lastNavAt: initialNav != null ? new Date() : null,
+          },
+        })
+      ).id;
+    const lot = await tx.mutualFundLot.create({ data: { holdingId, units: input.units, nav: input.avgNav, purchaseDate: input.purchaseDate } });
+    await fundPurchase(tx, userId, `FUND_LOT:${lot.id}`, { cost: input.units * input.avgNav, currency: input.currency, date: input.purchaseDate, label: input.fundName }, funding);
+    await recomputeFundFromLots(holdingId, tx);
+    return tx.mutualFundHolding.findUnique({ where: { id: holdingId }, include: { lots: true } });
   });
-  return Response.json({ holding, merged: false }, { status: 201 });
+  return Response.json({ holding, merged: !!existing }, { status: 201 });
 });

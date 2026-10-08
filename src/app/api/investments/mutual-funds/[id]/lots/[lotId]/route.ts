@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { refundPurchase, unfundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { authed, notFound } from "@/lib/api";
 import { parseJson, zIsoDate, zPositive, zNonNegative } from "@/lib/validate";
@@ -17,15 +19,22 @@ export const PATCH = authed<{ id: string; lotId: string }>(async (req, { userId,
   const lot = await ownedLot(userId, params.id, params.lotId);
   if (!lot) return notFound("Purchase not found.");
   const input = await parseJson(req, schema);
-  await db.mutualFundLot.update({ where: { id: lot.id }, data: input });
-  return { holding: await recomputeFundFromLots(params.id) };
+  const holding = await db.$transaction(async (tx: Tx) => {
+    const updated = await tx.mutualFundLot.update({ where: { id: lot.id }, data: input, include: { holding: true } });
+    await refundPurchase(tx, userId, `FUND_LOT:${lot.id}`, { cost: Number(updated.units) * Number(updated.nav), currency: updated.holding.currency, date: updated.purchaseDate, label: updated.holding.fundName });
+    return recomputeFundFromLots(params.id, tx);
+  });
+  return { holding };
 });
 
 /** Removes one purchase; the last one takes the fund with it. */
 export const DELETE = authed<{ id: string; lotId: string }>(async (_req, { userId, params }) => {
   const lot = await ownedLot(userId, params.id, params.lotId);
   if (!lot) return notFound("Purchase not found.");
-  await db.mutualFundLot.delete({ where: { id: lot.id } });
-  const holding = await recomputeFundFromLots(params.id);
+  const holding = await db.$transaction(async (tx: Tx) => {
+    await unfundPurchase(tx, userId, `FUND_LOT:${lot.id}`, "Fund purchase");
+    await tx.mutualFundLot.delete({ where: { id: lot.id } });
+    return recomputeFundFromLots(params.id, tx);
+  });
   return { holding, holdingDeleted: holding === null };
 });

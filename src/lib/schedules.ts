@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { Prisma, type ScheduledCredit, type CreditExecution, type ScheduleOverride } from "@prisma/client";
 import { ValidationError } from "@/lib/validate";
 import { createFxConverter } from "@/lib/fx";
+import { loanAmortization } from "@/lib/loans";
 import { audit, postOccurrence, recordLoanPayment, reverseOccurrenceEntry, assertSufficientFunds, type Tx } from "@/lib/ledger";
 import {
   dateOnly,
@@ -372,8 +373,9 @@ export async function confirmOccurrence(
       where: { id: x.id },
       data: { status: "CONFIRMED", confirmedAt: new Date(), amount, executedDate: date, failureReason: null },
     });
-    // Paying a loan's last EMI closes it and ends its schedule.
-    if (schedule.loanId && schedule.categoryId) await syncScheduledBudgets(tx, userId, [schedule.categoryId]);
+    // The loan's remaining plan follows what was actually paid (and paying
+    // the last EMI closes it and ends the schedule).
+    if (schedule.loanId) await syncLoanSchedule(tx, userId, schedule.loanId);
     await audit(tx, userId, "occurrence", x.id, "occurrence.confirm", `${x.scheduledCredit.name}: ${schedule.direction === "INCOME" ? "received" : "paid"}`, {
       amount,
       date: isoDate(date),
@@ -445,10 +447,10 @@ export async function payNextLoanEmi(
         where: { id: executionId },
         data: { status: "CONFIRMED", confirmedAt: new Date(), amount: input.amount, executedDate: date, failureReason: null },
       });
-      if (s.categoryId) await syncScheduledBudgets(tx, userId, [s.categoryId]);
     } else {
       await recordLoanPayment(userId, { loanId: loan.id, amount: input.amount, paidOn: date, fromAccountId: acct.id }, tx);
     }
+    await syncLoanSchedule(tx, userId, loan.id);
     const paid = await tx.loanPayment.count({ where: { loanId: loan.id, reversedAt: null } });
     await audit(tx, userId, "loan", loan.id, "loan.emi_logged", `${loan.name}: EMI ${paid} of ${loan.installments} paid`, {
       amount: input.amount,
@@ -547,6 +549,9 @@ export async function reverseOccurrence(userId: string, executionId: string, rea
       amount: Number(x.amount),
       reason: reason ?? null,
     });
+    // A reversed EMI is owed again: the loan's remaining plan absorbs it.
+    if (x.scheduledCredit.loanId) await syncLoanSchedule(tx, userId, x.scheduledCredit.loanId);
+    else if (x.scheduledCredit.categoryId) await syncScheduledBudgets(tx, userId, [x.scheduledCredit.categoryId]);
     return updated;
   });
 }
@@ -636,6 +641,10 @@ export interface ScheduleInput {
   currency?: string;
   /** Per-occurrence date/amount changes, keyed by nominal date. */
   overrides?: { occurrenceDate: Date; date?: Date | null; amount?: number | null }[];
+  /** The first occurrence to process, when later than `startDate` (a loan's
+   * EMIs keep the loan's own day of the month as the anchor — e.g. the 31st —
+   * while starting from the first EMI still to pay). */
+  firstDue?: Date;
 }
 
 export async function createSchedule(userId: string, input: ScheduleInput, txIn?: Tx) {
@@ -673,7 +682,7 @@ export async function createSchedule(userId: string, input: ScheduleInput, txIn?
         customIntervalDays: input.frequency === "CUSTOM" ? input.customIntervalDays ?? 30 : null,
         startDate: start,
         endDate: input.endDate ? dateOnly(input.endDate) : null,
-        nextExecutionDate: start,
+        nextExecutionDate: input.firstDue ? dateOnly(input.firstDue) : start,
         requiresConfirmation: input.requiresConfirmation,
       },
     });
@@ -826,8 +835,8 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
   });
 }
 
-/** Removes a schedule. Nothing paid yet: it's deleted outright, with any
- * occurrences that were merely due or skipped. Payments made: an open-ended
+/** Removes a schedule. Nothing paid (or every payment reversed): it's deleted
+ * outright, with any occurrences that were merely due or skipped. Payments made: an open-ended
  * one is ended (nothing more is owed); one with an end date and payments
  * still to come has to be paid off instead (payOffSchedule). A loan's EMI
  * schedule is managed through the loan. */
@@ -836,7 +845,9 @@ export async function deleteOrEndSchedule(userId: string, scheduleId: string) {
     const s = await tx.scheduledCredit.findFirst({ where: { id: scheduleId, userId }, include: { overrides: true, executions: true } });
     if (!s) throw new ValidationError("Schedule not found.");
     if (s.loanId) throw new ValidationError("This is a loan's EMI schedule. Pay off or delete the loan instead.");
-    const booked = s.executions.some((x) => x.status === "CONFIRMED" || x.status === "REVERSED");
+    // Reversed payments don't stand in the way: their entries (and reversals)
+    // stay in the ledger when the schedule goes.
+    const booked = s.executions.some((x) => x.status === "CONFIRMED");
     if (!booked) {
       await tx.scheduledCredit.delete({ where: { id: s.id } });
       await audit(tx, userId, "schedule", s.id, "schedule.delete", `Deleted ${s.name} (nothing paid)`);
@@ -919,7 +930,130 @@ export async function payOffSchedule(userId: string, scheduleId: string, input: 
   });
 }
 
+/** Keeps a loan's EMI schedule in step with the loan as it stands now: after
+ * a payment, an extra payment, a reversal or a change of EMI/rate/months.
+ * EMIs already due take the re-planned amounts, the schedule's regular amount
+ * and end date follow the remaining plan (a last EMI that differs gets its own
+ * amount), and budgets re-sync. Past, booked EMIs are never touched. */
+export async function syncLoanSchedule(tx: Tx, userId: string, loanId: string) {
+  const loan = await tx.loan.findFirst({ where: { id: loanId, userId } });
+  if (!loan) return;
+  const s = await tx.scheduledCredit.findFirst({ where: { loanId }, include: { overrides: true, executions: true } });
+  if (!s) return;
+  const payments = await tx.loanPayment.findMany({ where: { loanId, reversedAt: null } });
+  const rows = loanAmortization(loan, payments);
+  const paid = payments.filter((p) => p.kind !== "PREPAYMENT").length;
+  const future = rows.slice(paid);
+  const due = s.executions
+    .filter((x) => x.status === "PENDING" || x.status === "FAILED")
+    .sort((a, b) => (a.occurrenceDate?.getTime() ?? 0) - (b.occurrenceDate?.getTime() ?? 0));
+  if (loan.status === "CLOSED" || future.length === 0) {
+    for (const x of due) await tx.creditExecution.update({ where: { id: x.id }, data: { status: "SKIPPED", confirmedAt: new Date(), note: "Nothing left to pay on the loan" } });
+    await tx.scheduledCredit.update({ where: { id: s.id }, data: { isActive: false, cancelledAt: new Date() } });
+  } else {
+    for (const [i, x] of due.entries()) {
+      const row = future[i];
+      if (row && Math.abs(Number(x.amount) - row.emi) > 0.004) await tx.creditExecution.update({ where: { id: x.id }, data: { amount: row.emi } });
+    }
+    const upcoming = future.slice(due.length);
+    // Owed again after a reversal: a loan's schedule runs as long as the loan.
+    if (!s.isActive && upcoming.length) await tx.scheduledCredit.update({ where: { id: s.id }, data: { isActive: true, cancelledAt: null } });
+    if (upcoming.length === 0) {
+      // Everything left is already due: nothing more to schedule.
+      await tx.scheduledCredit.update({ where: { id: s.id }, data: { isActive: false, cancelledAt: new Date() } });
+    } else {
+      // The schedule's next free dates (nothing stored against them yet), one
+      // per EMI still to schedule — so a reversed EMI extends the end date.
+      const freq = s.frequency as Frequency;
+      const stored = new Set(s.executions.map((x) => x.occurrenceDate && dateOnly(x.occurrenceDate).getTime()));
+      const nominals: Date[] = [];
+      for (let k = 0; nominals.length < upcoming.length && k < 1200; k++) {
+        const d = nthOccurrence(s.startDate, freq, k, s.customIntervalDays);
+        if (d < dateOnly(s.nextExecutionDate) || stored.has(d.getTime())) continue;
+        nominals.push(d);
+      }
+      const regular = upcoming[0].emi;
+      const endDate = nominals[nominals.length - 1];
+      await tx.scheduledCredit.update({ where: { id: s.id }, data: { amount: regular, endDate } });
+      await tx.scheduleOverride.deleteMany({ where: { scheduledCreditId: s.id, occurrenceDate: { gte: nominals[0] }, date: null } });
+      await tx.scheduleOverride.updateMany({ where: { scheduledCreditId: s.id, occurrenceDate: { gte: nominals[0] } }, data: { amount: null } });
+      for (const [i, row] of upcoming.entries()) {
+        if (Math.abs(row.emi - regular) <= 0.004 || !nominals[i]) continue;
+        await tx.scheduleOverride.upsert({
+          where: { scheduledCreditId_occurrenceDate: { scheduledCreditId: s.id, occurrenceDate: nominals[i] } },
+          update: { amount: row.emi },
+          create: { scheduledCreditId: s.id, occurrenceDate: nominals[i], amount: row.emi },
+        });
+      }
+    }
+  }
+  if (s.categoryId) await syncScheduledBudgets(tx, userId, [s.categoryId]);
+}
+
+/** The dates a loan's remaining EMIs will actually fall on, from its live EMI
+ * schedule: EMIs already due first, then the schedule's next free dates (with
+ * any moved dates applied). Null without a live schedule. */
+export async function loanScheduleDates(client: Pick<Tx, "scheduledCredit">, loanId: string, count: number): Promise<Date[] | null> {
+  const s = await client.scheduledCredit.findFirst({ where: { loanId, isActive: true }, include: { overrides: true, executions: true } });
+  if (!s || count <= 0) return null;
+  const dates = s.executions
+    .filter((x) => x.status === "PENDING" || x.status === "FAILED")
+    .sort((a, b) => a.executedDate.getTime() - b.executedDate.getTime())
+    .map((x) => dateOnly(x.executedDate));
+  const stored = new Set(s.executions.map((x) => x.occurrenceDate && dateOnly(x.occurrenceDate).getTime()));
+  const moved = new Map(s.overrides.filter((o) => o.date).map((o) => [dateOnly(o.occurrenceDate).getTime(), dateOnly(o.date!)]));
+  for (let k = 0; dates.length < count && k < 1200; k++) {
+    const d = nthOccurrence(s.startDate, s.frequency as Frequency, k, s.customIntervalDays);
+    if (d < dateOnly(s.nextExecutionDate) || stored.has(d.getTime())) continue;
+    dates.push(moved.get(d.getTime()) ?? d);
+  }
+  return dates;
+}
+
 // ------------------------------------------------------------- budget sync
+
+/** Puts a recurring category's line (e.g. an unscheduled loan's EMI) back
+ * into this and coming months' budgets at its current default amount. */
+export async function ensureRecurringLine(tx: Tx, userId: string, categoryId: string) {
+  const cat = await tx.category.findFirst({ where: { id: categoryId, userId } });
+  if (!cat?.isDefault) return;
+  const current = monthKey(await userTodayTx(tx, userId));
+  const plans = await tx.budgetPlan.findMany({ where: { userId, month: { gte: current } } });
+  if (!plans.length) return;
+  const owner = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true } });
+  const fx = await createFxConverter(userId, owner.baseCurrency, { refresh: false, client: tx });
+  for (const plan of plans) {
+    if (cat.defaultSince && cat.defaultSince > plan.month) continue;
+    const amount = fx.convertTo(Number(cat.defaultAmount), cat.defaultCurrency ?? plan.currency, plan.currency) ?? Number(cat.defaultAmount);
+    await tx.budgetCategoryAllocation.upsert({
+      where: { budgetPlanId_categoryId: { budgetPlanId: plan.id, categoryId } },
+      update: {},
+      create: { budgetPlanId: plan.id, categoryId, budgetAmount: Math.round(amount * 100) / 100, accountId: cat.defaultAccountId, sortOrder: cat.sortOrder, source: "RECURRING" },
+    });
+  }
+}
+
+/** A loan stopped carrying its EMI into budgets (deleted, closed, paid off,
+ * or moved onto an EMI schedule): drop the lines it stamped into this and
+ * coming months, then re-size from any live schedule. Past months are history
+ * and stay. With `dropCategoryIfUnused`, the "Loan: …" category itself is
+ * removed when nothing (expenses, ledger, past budgets) refers to it. */
+export async function retireLoanBudget(tx: Tx, userId: string, categoryId: string, opts: { dropCategoryIfUnused?: boolean } = {}) {
+  const current = monthKey(await userTodayTx(tx, userId));
+  await tx.budgetCategoryAllocation.deleteMany({
+    where: { categoryId, source: { in: ["RECURRING", "SCHEDULE"] }, budgetPlan: { userId, month: { gte: current } } },
+  });
+  await syncScheduledBudgets(tx, userId, [categoryId]);
+  if (!opts.dropCategoryIfUnused) return;
+  const [ledger, expenses, allocations, schedules, loans] = await Promise.all([
+    tx.ledgerEntry.count({ where: { categoryId } }),
+    tx.expense.count({ where: { categoryId } }),
+    tx.budgetCategoryAllocation.count({ where: { categoryId } }),
+    tx.scheduledCredit.count({ where: { categoryId } }),
+    tx.loan.count({ where: { categoryId } }),
+  ]);
+  if (ledger + expenses + allocations + schedules + loans === 0) await tx.category.delete({ where: { id: categoryId } });
+}
 
 /**
  * Keeps budget allocations that were sized from scheduled payments in step
@@ -939,6 +1073,15 @@ export async function syncScheduledBudgets(tx: Tx, userId: string, categoryIds?:
     include: { overrides: true, executions: true },
   });
   const cats = new Set<string>(categoryIds ?? schedules.map((s) => s.categoryId).filter((c): c is string => !!c));
+  // Lines sized from schedules that no longer exist (deleted, or moved to
+  // another category) must be revisited too, or they linger in the budget.
+  if (!categoryIds?.length) {
+    const sized = await tx.budgetCategoryAllocation.findMany({
+      where: { source: "SCHEDULE", budgetPlanId: { in: plans.map((p) => p.id) } },
+      select: { categoryId: true },
+    });
+    for (const a of sized) cats.add(a.categoryId);
+  }
   const owner = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true } });
   const fx = await createFxConverter(userId, owner.baseCurrency, { refresh: false, client: tx });
   for (const plan of plans) {
@@ -976,7 +1119,12 @@ export async function syncScheduledBudgets(tx: Tx, userId: string, categoryIds?:
         });
       } else if (existing.source === "SCHEDULE") {
         const amount = Math.round((c?.amount ?? 0) * 100) / 100;
-        if (Number(existing.budgetAmount) !== amount) {
+        if (amount <= 0) {
+          // Nothing scheduled any more: the line existed only because of the
+          // schedule, so it goes (spending in the category, if any, shows as
+          // unbudgeted). Lines the user set by hand are never touched.
+          await tx.budgetCategoryAllocation.delete({ where: { id: existing.id } });
+        } else if (Number(existing.budgetAmount) !== amount) {
           await tx.budgetCategoryAllocation.update({ where: { id: existing.id }, data: { budgetAmount: amount } });
           await tx.budgetAdjustment.create({
             data: {

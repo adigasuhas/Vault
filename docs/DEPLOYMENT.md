@@ -180,7 +180,7 @@ Auth endpoints (login, sign-up, recovery, password reset) are rate limited per a
 - `N` (a number): the N-th address from the right of `X-Forwarded-For`, i.e. the one your outermost proxy appended. Addresses a client prepends are ignored.
 - `none`: no IP is trusted and every caller shares one bucket. That's strict but can't be bypassed; per-account limits still apply.
 
-The limiter is in memory, so limits are per instance and reset on restart. On multi-instance deployments this is a soft limit; a shared store (Upstash Redis, Vercel KV) is the upgrade path (`src/lib/rate-limit.ts`).
+Counters are kept in Postgres (the `RateLimitBucket` table), so every instance shares them and they survive restarts and redeploys. If the database is unreachable, each instance falls back to its own in-memory counter (`src/lib/rate-limit.ts`).
 
 ## Troubleshooting
 

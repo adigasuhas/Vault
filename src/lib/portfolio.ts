@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { createFxConverter, type FxConverter } from "@/lib/fx";
 import { fdCurrentValue } from "@/lib/investments";
+import { proceedsLeft } from "@/lib/investment-sales";
 
 /**
  * Single source of truth for "what is the investment portfolio worth right now",
@@ -17,6 +18,8 @@ export interface PortfolioValue {
   funds: number;
   deposits: number;
   other: number;
+  /** Sale proceeds kept for reinvestment and not yet used or moved to an account. */
+  proceeds: number;
   total: number;
   holdings: {
     stocks: Awaited<ReturnType<typeof db.stockHolding.findMany>>;
@@ -33,11 +36,12 @@ export async function computePortfolioValue(
 ): Promise<PortfolioValue> {
   const fx = converter ?? (await createFxConverter(userId, baseCurrency));
 
-  const [stocks, funds, deposits, other] = await Promise.all([
+  const [stocks, funds, deposits, other, kept] = await Promise.all([
     db.stockHolding.findMany({ where: { userId } }),
     db.mutualFundHolding.findMany({ where: { userId } }),
     db.fixedDeposit.findMany({ where: { userId } }),
     db.otherAsset.findMany({ where: { userId } }),
+    db.investmentSale.findMany({ where: { userId, accountId: null, reversedAt: null } }),
   ]);
 
   const stockValue = stocks.reduce(
@@ -58,13 +62,18 @@ export async function computePortfolioValue(
     0
   );
   const otherValue = other.reduce((sum, a) => sum + fx.convert(Number(a.currentValue), a.currency), 0);
+  // Money from a sale that hasn't been reinvested or moved to an account is
+  // still part of the portfolio — otherwise selling to reinvest would make
+  // net worth dip until the new purchase is recorded.
+  const proceedsValue = kept.reduce((sum, s) => sum + fx.convert(proceedsLeft(s), s.currency), 0);
 
   return {
     stocks: stockValue,
     funds: fundValue,
     deposits: depositValue,
     other: otherValue,
-    total: stockValue + fundValue + depositValue + otherValue,
+    proceeds: proceedsValue,
+    total: stockValue + fundValue + depositValue + otherValue + proceedsValue,
     holdings: { stocks, funds, deposits, other },
   };
 }

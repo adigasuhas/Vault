@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 import { Prisma, type LedgerEntryType } from "@prisma/client";
 import { ValidationError, MAX_AMOUNT } from "@/lib/validate";
 import { loanAmortization, loanProgress } from "@/lib/loans";
-import { dateOnly, nthOccurrence, type Frequency } from "@/lib/dates";
+import { dateOnly, nthOccurrence, todayIn, type Frequency } from "@/lib/dates";
 
 export type Tx = Prisma.TransactionClient;
 
@@ -25,7 +25,7 @@ export type Tx = Prisma.TransactionClient;
 /** Balance effect of an entry. */
 export function signedAmount(type: LedgerEntryType | string, amount: number): number {
   if (type === "ADJUSTMENT" || type === "OPENING" || type === "REVERSAL") return amount;
-  return type === "EXPENSE" || type === "TRANSFER_OUT" ? -amount : amount;
+  return type === "EXPENSE" || type === "TRANSFER_OUT" || type === "INVESTMENT_PURCHASE" ? -amount : amount;
 }
 
 /** Account types that hold the user's own money and can't go below zero.
@@ -120,6 +120,7 @@ type PostInput = {
   creditExecutionId?: string;
   loanPaymentId?: string;
   investmentSaleId?: string;
+  investmentRef?: string;
   categoryId?: string | null;
   reversalOfId?: string;
   oneTime?: boolean;
@@ -130,6 +131,18 @@ type PostInput = {
  * (entries without an account move no balance). */
 async function post(tx: Tx, input: PostInput) {
   const effect = signedAmount(input.type, Number(input.amount));
+  // Balances are the running sum of every entry, so an entry dated in the
+  // future would move today's balance while statements, budgets and
+  // analytics place it in its own month. Money that moves later belongs in a
+  // scheduled payment, which books itself on its date. (Reversals are dated
+  // when they happen and are exempt.)
+  if (input.accountId && input.type !== "REVERSAL") {
+    const owner = await tx.user.findUnique({ where: { id: input.userId }, select: { timezone: true } });
+    const today = todayIn(owner?.timezone || "UTC");
+    if (dateOnly(input.date) > today) {
+      throw new ValidationError("That date is in the future. Record it on or after the day the money moves, or set it up as a scheduled payment.");
+    }
+  }
   if (input.accountId) {
     await tx.account.update({
       where: { id: input.accountId },
@@ -150,6 +163,7 @@ async function post(tx: Tx, input: PostInput) {
       creditExecutionId: input.creditExecutionId,
       loanPaymentId: input.loanPaymentId,
       investmentSaleId: input.investmentSaleId,
+      investmentRef: input.investmentRef,
       categoryId: input.categoryId ?? null,
       reversalOfId: input.reversalOfId,
       oneTime: input.oneTime ?? false,
@@ -730,6 +744,43 @@ export async function postInvestmentSale(
 }
 
 /** Takes a sale's proceeds back out of the account it was credited to. */
+/** Pays for an investment purchase out of an account (an INVESTMENT_PURCHASE
+ * entry, linked to the purchase by `ref`). With a category it counts toward
+ * that budget line; it never counts as spending in analytics. */
+export async function postInvestmentPurchase(
+  tx: Tx,
+  userId: string,
+  input: { ref: string; accountId: string; amount: number; currency: string; date: Date; description: string; categoryId?: string | null }
+) {
+  const account = await tx.account.findFirst({ where: { id: input.accountId, userId } });
+  if (!account) throw new ValidationError("Account not found.");
+  assertOpen(account);
+  assertPostable(input.amount, input.currency, account.currency);
+  assertSufficientFunds(account, input.amount);
+  if (input.categoryId && !(await tx.category.findFirst({ where: { id: input.categoryId, userId } }))) {
+    throw new ValidationError("Budget category not found.");
+  }
+  return post(tx, {
+    userId,
+    accountId: account.id,
+    type: "INVESTMENT_PURCHASE",
+    amount: input.amount,
+    currency: account.currency,
+    date: input.date,
+    description: input.description,
+    investmentRef: input.ref,
+    categoryId: input.categoryId ?? null,
+  });
+}
+
+/** Undoes what a purchase took out of an account (the purchase was deleted
+ * as a mistake): each of its standing entries is cancelled by a REVERSAL. */
+export async function reverseInvestmentPurchase(tx: Tx, userId: string, ref: string, reason: string) {
+  const entries = await tx.ledgerEntry.findMany({ where: { userId, investmentRef: ref, type: "INVESTMENT_PURCHASE", reversedAt: null } });
+  for (const e of entries) await reverseEntry(tx, e.id, reason);
+  return entries;
+}
+
 export async function reverseInvestmentSale(tx: Tx, userId: string, saleId: string, reason: string) {
   const entry = await tx.ledgerEntry.findFirst({ where: { investmentSaleId: saleId, userId }, include: { account: true } });
   if (!entry) throw new ValidationError("This sale has no ledger entry to reverse.");
@@ -749,7 +800,17 @@ export async function reverseInvestmentSale(tx: Tx, userId: string, saleId: stri
  * (the EMI schedule confirms through here). */
 export async function recordLoanPayment(
   userId: string,
-  input: { loanId: string; amount: number; paidOn: Date; fromAccountId?: string; note?: string; occurrenceId?: string; creditExecutionId?: string },
+  input: {
+    loanId: string;
+    amount: number;
+    paidOn: Date;
+    fromAccountId?: string;
+    note?: string;
+    occurrenceId?: string;
+    creditExecutionId?: string;
+    /** PREPAYMENT: extra towards principal, not an installment. */
+    kind?: "EMI" | "PREPAYMENT";
+  },
   txIn?: Tx
 ) {
   if (!(input.amount > 0)) throw new ValidationError("Payment amount must be greater than zero.");
@@ -758,14 +819,25 @@ export async function recordLoanPayment(
     const loan = await tx.loan.findFirst({ where: { id: input.loanId, userId } });
     if (!loan) throw new ValidationError("Loan not found.");
 
-    const existing = await tx.loanPayment.count({ where: { loanId: loan.id, reversedAt: null } });
-    const schedule = loanAmortization(loan);
-    if (existing >= schedule.length) throw new ValidationError("This loan is already fully paid.");
-    const row = schedule[existing];
+    if (loan.status === "CLOSED") throw new ValidationError(`${loan.name} is closed.`);
+    const live = await tx.loanPayment.findMany({ where: { loanId: loan.id, reversedAt: null } });
+    const schedule = loanAmortization(loan, live);
+    const outstanding = Math.max(0, Number(loan.principal) - live.reduce((t, p) => t + Number(p.principalComponent), 0));
+    if (outstanding <= 0.004) throw new ValidationError("This loan is already fully paid.");
+    const kind = input.kind ?? "EMI";
+    const existing = live.filter((p) => p.kind !== "PREPAYMENT").length;
+    const row = schedule[existing] ?? schedule[schedule.length - 1];
 
-    const interestShare = row.emi > 0 ? row.interest / row.emi : 0;
-    const interestComponent = Math.min(input.amount, input.amount * interestShare);
-    const principalComponent = input.amount - interestComponent;
+    // An EMI splits like the plan's next row; an extra payment all goes to
+    // principal. Never more principal than is owed.
+    const interestShare = kind === "EMI" && row && row.emi > 0 ? row.interest / row.emi : 0;
+    let interestComponent = Math.round(Math.min(input.amount, input.amount * interestShare) * 100) / 100;
+    let principalComponent = Math.round((input.amount - interestComponent) * 100) / 100;
+    if (principalComponent > outstanding) {
+      if (kind === "PREPAYMENT") throw new ValidationError(`Only ${outstanding.toFixed(2)} ${loan.currency} is still owed. Pay it off instead.`);
+      principalComponent = Math.round(outstanding * 100) / 100;
+      interestComponent = Math.round((input.amount - principalComponent) * 100) / 100;
+    }
 
     let account: Awaited<ReturnType<typeof tx.account.findFirst>> = null;
     if (input.fromAccountId) {
@@ -786,6 +858,7 @@ export async function recordLoanPayment(
         paidOn: input.paidOn,
         note: input.note,
         occurrenceId: input.occurrenceId,
+        kind,
       },
     });
 
@@ -797,14 +870,14 @@ export async function recordLoanPayment(
         amount: input.amount,
         currency: loan.currency,
         date: input.paidOn,
-        description: `${loan.name}: EMI ${row.n} of ${schedule.length}`,
+        description: kind === "PREPAYMENT" ? `${loan.name}: extra payment` : `${loan.name}: EMI ${existing + 1} of ${schedule.length}`,
         loanPaymentId: payment.id,
         creditExecutionId: input.creditExecutionId,
         categoryId: loan.categoryId,
       });
     }
 
-    if (existing + 1 >= schedule.length) {
+    if (outstanding - principalComponent <= 0.004) {
       await tx.loan.update({ where: { id: loan.id }, data: { status: "CLOSED" } });
       await tx.scheduledCredit.updateMany({ where: { loanId: loan.id, isActive: true }, data: { isActive: false, cancelledAt: new Date() } });
       if (loan.categoryId) {
@@ -816,12 +889,39 @@ export async function recordLoanPayment(
   return txIn ? run(txIn) : db.$transaction(run);
 }
 
+/** Reverses one loan payment: its ledger entry is cancelled by a REVERSAL
+ * (both stay on the statement), the payment is stamped reversed and stops
+ * counting toward the loan, and a loan closed by it re-opens. An EMI booked
+ * from the schedule is marked reversed there too. */
+export async function reverseLoanPayment(tx: Tx, userId: string, paymentId: string, reason?: string) {
+  const payment = await tx.loanPayment.findFirst({ where: { id: paymentId, loan: { userId } }, include: { loan: true, ledgerEntry: true } });
+  if (!payment) throw new ValidationError("Payment not found.");
+  if (payment.reversedAt) throw new ValidationError("This payment was already reversed.");
+  const label = payment.kind === "PAYOFF" ? "pay-off" : payment.kind === "PREPAYMENT" ? "extra payment" : "EMI";
+  if (payment.ledgerEntry && !payment.ledgerEntry.reversedAt) {
+    if (payment.ledgerEntry.accountId) assertOpen(await tx.account.findUniqueOrThrow({ where: { id: payment.ledgerEntry.accountId } }));
+    await reverseEntry(tx, payment.ledgerEntry.id, `${payment.loan.name}: ${label} reversed${reason ? ` (${reason})` : ""}`);
+  }
+  await tx.loanPayment.update({ where: { id: payment.id }, data: { reversedAt: new Date() } });
+  if (payment.occurrenceId) {
+    await tx.creditExecution.update({ where: { id: payment.occurrenceId }, data: { status: "REVERSED", reversedAt: new Date(), note: reason ?? null } });
+  }
+  if (payment.loan.status === "CLOSED") await tx.loan.update({ where: { id: payment.loanId }, data: { status: "ACTIVE" } });
+  await audit(tx, userId, "loan", payment.loanId, "loan.payment_reverse", `${payment.loan.name}: ${label} reversed`, {
+    paymentId: payment.id,
+    amount: Number(payment.amount),
+    reason: reason ?? null,
+  });
+  return payment;
+}
+
 /** What's still owed on a loan's principal, from its recorded payments. */
 export async function loanOutstanding(tx: Pick<Tx, "loanPayment">, loan: Parameters<typeof loanAmortization>[0] & { id: string }) {
   const payments = await tx.loanPayment.findMany({ where: { loanId: loan.id, reversedAt: null } });
   const progress = loanProgress(
-    loanAmortization(loan),
-    payments.map((p) => ({ principalComponent: Number(p.principalComponent), interestComponent: Number(p.interestComponent), amount: Number(p.amount) }))
+    loanAmortization(loan, payments),
+    payments.map((p) => ({ principalComponent: Number(p.principalComponent), interestComponent: Number(p.interestComponent), amount: Number(p.amount), kind: p.kind })),
+    Number(loan.principal)
   );
   return Math.round(progress.outstandingPrincipal * 100) / 100;
 }
@@ -855,6 +955,7 @@ export async function payOffLoan(
         interestComponent: Math.round((amount - outstanding) * 100) / 100,
         paidOn: input.date,
         note: "Paid off",
+        kind: "PAYOFF",
       },
     });
     await post(tx, {

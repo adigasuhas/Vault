@@ -1,24 +1,20 @@
+import { db } from "@/lib/db";
+
 /**
- * Minimal fixed-window rate limiter.
+ * Fixed-window rate limiter.
  *
- * In-memory only: it protects a single instance and resets on redeploy. That is
- * enough to blunt credential-stuffing against one Vercel function, but a
- * multi-instance deployment needs a shared store (Upstash Redis / Vercel KV) —
- * tracked for the Phase 2 auth hardening.
+ * Counters live in Postgres (RateLimitBucket), so every server instance —
+ * each serverless function on Vercel, every container behind a load
+ * balancer — shares them, and they survive redeploys. One atomic upsert per
+ * check: a window that has ended starts again at 1. If the database can't be
+ * reached, an in-memory counter for this instance stands in rather than
+ * locking everyone out.
  */
 
 type Bucket = { count: number; resetAt: number };
 
-const store = new Map<string, Bucket>();
+const memory = new Map<string, Bucket>();
 let lastSweep = 0;
-
-function sweep(now: number) {
-  if (now - lastSweep < 60_000) return;
-  lastSweep = now;
-  for (const [key, bucket] of store) {
-    if (bucket.resetAt <= now) store.delete(key);
-  }
-}
 
 export interface RateLimitResult {
   ok: boolean;
@@ -26,36 +22,56 @@ export interface RateLimitResult {
   retryAfterSeconds: number;
 }
 
+function result(count: number, resetAt: number, limit: number, now: number): RateLimitResult {
+  if (count > limit) return { ok: false, remaining: 0, retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000)) };
+  return { ok: true, remaining: limit - count, retryAfterSeconds: 0 };
+}
+
+function memoryLimit(key: string, limit: number, windowMs: number, now: number): RateLimitResult {
+  const bucket = memory.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    memory.set(key, { count: 1, resetAt: now + windowMs });
+    return result(1, now + windowMs, limit, now);
+  }
+  bucket.count += 1;
+  return result(bucket.count, bucket.resetAt, limit, now);
+}
+
 /**
- * @param key      identifier for the caller (e.g. `login:<ip>` or `login:<email>`)
+ * @param key      identifier for the caller (e.g. `login:ip:<ip>` or `login:email:<email>`)
  * @param limit    max requests allowed per window
  * @param windowMs window length in milliseconds
  */
-export function rateLimit(key: string, limit: number, windowMs: number): RateLimitResult {
+export async function rateLimit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
   const now = Date.now();
-  sweep(now);
-
-  const bucket = store.get(key);
-  if (!bucket || bucket.resetAt <= now) {
-    store.set(key, { count: 1, resetAt: now + windowMs });
-    return { ok: true, remaining: limit - 1, retryAfterSeconds: 0 };
+  try {
+    // Times come from the app, not the database's NOW(): the column holds UTC
+    // without a zone, and NOW() follows the session's time zone.
+    const at = new Date(now);
+    const fresh = new Date(now + windowMs);
+    const rows = await db.$queryRaw<{ count: number; resetAt: Date }[]>`
+      INSERT INTO "RateLimitBucket" ("key", "count", "resetAt") VALUES (${key}, 1, ${fresh})
+      ON CONFLICT ("key") DO UPDATE SET
+        "count" = CASE WHEN "RateLimitBucket"."resetAt" <= ${at} THEN 1 ELSE "RateLimitBucket"."count" + 1 END,
+        "resetAt" = CASE WHEN "RateLimitBucket"."resetAt" <= ${at} THEN EXCLUDED."resetAt" ELSE "RateLimitBucket"."resetAt" END
+      RETURNING "count", "resetAt"`;
+    // Now and then, clear windows that ended long ago.
+    if (now - lastSweep > 10 * 60_000) {
+      lastSweep = now;
+      db.rateLimitBucket.deleteMany({ where: { resetAt: { lt: new Date(now - 24 * 60 * 60_000) } } }).catch(() => {});
+    }
+    const row = rows[0];
+    return result(Number(row.count), new Date(row.resetAt).getTime(), limit, now);
+  } catch (e) {
+    console.error("rate limit: database unavailable, using this instance's counter", e);
+    return memoryLimit(key, limit, windowMs, now);
   }
-
-  if (bucket.count >= limit) {
-    return {
-      ok: false,
-      remaining: 0,
-      retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)),
-    };
-  }
-
-  bucket.count += 1;
-  return { ok: true, remaining: limit - bucket.count, retryAfterSeconds: 0 };
 }
 
 /** Clears a caller's counter after a successful action (so a legit login doesn't burn the budget). */
-export function rateLimitReset(key: string) {
-  store.delete(key);
+export async function rateLimitReset(key: string) {
+  memory.delete(key);
+  await db.rateLimitBucket.deleteMany({ where: { key } }).catch(() => {});
 }
 
 /**

@@ -8,7 +8,7 @@ import { rateLimit, clientIp } from "@/lib/rate-limit";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  if (!rateLimit(`reset:ip:${clientIp(req)}`, 10, 15 * 60 * 1000).ok) {
+  if (!(await rateLimit(`reset:ip:${clientIp(req)}`, 10, 15 * 60 * 1000)).ok) {
     return NextResponse.json({ error: "Too many attempts. Try again later." }, { status: 429 });
   }
 

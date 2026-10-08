@@ -233,7 +233,7 @@ function ExpenseForm({
                 {l}
               </button>
             ))}
-            <Input id="x-date" type="date" required value={date} onChange={(e) => setDate(e.target.value)} className="w-[150px]" />
+            <Input id="x-date" type="date" required max={today} value={date} onChange={(e) => setDate(e.target.value)} className="w-[150px]" />
           </div>
         </div>
         <div className="space-y-1.5">
@@ -255,7 +255,7 @@ function ExpenseForm({
                 {amt > 0 && line.budgetAmount - line.spent - amt < 0 && ". This takes it over budget."}
               </span>
             ) : (
-              <span>No budget for {catName} in {monthLabel(month)}{date > today ? " · future-dated: it will count when that month comes" : ""}.</span>
+              <span>No budget for {catName} in {monthLabel(month)}.</span>
             )
           )}
           {overdraw && <span className="ml-2 text-warning">More than {account!.name}&apos;s balance.</span>}

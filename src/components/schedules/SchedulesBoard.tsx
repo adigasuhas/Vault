@@ -49,6 +49,8 @@ export interface Schedule {
   loan: { id: string; name: string } | null;
   upcoming: Occurrence[];
   history: { id: string; date: string; amount: number; status: string }[];
+  /** Booked (confirmed) payments, all time. */
+  paidCount: number;
 }
 
 const kindLabel = (k: string) => [...KINDS.INCOME, ...KINDS.PAYMENT].find((x) => x.v === k)?.l ?? k;
@@ -317,7 +319,8 @@ export function SchedulesBoard({
   const [ending, setEnding] = useState<Schedule | null>(null);
   const [payingOff, setPayingOff] = useState<Schedule | null>(null);
   // Something actually booked: deleting would orphan it from the ledger.
-  const hasPaid = (s: Schedule) => s.history.some((h) => h.status === "CONFIRMED" || h.status === "REVERSED");
+  // (Reversed ones don't count: the ledger keeps them either way.)
+  const hasPaid = (s: Schedule) => s.paidCount > 0;
   const income = direction === "INCOME";
 
   const load = useCallback(async () => {

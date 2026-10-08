@@ -25,7 +25,7 @@ const WRONG = "That answer doesn't match. Check the spelling and try again.";
  * lock recovery for the account for 30 minutes.
  */
 export async function POST(req: NextRequest) {
-  if (!rateLimit(`recovery-verify:ip:${clientIp(req)}`, 15, 15 * 60 * 1000).ok) {
+  if (!(await rateLimit(`recovery-verify:ip:${clientIp(req)}`, 15, 15 * 60 * 1000)).ok) {
     return NextResponse.json({ error: "Too many attempts. Try again in a few minutes." }, { status: 429 });
   }
   const parsed = schema.safeParse(await req.json().catch(() => null));

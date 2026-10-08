@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { fundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { parseJson, toErrorResponse } from "@/lib/validate";
@@ -39,18 +41,32 @@ export async function POST(req: NextRequest) {
     if (!account) return NextResponse.json({ error: "Linked account not found." }, { status: 404 });
   }
 
-  const deposit = await db.fixedDeposit.create({
-    data: {
-      userId: session.userId,
-      bank: input.bank,
-      principal: input.principal,
-      interestRate: input.interestRate,
-      startDate: input.startDate,
-      maturityDate: input.maturityDate,
-      currency: input.currency,
-      linkedAccountId: input.linkedAccountId || undefined,
-    },
-  });
-
-  return NextResponse.json({ deposit }, { status: 201 });
+  try {
+    const deposit = await db.$transaction(async (tx: Tx) => {
+      const d = await tx.fixedDeposit.create({
+        data: {
+          userId: session.userId,
+          bank: input.bank,
+          principal: input.principal,
+          interestRate: input.interestRate,
+          startDate: input.startDate,
+          maturityDate: input.maturityDate,
+          currency: input.currency,
+          linkedAccountId: input.linkedAccountId || undefined,
+        },
+      });
+      await fundPurchase(
+        tx,
+        session.userId,
+        `DEPOSIT:${d.id}`,
+        { cost: input.principal, currency: input.currency, date: input.startDate, label: `${input.bank} fixed deposit` },
+        { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount }
+      );
+      return d;
+    });
+    return NextResponse.json({ deposit }, { status: 201 });
+  } catch (err) {
+    const { body: errBody, status } = toErrorResponse(err);
+    return NextResponse.json(errBody, { status });
+  }
 }

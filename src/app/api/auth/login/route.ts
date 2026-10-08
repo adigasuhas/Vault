@@ -62,8 +62,8 @@ export async function POST(req: NextRequest) {
   // Rate limit: 8 attempts / 10 min per IP, and 5 / 10 min per account.
   const ip = clientIp(req);
   const windowMs = 10 * 60 * 1000;
-  const ipLimit = rateLimit(`login:ip:${ip}`, 8, windowMs);
-  const emailLimit = rateLimit(`login:email:${email}`, 5, windowMs);
+  const ipLimit = await rateLimit(`login:ip:${ip}`, 8, windowMs);
+  const emailLimit = await rateLimit(`login:email:${email}`, 5, windowMs);
   if (!ipLimit.ok || !emailLimit.ok) {
     const retryAfter = Math.max(ipLimit.retryAfterSeconds, emailLimit.retryAfterSeconds);
     return NextResponse.json(
@@ -80,8 +80,8 @@ export async function POST(req: NextRequest) {
     const { user, showCreateFirstUser } = await findOrCreateDevUser(dev.email);
     await setSessionCookie({ userId: user.id, email: user.email, name: user.name ?? undefined, tv: user.tokenVersion });
     await db.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });
-    rateLimitReset(`login:ip:${ip}`);
-    rateLimitReset(`login:email:${email}`);
+    await rateLimitReset(`login:ip:${ip}`);
+    await rateLimitReset(`login:email:${email}`);
     return NextResponse.json({
       user: { ...user, passwordHash: undefined, securityAnswerHash: undefined, recoveryFailedAttempts: undefined, recoveryLockedUntil: undefined, isDeveloper: true, showCreateFirstUser },
     });
@@ -131,8 +131,8 @@ export async function POST(req: NextRequest) {
     where: { id: user.id },
     data: { lastLogin: new Date(), failedLoginAttempts: 0, lockedUntil: null },
   });
-  rateLimitReset(`login:ip:${ip}`);
-  rateLimitReset(`login:email:${email}`);
+  await rateLimitReset(`login:ip:${ip}`);
+  await rateLimitReset(`login:email:${email}`);
 
   return NextResponse.json({
     user: { ...user, passwordHash: undefined, securityAnswerHash: undefined, recoveryFailedAttempts: undefined, recoveryLockedUntil: undefined, isDeveloper: user.role === "DEVELOPER" },

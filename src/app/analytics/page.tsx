@@ -54,7 +54,7 @@ interface Data {
     monthlyNet: number;
     runwayMonths: number | null;
     runsOutMonth: string | null;
-    basis: "recent-average" | "budget" | "none";
+    basis: "recent-average" | "budget" | "this-month" | "none";
     projection: { month: string; cash: number; stress: number; income: number; outflow: number }[];
   };
   netWorthHistory: { month: string; netWorth: number; estimated: boolean }[];
@@ -202,7 +202,7 @@ export default function AnalyticsPage() {
                     <div className="flex justify-between gap-3 border-t border-border pt-2 font-medium"><dt>Net per month</dt><dd><Money value={Math.round(data.runway.monthlyNet)} currency={c} signed /></dd></div>
                   </dl>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    {data.runway.basis === "recent-average" ? "Other spending is your average over the last three full months, not counting scheduled payments." : data.runway.basis === "budget" ? "No spending history yet, so other spending uses this month's budget." : "No spending history or budget yet, so other spending is assumed zero."}{" "}
+                    {data.runway.basis === "recent-average" ? "Other spending is your average over the last three full months, not counting scheduled payments." : data.runway.basis === "budget" ? "No spending history yet, so other spending uses this month's budget." : data.runway.basis === "this-month" ? "No full month of spending yet, so other spending is this month's spending so far at its current pace." : "No spending history or budget yet, so other spending is assumed zero."}{" "}
                     Pending items count in the first month.
                   </p>
                 </div>

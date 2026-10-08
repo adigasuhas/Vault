@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   const session = await getSessionUser();
   if (!session) return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
 
-  const limit = rateLimit(`change-email:${session.userId}`, 5, 15 * 60 * 1000);
+  const limit = await rateLimit(`change-email:${session.userId}`, 5, 15 * 60 * 1000);
   if (!limit.ok) {
     return NextResponse.json({ error: "Too many attempts. Try again in a few minutes." }, { status: 429, headers: { "Retry-After": String(limit.retryAfterSeconds) } });
   }

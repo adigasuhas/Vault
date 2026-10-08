@@ -98,7 +98,7 @@ export default function DashboardPage() {
             <Stat label={`In · ${monthLabel(m.month, "short")}`} value={<Money value={Math.round(m.income)} currency={c} />} hint="Income booked this month" />
           </div>
           <div className="bg-card p-5 md:p-6">
-            <Stat label={`Out · ${monthLabel(m.month, "short")}`} value={<Money value={Math.round(m.expenses)} currency={c} />} hint={m.oneTime > 0 ? <>Monthly <Money value={Math.round(m.regular)} currency={c} /> · one-time <Money value={Math.round(m.oneTime)} currency={c} /></> : m.savingsRate == null ? "No income booked yet" : m.savingsRate >= 0 ? `You kept ${m.savingsRate}% of what came in` : "More went out than came in"} />
+            <Stat label={`Out · ${monthLabel(m.month, "short")}`} value={<Money value={Math.round(m.expenses)} currency={c} />} hint={m.oneTime > 0 ? <>Monthly <Money value={Math.round(m.regular)} currency={c} /> · one-time <Money value={Math.round(m.oneTime)} currency={c} /></> : m.savingsRate == null ? "Nothing has come in yet this month" : m.savingsRate >= 0 ? `You kept ${m.savingsRate}% of what came in` : "More went out than came in"} />
           </div>
           <Link href="/analytics#runway" className="group col-span-2 bg-card p-5 md:col-span-1 md:p-6 transition-colors hover:bg-muted/50">
             <Stat

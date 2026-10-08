@@ -105,7 +105,9 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
     const linked = target.kind === "FIXED_DEPOSIT" ? accounts.find((a) => a.id === target.linkedAccountId) : undefined;
     return (linked ?? accounts.find((a) => a.currency === target.currency) ?? accounts[0])?.id ?? "";
   }, [accounts, target]);
-  const accountId = picked || suggested;
+  // Proceeds go to an account, or stay with the investments to be reinvested.
+  const [destination, setDestination] = useState<"ACCOUNT" | "REINVEST">("ACCOUNT");
+  const accountId = destination === "ACCOUNT" ? picked || suggested : "";
   const account = accounts.find((a) => a.id === accountId);
   const crossCurrency = !!(account && account.currency !== target.currency);
 
@@ -146,7 +148,7 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
       holdingId: target.holdingId,
       charges: charges || 0,
       soldOn,
-      accountId,
+      ...(destination === "ACCOUNT" ? { accountId } : {}),
       note: note || undefined,
       ...(crossCurrency ? { creditedAmount: credited } : {}),
       ...(target.kind === "STOCK" || target.kind === "MUTUAL_FUND" ? { quantity, price } : { amount }),
@@ -158,7 +160,11 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
       toast.error(data.error || "Couldn't record the sale.");
       return;
     }
-    toast.success(`${account ? `Credited to ${account.name}. ` : ""}It's under Sold & closed.`);
+    toast.success(
+      destination === "REINVEST"
+        ? "Sold. The proceeds are kept for reinvestment under Sold & closed, and still count in your net worth."
+        : `${account ? `Credited to ${account.name}. ` : ""}It's under Sold & closed.`
+    );
     onClose();
     onSold();
   }
@@ -219,6 +225,29 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
           {premature && <p className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">This is before the maturity date, so it&apos;s recorded as an early closure. Enter any penalty under deductions.</p>}
 
           <div className="space-y-2">
+            <Label>The proceeds</Label>
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="What happens to the proceeds">
+              {([["ACCOUNT", "Go to an account", "Credited now, like any income."], ["REINVEST", "Keep to reinvest", "Stay with your investments until you use them."]] as const).map(([v, t, d]) => (
+                <button
+                  key={v}
+                  type="button"
+                  role="radio"
+                  aria-checked={destination === v}
+                  onClick={() => setDestination(v)}
+                  className={cn("cursor-pointer rounded-lg border p-2.5 text-left transition-colors", destination === v ? "border-foreground/50 bg-muted" : "border-border hover:border-foreground/25")}
+                >
+                  <span className="block text-sm font-medium">{t}</span>
+                  <span className="block text-[11px] text-muted-foreground">{d}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {destination === "REINVEST" && (
+            <p className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">
+              Nothing is credited to a bank account. The money shows under Sold &amp; closed as waiting to be reinvested, and still counts in your net worth. When you&apos;ve bought something with it, mark it reinvested there; if you don&apos;t, move it to an account.
+            </p>
+          )}
+          {destination === "ACCOUNT" && <div className="space-y-2">
             <Label>Credit the money to</Label>
             <Select value={accountId} onValueChange={(v) => v && setPicked(v)}>
               <SelectTrigger className="w-full"><SelectValue placeholder={accounts.length ? "Choose account" : "Add an account first"} /></SelectTrigger>
@@ -230,7 +259,7 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
                 ))}
               </SelectContent>
             </Select>
-          </div>
+          </div>}
           {crossCurrency && account && (
             <div className="space-y-2">
               <Label htmlFor="sell-credited">Amount that arrived in {account.currency}</Label>
@@ -275,7 +304,7 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="submit" disabled={saving || !accountId || !!(preview && "error" in preview && preview.error)}>
+            <Button type="submit" disabled={saving || (destination === "ACCOUNT" && !accountId) || !!(preview && "error" in preview && preview.error)}>
               {saving ? "Saving…" : copy.verb}
             </Button>
           </DialogFooter>

@@ -373,7 +373,7 @@ export default function BudgetPage() {
                 </div>
                 <div className="bg-card p-5"><Stat label="Budgeted" value={formatMoney(Math.round(data.totalBudgeted), c)} /></div>
                 <div className="bg-card p-5"><Stat label="Spent" value={formatMoney(Math.round(data.totalSpent), c)} hint={[data.totalBudgeted > 0 ? `${Math.round((data.totalSpent / data.totalBudgeted) * 100)}% of budget` : null, data.oneTimeExcluded > 0 ? `${formatMoney(Math.round(data.oneTimeExcluded), c)} of one-time purchases not counted` : null].filter(Boolean).join(" · ") || undefined} /></div>
-                <div className="bg-card p-5">
+                <div className="col-span-2 bg-card p-5 sm:col-span-1">
                   {data.totalIncome === 0 ? (
                     <Stat label="Left to budget" value={<span className="text-muted-foreground">–</span>} hint="Enter planned income to see what's unassigned" />
                   ) : (

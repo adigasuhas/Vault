@@ -239,6 +239,13 @@ export const unallocatedSchema = z.object({
 });
 
 // ---- Investments ----
+/** How an investment purchase was paid for (see lib/investment-funding). */
+const fundingFields = {
+  paidFromAccountId: zId.optional(),
+  budgetCategoryId: zId.optional(),
+  fromSaleId: zId.optional(),
+  paidAmount: zMoney.optional(),
+};
 export const createStockSchema = z.object({
   ticker: z.string().trim().min(1).max(30),
   exchange: z.string().trim().max(10).optional(),
@@ -246,6 +253,7 @@ export const createStockSchema = z.object({
   price: zPositive,
   currency: CURRENCY,
   purchaseDate: zIsoDate,
+  ...fundingFields,
 });
 export const patchStockSchema = z.object({
   quantity: zPositive.optional(),
@@ -264,6 +272,7 @@ export const createFundSchema = z.object({
   avgNav: zPositive,
   currency: CURRENCY,
   purchaseDate: zIsoDate,
+  ...fundingFields,
 });
 export const patchFundSchema = z.object({
   units: zPositive.optional(),
@@ -278,6 +287,7 @@ export const createDepositSchema = z.object({
   maturityDate: zIsoDate,
   currency: CURRENCY,
   linkedAccountId: zId.optional(),
+  ...fundingFields,
 });
 export const createOtherAssetSchema = z.object({
   assetType: OTHER_ASSET_TYPE,
@@ -289,6 +299,7 @@ export const createOtherAssetSchema = z.object({
   currency: CURRENCY,
   purchaseDate: zIsoDate,
   notes: optionalTrimmed,
+  ...fundingFields,
 });
 export const patchOtherAssetSchema = z.object({
   currentValue: zMoneyNonNegative.optional(),
@@ -334,7 +345,8 @@ const saleCommon = {
   holdingId: zId,
   charges: zMoneyNonNegative.default(0),
   soldOn: zIsoDate,
-  accountId: zId,
+  // Omitted: the proceeds are kept for reinvestment rather than credited.
+  accountId: zId.optional(),
   // Only when the account's currency differs from the holding's: what arrived.
   creditedAmount: zMoney.optional(),
   note: z.string().trim().max(500).optional(),
@@ -348,6 +360,8 @@ export const createSaleSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("OTHER"), amount: zMoney, ...saleCommon }),
 ]);
 export type CreateSaleInput = z.infer<typeof createSaleSchema>;
+export const reinvestSchema = z.object({ amount: zMoney, into: z.string().trim().min(1, "Say what it went into.").max(160), date: zIsoDate, note: z.string().trim().max(300).optional() });
+export const creditProceedsSchema = z.object({ accountId: zId, date: zIsoDate, creditedAmount: zMoney.optional() });
 
 // ---- Settings / FX ----
 export const patchSettingsSchema = z.object({

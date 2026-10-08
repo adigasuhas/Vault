@@ -70,10 +70,49 @@ export function amortizationSchedule(
   return rows;
 }
 
-/** A stored loan's schedule, using the EMI it was created with (which may be
- * the user's own figure rather than the computed one). */
-export function loanAmortization(loan: { principal: unknown; interestRate: unknown; installments: number; startDate: Date; emiAmount: unknown }) {
-  return amortizationSchedule(Number(loan.principal), Number(loan.interestRate), loan.installments, loan.startDate, Number(loan.emiAmount));
+export interface LoanPaymentLike {
+  amount: unknown;
+  principalComponent: unknown;
+  interestComponent: unknown;
+  paidOn: Date | string;
+  kind?: string;
+}
+
+/** A stored loan's schedule. Without payments it's the plan from the loan's
+ * terms (with the EMI it was created with, which may be the user's own).
+ * With (non-reversed) payments, the installments already paid are shown as
+ * they actually were, and the rest is recalculated from what's truly still
+ * owed — so an extra payment, or changing the EMI, rate or number of months
+ * part-way through, re-plans only the future and never rewrites the past. */
+export function loanAmortization(
+  loan: { principal: unknown; interestRate: unknown; installments: number; startDate: Date; emiAmount: unknown },
+  payments: LoanPaymentLike[] = []
+): AmortizationRow[] {
+  const principal = Number(loan.principal);
+  const rate = Number(loan.interestRate);
+  const emi = Number(loan.emiAmount);
+  if (!payments.length) return amortizationSchedule(principal, rate, loan.installments, loan.startDate, emi);
+
+  const sorted = [...payments].sort((a, b) => new Date(a.paidOn).getTime() - new Date(b.paidOn).getTime());
+  const rows: AmortizationRow[] = [];
+  let balance = roundMoney(principal);
+  for (const p of sorted) {
+    balance = Math.max(0, roundMoney(balance - Number(p.principalComponent)));
+    if ((p.kind ?? "EMI") === "PREPAYMENT") continue;
+    const n = rows.length + 1;
+    rows.push({
+      n,
+      dueDate: addMonths(loan.startDate, n - 1),
+      emi: roundMoney(Number(p.amount)),
+      interest: roundMoney(Number(p.interestComponent)),
+      principal: roundMoney(Number(p.principalComponent)),
+      balanceAfter: balance,
+    });
+  }
+  if (balance <= 0.004) return rows;
+  const remaining = Math.max(1, loan.installments - rows.length);
+  const next = amortizationSchedule(balance, rate, remaining, addMonths(loan.startDate, rows.length), emi);
+  return [...rows, ...next.map((r) => ({ ...r, n: r.n + rows.length }))];
 }
 
 /** Whole months from `start` to `end`. A loan with its first EMI on `start`
@@ -97,18 +136,19 @@ export interface LoanProgress {
 /** Derives loan progress from the recorded payments against the schedule. */
 export function loanProgress(
   schedule: AmortizationRow[],
-  payments: { principalComponent: number; interestComponent: number; amount: number }[]
+  payments: { principalComponent: number; interestComponent: number; amount: number; kind?: string }[],
+  originalPrincipal = schedule.length ? schedule[0].balanceAfter + schedule[0].principal : 0
 ): LoanProgress {
   const totalInstallments = schedule.length;
-  const originalPrincipal = schedule.length ? schedule[0].balanceAfter + schedule[0].principal : 0;
 
   const principalPaid = payments.reduce((s, p) => s + Number(p.principalComponent), 0);
   const interestPaid = payments.reduce((s, p) => s + Number(p.interestComponent), 0);
   const totalPaid = payments.reduce((s, p) => s + Number(p.amount), 0);
-  const outstandingPrincipal = Math.max(0, originalPrincipal - principalPaid);
+  const outstandingPrincipal = Math.max(0, roundMoney(originalPrincipal - principalPaid));
 
-  const paidCount = payments.length;
-  const nextDue = schedule[paidCount] ?? null;
+  // Extra payments towards principal aren't installments.
+  const paidCount = payments.filter((p) => (p.kind ?? "EMI") !== "PREPAYMENT").length;
+  const nextDue = outstandingPrincipal > 0.004 ? (schedule[paidCount] ?? null) : null;
 
   return {
     paidCount,
@@ -117,7 +157,7 @@ export function loanProgress(
     interestPaid,
     totalPaid,
     outstandingPrincipal,
-    percentPaid: totalInstallments ? Math.min(100, Math.round((paidCount / totalInstallments) * 100)) : 0,
+    percentPaid: originalPrincipal > 0 ? Math.min(100, Math.round((principalPaid / originalPrincipal) * 100)) : 0,
     nextDue,
   };
 }

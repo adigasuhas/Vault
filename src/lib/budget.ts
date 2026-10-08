@@ -110,7 +110,9 @@ export async function budgetForMonth(userId: string, month: string) {
         })
       : Promise.resolve([]),
     db.ledgerEntry.findMany({
-      where: { userId, type: "EXPENSE", reversedAt: null, date: { gte: start, lt: end } },
+      // Spending, plus investment purchases paid from an account under a budget
+      // category (they count toward that line, though they aren't spending).
+      where: { userId, reversedAt: null, date: { gte: start, lt: end }, OR: [{ type: "EXPENSE" }, { type: "INVESTMENT_PURCHASE", categoryId: { not: null } }] },
       select: { categoryId: true, amount: true, currency: true, oneTime: true, countInBudget: true },
     }),
     db.category.findMany({ where: { userId }, select: { id: true, name: true, isDefault: true } }),

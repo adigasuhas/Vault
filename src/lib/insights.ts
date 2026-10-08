@@ -127,7 +127,7 @@ export interface RunwayResult {
   monthlyNet: number; // income − committed − discretionary
   runwayMonths: number | null; // null = cash never runs out in the horizon / cash-flow positive
   runsOutMonth: string | null;
-  basis: "recent-average" | "budget" | "none";
+  basis: "recent-average" | "budget" | "this-month" | "none";
   projection: { month: string; cash: number; stress: number; income: number; outflow: number }[];
 }
 
@@ -148,7 +148,8 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
   const [spend, plan] = await Promise.all([
     db.ledgerEntry.findMany({
       // One-time purchases don't recur, so they don't shape the runway.
-      where: { userId, type: "EXPENSE", reversedAt: null, oneTime: false, creditExecutionId: null, loanPaymentId: null, date: { gte: recentStart, lt: currentStart } },
+      // (This month too: with no full month yet, its pace stands in.)
+      where: { userId, type: "EXPENSE", reversedAt: null, oneTime: false, creditExecutionId: null, loanPaymentId: null, date: { gte: recentStart, lte: today } },
       select: { amount: true, currency: true, date: true },
     }),
     db.budgetPlan.findUnique({ where: { userId_month: { userId, month: current } }, include: { allocations: { include: { category: { select: { schedules: { select: { id: true }, where: { direction: "PAYMENT", isActive: true } } } } } } } }),
@@ -161,10 +162,22 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
   if (observed.length) {
     discretionary = observed.reduce((a, b) => a + b, 0) / observed.length;
     basis = "recent-average";
-  } else if (plan?.allocations.length) {
-    // Budget lines that aren't covered by a scheduled payment.
-    discretionary = plan.allocations.filter((a) => a.category.schedules.length === 0).reduce((s, a) => s + Number(a.budgetAmount), 0);
-    basis = "budget";
+  } else {
+    // No full month yet: the larger of what's budgeted (lines not covered by a
+    // scheduled payment) and this month's spending so far, at its pace for the
+    // whole month — so early spending isn't assumed to stop.
+    const budgeted = (plan?.allocations ?? []).filter((a) => a.category.schedules.length === 0).reduce((s, a) => s + Number(a.budgetAmount), 0);
+    const day = today.getUTCDate();
+    const daysInMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).getUTCDate();
+    const soFar = perMonth.get(current) ?? 0;
+    const paced = soFar > 0 ? (soFar * daysInMonth) / day : 0;
+    if (paced > budgeted) {
+      discretionary = paced;
+      basis = "this-month";
+    } else if (budgeted > 0) {
+      discretionary = budgeted;
+      basis = "budget";
+    }
   }
 
   const horizon = 18;
@@ -175,10 +188,17 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
   const inByMonth = new Map<string, number>();
   const outByMonth = new Map<string, number>();
   const add = (map: Map<string, number>, m: string, v: number) => map.set(m, (map.get(m) ?? 0) + v);
+  // Per-month averages count each month's own occurrences once; the cash
+  // projection additionally carries this month's remaining ones into next.
+  const inAvg = new Map<string, number>();
+  const outAvg = new Map<string, number>();
   for (const o of occ) {
     if (o.status === "SKIPPED" || o.status === "REVERSED" || o.status === "CONFIRMED") continue;
-    const m = o.date.slice(0, 7) === current ? months[0] : o.date.slice(0, 7);
-    add(o.direction === "INCOME" ? inByMonth : outByMonth, m, fx.convert(o.amount, o.currency));
+    const own = o.date.slice(0, 7);
+    const m = own === current ? months[0] : own;
+    const v = fx.convert(o.amount, o.currency);
+    add(o.direction === "INCOME" ? inByMonth : outByMonth, m, v);
+    if (own !== current) add(o.direction === "INCOME" ? inAvg : outAvg, own, v);
   }
   for (const o of outstanding) {
     if (o.status !== "PENDING" && o.status !== "FAILED") continue;
@@ -204,8 +224,8 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
     }
   });
   const sum = (map: Map<string, number>) => months.slice(0, 12).reduce((s, m) => s + (map.get(m) ?? 0), 0) / 12;
-  const monthlyIncome = sum(inByMonth);
-  const monthlyCommitted = sum(outByMonth);
+  const monthlyIncome = sum(inAvg);
+  const monthlyCommitted = sum(outAvg);
   const monthlyNet = monthlyIncome - monthlyCommitted - discretionary;
   if (runwayMonths == null && monthlyNet < 0 && cash > 0) runwayMonths = cash / -monthlyNet;
 
@@ -232,7 +252,12 @@ export async function budgetAdherence(userId: string, months: string[], fx: FxCo
   const { start } = monthRange(months[0]);
   const { end } = monthRange(months[months.length - 1]);
   const spend = await db.ledgerEntry.findMany({
-    where: { userId, type: "EXPENSE", reversedAt: null, date: { gte: start, lt: end }, ...COUNTS_IN_BUDGET },
+    where: {
+      userId,
+      reversedAt: null,
+      date: { gte: start, lt: end },
+      AND: [COUNTS_IN_BUDGET, { OR: [{ type: "EXPENSE" }, { type: "INVESTMENT_PURCHASE", categoryId: { not: null } }] }],
+    },
     select: { amount: true, currency: true, date: true, categoryId: true },
   });
   const spentBy = new Map<string, number>();

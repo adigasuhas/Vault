@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { unfundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 
@@ -12,6 +14,10 @@ export async function DELETE(_req: NextRequest, context: { params: Promise<{ id:
   const existing = await db.fixedDeposit.findFirst({ where: { id, userId: session.userId } });
   if (!existing) return NextResponse.json({ error: "Not found." }, { status: 404 });
 
-  await db.fixedDeposit.delete({ where: { id } });
+  // A deposit added by mistake: whatever paid for it goes back.
+  await db.$transaction(async (tx: Tx) => {
+    await unfundPurchase(tx, session.userId, `DEPOSIT:${id}`, `${existing.bank} fixed deposit`);
+    await tx.fixedDeposit.delete({ where: { id } });
+  });
   return NextResponse.json({ success: true });
 }

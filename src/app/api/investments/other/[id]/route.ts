@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { unfundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { parseJson, toErrorResponse } from "@/lib/validate";
@@ -42,6 +44,10 @@ export async function DELETE(_req: NextRequest, context: { params: Promise<{ id:
   const existing = await db.otherAsset.findFirst({ where: { id, userId: session.userId } });
   if (!existing) return NextResponse.json({ error: "Not found." }, { status: 404 });
 
-  await db.otherAsset.delete({ where: { id } });
+  // An asset added by mistake: whatever paid for it goes back.
+  await db.$transaction(async (tx: Tx) => {
+    await unfundPurchase(tx, session.userId, `ASSET:${id}`, existing.name);
+    await tx.otherAsset.delete({ where: { id } });
+  });
   return NextResponse.json({ success: true });
 }

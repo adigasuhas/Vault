@@ -39,7 +39,9 @@ export const GET = authed(async (req, { userId }) => {
         note: x.note,
         failureReason: x.failureReason,
       }));
-      return { ...s, amount: Number(s.amount), upcoming, history };
+      // Every booked payment, not just the recent ones shown: decides delete vs pay off.
+      const paidCount = executions.filter((x) => x.status === "CONFIRMED").length;
+      return { ...s, amount: Number(s.amount), upcoming, history, paidCount };
     }),
   };
 });

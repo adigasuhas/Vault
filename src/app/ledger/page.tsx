@@ -35,6 +35,7 @@ const TYPES: [string, string][] = [
   ["TRANSFER_OUT", "Transfers out"],
   ["TRANSFER_IN", "Transfers in"],
   ["INVESTMENT_SALE", "Investment sales"],
+  ["INVESTMENT_PURCHASE", "Investment purchases"],
   ["REVERSAL", "Reversals"],
   ["ADJUSTMENT", "Adjustments"],
   ["OPENING", "Opening balances"],

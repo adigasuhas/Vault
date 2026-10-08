@@ -42,6 +42,9 @@ enum LedgerEntryType {
   // Proceeds of selling an investment or closing a deposit, credited to an
   // account. Not income: the money was already yours, in another form.
   INVESTMENT_SALE
+  // Money paid out of an account to buy an investment. Not spending: it moved
+  // into your portfolio. Counts toward a budget line when it has a category.
+  INVESTMENT_PURCHASE
 }
 
 enum InvestmentKind {
@@ -262,6 +265,9 @@ model LedgerEntry {
   loanPaymentId     String?          @unique
   loanPayment       LoanPayment?     @relation(fields: [loanPaymentId], references: [id])
   investmentSaleId  String?          @unique
+  // The purchase an INVESTMENT_PURCHASE paid for: "STOCK_LOT:<id>",
+  // "FUND_LOT:<id>", "DEPOSIT:<id>" or "ASSET:<id>".
+  investmentRef     String?
   investmentSale    InvestmentSale?  @relation(fields: [investmentSaleId], references: [id])
   // Spending category for EXPENSE entries (expenses, scheduled payments, EMIs)
   // so budgets and analytics read straight from the ledger.
@@ -281,6 +287,7 @@ model LedgerEntry {
 
   @@index([userId])
   @@index([accountId])
+  @@index([investmentRef])
   @@index([userId, date])
   @@index([categoryId])
 }
@@ -730,9 +737,15 @@ model InvestmentSale {
   firstBoughtOn  DateTime
   soldOn         DateTime
   closedPosition Boolean // nothing of the holding was left afterwards
-  accountId      String
-  account        Account        @relation(fields: [accountId], references: [id])
-  creditedAmount Decimal // in the account's currency
+  // Where the proceeds went. Null account: kept for reinvestment — they stay
+  // with the investments (and in net worth) until marked reinvested or moved
+  // to an account later.
+  accountId      String?
+  account        Account?       @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  creditedAmount Decimal? // in the account's currency
+  creditedNet    Decimal? // the part of netProceeds that went to the account (sale currency)
+  // [{ amount, into, date, note }] — proceeds used for other investments (sale currency)
+  reinvestments  Json           @default("[]")
   // Purchases consumed, oldest first: [{ lotId, purchaseDate, quantity, price, cost }]
   lots           Json
   // What's needed to recreate a fully sold holding on undo.
@@ -798,6 +811,9 @@ model LoanPayment {
   amount             Decimal
   principalComponent Decimal
   interestComponent  Decimal
+  // EMI: one installment. PREPAYMENT: extra towards principal (not an
+  // installment; later EMIs are recalculated). PAYOFF: the final settlement.
+  kind               String           @default("EMI")
   paidOn             DateTime         @default(now())
   note               String?
   // Set when the payment was booked from an EMI schedule occurrence.
@@ -899,4 +915,14 @@ model PriceUpdateLog {
   itemsFailed  Int               @default(0)
   status       PriceUpdateStatus
   message      String?
+}
+
+// Fixed-window counters for sign-in, sign-up and recovery rate limits, shared
+// by every server instance (lib/rate-limit.ts).
+model RateLimitBucket {
+  key     String   @id
+  count   Int
+  resetAt DateTime
+
+  @@index([resetAt])
 }

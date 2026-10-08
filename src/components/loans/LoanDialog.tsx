@@ -64,7 +64,8 @@ export function LoanDialog({
         installments: String(editing.installments),
         startDate: start,
         endDate: addMonthsUTC(new Date(`${start}T00:00:00Z`), editing.installments - 1).toISOString().slice(0, 10),
-        emi: Math.abs(stored - auto) > 0.005 ? String(stored) : "",
+        // After payments, an empty EMI means "work it out from what's owed".
+        emi: editing.termsLocked ? "" : Math.abs(stored - auto) > 0.005 ? String(stored) : "",
         currency: editing.currency,
         accountId: editing.linkedAccountId ?? "",
         schedule: true,
@@ -114,7 +115,17 @@ export function LoanDialog({
             name: f.name,
             ...(f.accountId && f.accountId !== editing.linkedAccountId ? { linkedAccountId: f.accountId } : {}),
             ...(locked
-              ? {}
+              ? (() => {
+                  // Only what changed: an untouched field must not re-plan the loan.
+                  const rate = Number(f.rate) || 0;
+                  const rateChanged = rate !== Number(editing.interestRate);
+                  const monthsChanged = months !== editing.installments;
+                  return {
+                    ...(rateChanged ? { interestRate: rate } : {}),
+                    ...(monthsChanged ? { installments: months } : {}),
+                    ...(customEmi != null ? { emiAmount: customEmi } : rateChanged || monthsChanged ? { emiAmount: null } : {}),
+                  };
+                })()
               : { principal: Number(f.principal), interestRate: Number(f.rate) || 0, installments: months, startDate: f.startDate, emiAmount: customEmi }),
           },
         });
@@ -156,7 +167,7 @@ export function LoanDialog({
             <DialogDescription>
               {editing
                 ? locked
-                  ? "EMIs have already been paid or skipped, so only the name and the account can change. To restructure the loan, close it and add a new one."
+                  ? "EMIs have been paid, so the amount borrowed and the first EMI date stay as they were. Change the EMI, rate or number of EMIs and the rest of the plan is worked out from what's still owed; paid EMIs don't change."
                   : "Nothing has been paid yet, so everything can change. The EMI schedule is rebuilt to match."
                 : "Education loan, a laptop on EMI, a personal loan. Enter the amount and dates: VAULT splits it into equal monthly EMIs, which you can change."}
             </DialogDescription>
@@ -181,7 +192,7 @@ export function LoanDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="l-r">Interest (% / yr)</Label>
-              <Input id="l-r" disabled={locked} type="number" min="0" step="0.01" value={f.rate} onChange={(e) => setF({ ...f, rate: e.target.value })} placeholder="0 (none)" />
+              <Input id="l-r" type="number" min="0" step="0.01" value={f.rate} onChange={(e) => setF({ ...f, rate: e.target.value })} placeholder="0 (none)" />
             </div>
           </div>
           <div className="grid grid-cols-[1fr_1fr_0.7fr] gap-3">
@@ -191,19 +202,19 @@ export function LoanDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="l-e">Last EMI</Label>
-              <Input id="l-e" disabled={locked} type="date" min={f.startDate} value={f.endDate} onChange={(e) => setEnd(e.target.value)} />
+              <Input id="l-e" type="date" min={f.startDate} value={f.endDate} onChange={(e) => setEnd(e.target.value)} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="l-n">Months</Label>
-              <Input id="l-n" disabled={locked} type="number" min="1" max="600" required value={f.installments} onChange={(e) => setMonths(e.target.value)} />
+              <Input id="l-n" type="number" min="1" max="600" required value={f.installments} onChange={(e) => setMonths(e.target.value)} />
             </div>
           </div>
           <p className="-mt-2 text-[11px] text-muted-foreground">Set the last EMI date or the number of months; the other fills in.</p>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="l-emi">Monthly EMI</Label>
-              <Input id="l-emi" disabled={locked} type="number" min="0" step="0.01" value={f.emi === "" ? (autoEmi ? String(autoEmi) : "") : f.emi} onChange={(e) => setF({ ...f, emi: e.target.value })} />
-              {locked ? null : customEmi != null && Math.abs(customEmi - autoEmi) > 0.005 ? (
+              <Label htmlFor="l-emi">Monthly EMI{locked && <span className="font-normal text-muted-foreground"> (now {formatMoney(Number(editing!.emiAmount), f.currency)})</span>}</Label>
+              <Input id="l-emi" type="number" min="0" step="0.01" value={f.emi === "" ? (locked ? "" : autoEmi ? String(autoEmi) : "") : f.emi} placeholder={locked ? "Worked out from what's owed" : undefined} onChange={(e) => setF({ ...f, emi: e.target.value })} />
+              {customEmi != null && Math.abs(customEmi - autoEmi) > 0.005 ? (
                 <button type="button" className="cursor-pointer text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground" onClick={() => setF({ ...f, emi: "" })}>
                   Back to {Number(f.rate) > 0 ? "the calculated EMI" : "an equal split"} ({formatMoney(autoEmi, f.currency)})
                 </button>
@@ -219,7 +230,12 @@ export function LoanDialog({
               </Select>
             </div>
           </div>
-          {rows.length > 0 && (
+          {locked && (
+            <p className="rounded-lg bg-muted px-4 py-3 text-xs text-muted-foreground">
+              The remaining EMIs are re-planned from what&apos;s still owed: leave the EMI empty to spread it over the months, or set your own and the months follow. The loan page shows the new plan once you save.
+            </p>
+          )}
+          {!locked && rows.length > 0 && (
             <div className="space-y-0.5 rounded-lg bg-muted px-4 py-3 text-sm">
               <p>
                 {rows.length} monthly EMIs of <span className="font-semibold tabular-nums">{formatMoney(emi, f.currency)}</span>

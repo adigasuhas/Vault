@@ -5,6 +5,8 @@ import { fetchStockQuote } from "@/lib/market-data";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
 import { parseJson, toErrorResponse } from "@/lib/validate";
 import { createStockSchema } from "@/lib/schemas";
+import { fundPurchase } from "@/lib/investment-funding";
+import type { Tx } from "@/lib/ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -36,42 +38,46 @@ export async function POST(req: NextRequest) {
   const exchangeNormalized = input.exchange || null;
   const purchaseDateVal = input.purchaseDate;
 
-  // Buying the same stock again (same ticker/exchange/currency) merges into
-  // the existing position as a new lot instead of creating a duplicate row —
-  // quantity sums and avgBuyPrice becomes the quantity-weighted average.
   const existing = await db.stockHolding.findFirst({
     where: { userId: session.userId, ticker: tickerUpper, exchange: exchangeNormalized, currency },
   });
-
-  if (existing) {
-    await db.stockPurchaseLot.create({
-      data: { stockHoldingId: existing.id, quantity: quantityNum, price: priceNum, purchaseDate: purchaseDateVal },
-    });
-    const holding = await recomputeHoldingFromLots(existing.id);
-    return NextResponse.json({ holding, merged: true });
-  }
-
   // Best-effort — an unreachable price feed shouldn't block adding the holding.
-  const quote = await fetchStockQuote(tickerUpper);
+  const quote = existing ? null : await fetchStockQuote(tickerUpper);
+  const funding = { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount };
 
-  const holding = await db.stockHolding.create({
-    data: {
-      userId: session.userId,
-      ticker: tickerUpper,
-      exchange: exchangeNormalized,
-      quantity: quantityNum,
-      avgBuyPrice: priceNum,
-      currency,
-      purchaseDate: purchaseDateVal,
-      lastPrice: quote?.price ?? null,
-      lastPriceAt: quote ? new Date() : null,
-      previousClose: quote?.previousClose ?? null,
-    },
-  });
-  await db.stockPurchaseLot.create({
-    data: { stockHoldingId: holding.id, quantity: quantityNum, price: priceNum, purchaseDate: purchaseDateVal },
-  });
-
-  const withLots = await db.stockHolding.findUnique({ where: { id: holding.id }, include: { lots: true } });
-  return NextResponse.json({ holding: withLots }, { status: 201 });
+  try {
+    const result = await db.$transaction(async (tx: Tx) => {
+      // Buying the same stock again (same ticker/exchange/currency) merges into
+      // the existing position as a new lot instead of creating a duplicate row —
+      // quantity sums and avgBuyPrice becomes the quantity-weighted average.
+      const holdingId =
+        existing?.id ??
+        (
+          await tx.stockHolding.create({
+            data: {
+              userId: session.userId,
+              ticker: tickerUpper,
+              exchange: exchangeNormalized,
+              quantity: quantityNum,
+              avgBuyPrice: priceNum,
+              currency,
+              purchaseDate: purchaseDateVal,
+              lastPrice: quote?.price ?? null,
+              lastPriceAt: quote ? new Date() : null,
+              previousClose: quote?.previousClose ?? null,
+            },
+          })
+        ).id;
+      const lot = await tx.stockPurchaseLot.create({
+        data: { stockHoldingId: holdingId, quantity: quantityNum, price: priceNum, purchaseDate: purchaseDateVal },
+      });
+      await fundPurchase(tx, session.userId, `STOCK_LOT:${lot.id}`, { cost: quantityNum * priceNum, currency, date: purchaseDateVal, label: `${quantityNum} ${tickerUpper}` }, funding);
+      await recomputeHoldingFromLots(holdingId, tx);
+      return tx.stockHolding.findUnique({ where: { id: holdingId }, include: { lots: true } });
+    });
+    return NextResponse.json({ holding: result, merged: !!existing }, { status: existing ? 200 : 201 });
+  } catch (err) {
+    const { body: errBody, status } = toErrorResponse(err);
+    return NextResponse.json(errBody, { status });
+  }
 }

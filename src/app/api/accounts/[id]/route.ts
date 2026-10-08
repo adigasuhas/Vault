@@ -6,7 +6,7 @@ import { patchAccountSchema } from "@/lib/schemas";
 
 export const dynamic = "force-dynamic";
 
-const LEDGER_TYPES = ["EXPENSE", "INCOME", "TRANSFER_IN", "TRANSFER_OUT", "ADJUSTMENT", "OPENING", "REVERSAL", "INVESTMENT_SALE"] as const;
+const LEDGER_TYPES = ["EXPENSE", "INCOME", "TRANSFER_IN", "TRANSFER_OUT", "ADJUSTMENT", "OPENING", "REVERSAL", "INVESTMENT_SALE", "INVESTMENT_PURCHASE"] as const;
 const PAGE_SIZE = 40;
 
 /** Account statement: every entry (including reversed ones and their

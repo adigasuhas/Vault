@@ -36,12 +36,13 @@ interface Detail {
     linkedAccount: { id: string; name: string; currency: string } | null;
     category: { id: string; name: string } | null;
     schedule: { id: string; isActive: boolean; requiresConfirmation: boolean; receivingAccountId: string } | null;
-    payments: { id: string; amount: string; principalComponent: string; interestComponent: string; paidOn: string; note: string | null; reversedAt: string | null; occurrenceId: string | null }[];
+    payments: { id: string; amount: string; principalComponent: string; interestComponent: string; paidOn: string; note: string | null; reversedAt: string | null; occurrenceId: string | null; kind: "EMI" | "PREPAYMENT" | "PAYOFF" }[];
   };
   schedule: AmortRow[];
   progress: { paidCount: number; totalInstallments: number; principalPaid: number; interestPaid: number; totalPaid: number; outstandingPrincipal: number; percentPaid: number; nextDue: AmortRow | null };
   totalInterest: number;
   termsLocked: boolean;
+  deletable: boolean;
 }
 interface Account { id: string; name: string; currency: string; status: string }
 
@@ -53,7 +54,8 @@ export default function LoanDetailPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [payOpen, setPayOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
-  const [pay, setPay] = useState({ amount: "", date: localToday(), accountId: "", note: "" });
+  const [pay, setPay] = useState({ amount: "", date: localToday(), accountId: "", note: "", kind: "EMI" as "EMI" | "PREPAYMENT" });
+  const [reversing, setReversing] = useState<Detail["loan"]["payments"][number] | null>(null);
   const [schedAccount, setSchedAccount] = useState("");
   const [busy, setBusy] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -83,7 +85,7 @@ export default function LoanDetailPage() {
   async function recordPayment() {
     setBusy(true);
     try {
-      await api(`/api/loans/${id}/payments`, { body: { amount: Number(pay.amount), paidOn: pay.date, fromAccountId: pay.accountId || undefined, note: pay.note || undefined } });
+      await api(`/api/loans/${id}/payments`, { body: { amount: Number(pay.amount), paidOn: pay.date, fromAccountId: pay.accountId || undefined, note: pay.note || undefined, kind: pay.kind } });
       toast.success("Payment recorded.");
       setPayOpen(false);
       load();
@@ -110,6 +112,15 @@ export default function LoanDetailPage() {
     try {
       await api(`/api/loans/${id}`, { method: "PATCH", body: { status } });
       toast.success(status === "CLOSED" ? "Loan closed. Its EMI schedule has ended." : "Loan re-opened.");
+      load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+  async function reversePayment(paymentId: string, reason?: string) {
+    try {
+      await api(`/api/loans/${id}/payments/${paymentId}/reverse`, { body: { reason } });
+      toast.success("Payment reversed. The money is back in its account and the loan owes it again.");
       load();
     } catch (e) {
       toast.error((e as Error).message);
@@ -151,16 +162,16 @@ export default function LoanDetailPage() {
           <>
             <Button variant="outline" onClick={() => setEditOpen(true)}><Pencil /> Edit</Button>
             {loan.status === "ACTIVE" && !loan.schedule && <Button variant="outline" onClick={() => { setSchedAccount(loan.linkedAccount?.id ?? accounts[0]?.id ?? ""); setSchedOpen(true); }}>Set up EMI schedule</Button>}
-            {loan.status === "ACTIVE" && <Button variant="outline" onClick={() => { setPay({ amount: String(Math.round((progress.nextDue?.emi ?? Number(loan.emiAmount)) * 100) / 100), date: localToday(), accountId: loan.linkedAccount?.id ?? "", note: "" }); setPayOpen(true); }}>Record a payment</Button>}
+            {loan.status === "ACTIVE" && <Button variant="outline" onClick={() => { setPay({ amount: String(Math.round((progress.nextDue?.emi ?? Number(loan.emiAmount)) * 100) / 100), date: localToday(), accountId: loan.linkedAccount?.id ?? "", note: "", kind: "EMI" }); setPayOpen(true); }}>Record a payment</Button>}
             {loan.status === "ACTIVE" ? (
               <Button variant="ghost" onClick={() => { setPayoff({ amount: String(Math.round(progress.outstandingPrincipal * 100) / 100), date: localToday(), accountId: loan.linkedAccount?.id ?? "" }); setPayoffOpen(true); }}>Pay off & close</Button>
             ) : (
               progress.outstandingPrincipal > 0.004 && <Button variant="ghost" onClick={() => setStatus("ACTIVE")}>Re-open</Button>
             )}
-            {!hasHistory && (
+            {data.deletable && (
               <ConfirmAction
                 title="Delete this loan?"
-                description={<p>No payments are recorded yet, so it can be removed completely. Handy for a loan added by mistake.</p>}
+                description={<p>Nothing has been paid on it, so it&apos;s removed completely, with its EMI schedule and its budget lines from this month on. {hasHistory ? "Its reversed payments stay in the ledger." : ""}</p>}
                 confirmLabel="Delete loan"
                 onConfirm={remove}
                 trigger={<Button variant="ghost" className="text-negative hover:text-negative">Delete</Button>}
@@ -203,7 +214,14 @@ export default function LoanDetailPage() {
           </Panel>
         </Section>
 
-        <Section title="Payments" description={loan.schedule ? "EMIs booked from the schedule appear here too." : undefined}>
+        <Section
+          title="Payments"
+          description={
+            !data.deletable
+              ? "Payments are on record, so this loan can't be deleted: that would erase them. Pay it off, change its EMI or months, or reverse a payment made by mistake."
+              : loan.schedule ? "EMIs booked from the schedule appear here too." : undefined
+          }
+        >
           <Panel padded={false}>
             {loan.payments.length === 0 ? (
               <div className="p-5"><EmptyState title="No payments recorded">{loan.schedule ? "Confirm each EMI from Loans & payments when it comes due." : "Record past EMIs here, or set up the EMI schedule."}</EmptyState></div>
@@ -213,12 +231,18 @@ export default function LoanDetailPage() {
                   <li key={p.id} className={cn("flex items-center gap-3 px-5 py-3", p.reversedAt && "opacity-60")}>
                     <span className="w-24 font-mono text-xs text-muted-foreground">{formatDate(p.paidOn)}</span>
                     <div className="min-w-0 flex-1 text-xs text-muted-foreground">
-                      {formatMoney(Math.round(Number(p.principalComponent)), c)} principal · {formatMoney(Math.round(Number(p.interestComponent)), c)} interest
-                      {p.note && ` · ${p.note}`}
+                      <span className="text-foreground/80">{p.kind === "PREPAYMENT" ? "Extra payment" : p.kind === "PAYOFF" ? "Paid off" : "EMI"}</span>
+                      {" · "}{formatMoney(Math.round(Number(p.principalComponent)), c)} principal · {formatMoney(Math.round(Number(p.interestComponent)), c)} interest
+                      {p.note && p.note !== "Paid off" && ` · ${p.note}`}
                     </div>
                     {p.reversedAt && <StatusBadge tone="neutral">Reversed</StatusBadge>}
                     {p.occurrenceId && !p.reversedAt && <StatusBadge tone="outline" dot={false}>Scheduled</StatusBadge>}
                     <span className={cn("text-sm font-medium tabular-nums", p.reversedAt && "line-through")}>{formatMoney(Number(p.amount), c)}</span>
+                    <span className="w-16 text-right">
+                      {!p.reversedAt && (
+                        <button className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline" onClick={() => setReversing(p)}>Reverse</button>
+                      )}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -231,9 +255,26 @@ export default function LoanDetailPage() {
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>Record a loan payment</DialogTitle>
-            <DialogDescription>For an EMI paid before the schedule existed, or a prepayment. Paid from an account, it&apos;s booked to the ledger under {loan.category?.name ?? "the loan"}.</DialogDescription>
+            <DialogDescription>An EMI paid outside the schedule, or an extra payment towards what&apos;s owed. Paid from an account, it&apos;s booked to the ledger under {loan.category?.name ?? "the loan"}.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Payment type">
+              {(["EMI", "PREPAYMENT"] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={pay.kind === k}
+                  onClick={() => setPay({ ...pay, kind: k, amount: k === "EMI" ? String(Math.round((progress.nextDue?.emi ?? Number(loan.emiAmount)) * 100) / 100) : "" })}
+                  className={cn("h-9 cursor-pointer rounded-md border text-sm transition-colors", pay.kind === k ? "border-foreground/50 bg-muted font-medium" : "border-border text-muted-foreground hover:text-foreground")}
+                >
+                  {k === "EMI" ? "An EMI" : "Extra towards principal"}
+                </button>
+              ))}
+            </div>
+            {pay.kind === "PREPAYMENT" && (
+              <p className="text-xs text-muted-foreground">It all goes to principal ({formatMoney(Math.round(progress.outstandingPrincipal * 100) / 100, c)} owed). The EMI stays the same, so the loan ends sooner; edit the loan afterwards to lower the EMI instead.</p>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5"><Label htmlFor="p-amt">Amount</Label><Input id="p-amt" type="number" min="0" step="0.01" value={pay.amount} onChange={(e) => setPay({ ...pay, amount: e.target.value })} /></div>
               <div className="space-y-1.5"><Label htmlFor="p-date">Paid on</Label><Input id="p-date" type="date" max={localToday()} value={pay.date} onChange={(e) => setPay({ ...pay, date: e.target.value })} /></div>
@@ -276,6 +317,22 @@ export default function LoanDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ConfirmAction
+        open={!!reversing}
+        onOpenChange={(o) => !o && setReversing(null)}
+        title="Reverse this payment?"
+        withReason="Reason"
+        description={
+          reversing && (
+            <>
+              <p>{formatMoney(Number(reversing.amount), c)} on {formatDate(reversing.paidOn)}. The money goes back to its account and the loan owes it again; the rest of the plan re-forms around it.</p>
+              <p>Use this for a payment recorded by mistake or one that bounced. The ledger keeps the payment and its reversal side by side.</p>
+            </>
+          )
+        }
+        confirmLabel="Reverse payment"
+        onConfirm={(reason) => reversePayment(reversing!.id, reason)}
+      />
       <Dialog open={payoffOpen} onOpenChange={(o) => !busy && setPayoffOpen(o)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
