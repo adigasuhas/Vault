@@ -9,7 +9,7 @@ import { StockTable, FundTable, StockBreakdown, DepositTable, AssetTable } from 
 import { SellContext, SellDialog, type SellTarget } from "@/components/investments/SellDialog";
 import { SalesHistory, type SaleRow } from "@/components/investments/SalesHistory";
 import { FundingFields, emptyFunding, fundingBody, type FundingValue } from "@/components/investments/FundingFields";
-import { CategoryBar, CategoryField, CategoryManager, CategoryPerformance, CategoryProvider, Dot, UNCATEGORISED, assignCategories, emptyPicker, useCategories, type PickerValue } from "@/components/investments/Categories";
+import { CategoryBar, CategoryField, CategoryManager, CategoryPerformance, CategoryPicker, CategoryProvider, Dot, UNCATEGORISED, assignCategories, emptyPicker, pickerEmpty, useCategories, type PickerValue } from "@/components/investments/Categories";
 import { categoryRows, linkKey, type InvestmentKind, type Position } from "@/lib/category-metrics";
 import { useSession } from "@/context/SessionContext";
 import { formatMoney } from "@/lib/currencies";
@@ -54,6 +54,9 @@ interface StockHolding {
   lots: StockPurchaseLot[];
   /** Sales recorded against it (not undone). */
   saleCount?: number;
+  /** Set when the row shows only some purchases (a category filter): the
+   * whole holding's quantity. */
+  partOf?: number;
 }
 
 interface MutualFundHolding {
@@ -458,7 +461,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
         currency: h.currency,
         invested: Number(h.avgBuyPrice) * Number(h.quantity),
         value: Number(h.lastPrice ?? h.avgBuyPrice) * Number(h.quantity),
-        lots: h.lots.map((l) => ({ qty: Number(l.quantity), cost: Number(l.quantity) * Number(l.price), date: l.purchaseDate })),
+        lots: h.lots.map((l) => ({ id: l.id, qty: Number(l.quantity), cost: Number(l.quantity) * Number(l.price), date: l.purchaseDate })),
       })),
       ...funds.map((f) => ({
         kind: "MUTUAL_FUND" as const,
@@ -492,7 +495,20 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
     ],
     [stocks, funds, deposits, otherAssets]
   );
-  const saleLites = useMemo(() => sales.map((x) => ({ kind: x.kind, holdingId: x.holdingId, currency: x.currency, realizedPnl: Number(x.realizedPnl), reversedAt: x.reversedAt })), [sales]);
+  const saleLites = useMemo(
+    () =>
+      sales.map((x) => ({
+        kind: x.kind,
+        holdingId: x.holdingId,
+        currency: x.currency,
+        realizedPnl: Number(x.realizedPnl),
+        reversedAt: x.reversedAt,
+        quantity: x.quantity != null ? Number(x.quantity) : null,
+        netProceeds: Number(x.netProceeds),
+        lots: x.lots.map((l) => ({ lotId: l.lotId, quantity: l.quantity != null ? Number(l.quantity) : null, cost: Number(l.cost) })),
+      })),
+    [sales]
+  );
 
   // A removed category can't stay selected.
   const activeCategory = categoryCtx.categories.find((c) => c.id === catFilter) ?? null;
@@ -500,15 +516,36 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
     if (categoryCtx.loaded && catFilter && catFilter !== UNCATEGORISED && !activeCategory) setCatFilter("");
     if (categoryCtx.loaded && catFilter === UNCATEGORISED && !categoryCtx.categories.length) setCatFilter("");
   }, [categoryCtx.loaded, categoryCtx.categories.length, catFilter, activeCategory, setCatFilter]);
+  // What the category filter keeps: whole holdings, or, for stocks split by
+  // purchase (clients), just the purchases in it.
   const inCategory = useMemo(() => {
     if (!catFilter) return null;
     if (catFilter === UNCATEGORISED) {
       const linked = new Set(categoryCtx.categories.flatMap((c) => c.links.map((l) => linkKey(l.kind, l.holdingId))));
-      return (kind: InvestmentKind, id: string) => !linked.has(linkKey(kind, id));
+      const lots = new Set(categoryCtx.categories.flatMap((c) => (c.lotLinks ?? []).map((l) => l.lotId)));
+      return { holding: (kind: InvestmentKind, id: string) => !linked.has(linkKey(kind, id)), lot: (lotId: string) => !lots.has(lotId), whole: () => false };
     }
     const keys = new Set((activeCategory?.links ?? []).map((l) => linkKey(l.kind, l.holdingId)));
-    return (kind: InvestmentKind, id: string) => keys.has(linkKey(kind, id));
+    const lots = new Set((activeCategory?.lotLinks ?? []).map((l) => l.lotId));
+    return { holding: (kind: InvestmentKind, id: string) => keys.has(linkKey(kind, id)), lot: (lotId: string) => lots.has(lotId), whole: (kind: InvestmentKind, id: string) => keys.has(linkKey(kind, id)) };
   }, [catFilter, categoryCtx.categories, activeCategory]);
+  /** A stock narrowed to the purchases the filter keeps: its row then shows
+   * only those shares, at their own cost. */
+  const stockIn = useCallback(
+    (h: StockHolding): StockHolding | null => {
+      if (!inCategory) return h;
+      if (inCategory.whole("STOCK", h.id)) return h;
+      // "Not in a category": a stock in one as a whole is out entirely.
+      if (catFilter === UNCATEGORISED && !inCategory.holding("STOCK", h.id)) return null;
+      const lots = h.lots.filter((l) => inCategory.lot(l.id));
+      if (!lots.length) return catFilter === UNCATEGORISED && !h.lots.length ? h : null;
+      if (lots.length === h.lots.length) return h;
+      const qty = lots.reduce((t, l) => t + Number(l.quantity), 0);
+      const cost = lots.reduce((t, l) => t + Number(l.quantity) * Number(l.price), 0);
+      return { ...h, lots, quantity: String(qty), avgBuyPrice: String(qty ? cost / qty : 0), partOf: Number(h.quantity) };
+    },
+    [inCategory, catFilter]
+  );
   const categoryRow = useMemo(
     () => (activeCategory ? categoryRows([activeCategory], positions, saleLites, toBase, totalValue)[0] : null),
     [activeCategory, positions, saleLites, toBase, totalValue]
@@ -527,15 +564,19 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
     }
     if (inCategory) {
       v = {
-        stocks: v.stocks.filter((h) => inCategory("STOCK", h.id)),
-        funds: v.funds.filter((f) => inCategory("MUTUAL_FUND", f.id)),
-        deposits: v.deposits.filter((d) => inCategory("FIXED_DEPOSIT", d.id)),
-        otherAssets: v.otherAssets.filter((a) => inCategory("OTHER", a.id)),
-        sales: v.sales.filter((x) => inCategory(x.kind, x.holdingId)),
+        stocks: v.stocks.map(stockIn).filter((h): h is StockHolding => !!h),
+        funds: v.funds.filter((f) => inCategory.holding("MUTUAL_FUND", f.id)),
+        deposits: v.deposits.filter((d) => inCategory.holding("FIXED_DEPOSIT", d.id)),
+        otherAssets: v.otherAssets.filter((a) => inCategory.holding("OTHER", a.id)),
+        sales: v.sales.filter((x) =>
+          catFilter === UNCATEGORISED
+            ? inCategory.holding(x.kind, x.holdingId) && (x.kind !== "STOCK" || x.lots.some((l) => !l.lotId || inCategory.lot(l.lotId)))
+            : inCategory.holding(x.kind, x.holdingId) || (x.kind === "STOCK" && x.lots.some((l) => l.lotId && inCategory.lot(l.lotId)))
+        ),
       };
     }
     return v;
-  }, [ranged, inRange, inCategory, stocks, funds, deposits, otherAssets, sales]);
+  }, [ranged, inRange, inCategory, stockIn, catFilter, stocks, funds, deposits, otherAssets, sales]);
   const narrowed = ranged || !!inCategory;
 
   return (
@@ -656,7 +697,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
         </TabsList>
 
         <TabsContent value="stocks" className="space-y-4">
-          <StockTab stocks={view.stocks} loading={loading} defaultCurrency={currency} onChange={load} />
+          <StockTab stocks={view.stocks} allStocks={stocks} loading={loading} defaultCurrency={currency} onChange={load} />
         </TabsContent>
         <TabsContent value="funds" className="space-y-4">
           <FundTab funds={view.funds} loading={loading} defaultCurrency={currency} onChange={load} />
@@ -693,11 +734,15 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
 
 function StockTab({
   stocks,
+  allStocks,
   loading,
   defaultCurrency,
   onChange,
 }: {
   stocks: StockHolding[];
+  /** Every stock in full: rows may show only some purchases (a category
+   * filter), but details and editing always work on the whole stock. */
+  allStocks: StockHolding[];
   loading: boolean;
   defaultCurrency: string;
   onChange: () => void;
@@ -716,13 +761,15 @@ function StockTab({
   // Defaults to NSE for INR users — the exchange most likely to be searched
   // for by this app's primary (Indian) audience.
   const [searchExchange, setSearchExchange] = useState(defaultCurrency === "INR" ? "NSI" : ALL_EXCHANGES);
+  // Categories picked when adding: this purchase only (a client) or every share.
+  const [catScope, setCatScope] = useState<"PURCHASE" | "STOCK">("PURCHASE");
 
   // One edit form for every way in: the row's Edit, and Edit / a purchase's
   // pencil in its details. focusLot puts the cursor on that purchase.
   const [editing, setEditing] = useState<{ id: string; focusLot?: string } | null>(null);
 
   const [detailsId, setDetailsId] = useState<string | null>(null);
-  const detailsHolding = stocks.find((s) => s.id === detailsId) || null;
+  const detailsHolding = allStocks.find((s) => s.id === detailsId) || null;
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -730,12 +777,20 @@ function StockTab({
     const res = await fetch("/api/investments/stocks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticker, exchange, quantity, price, currency, purchaseDate, ...fundingBody(funding) }),
+      body: JSON.stringify({
+        ticker,
+        exchange,
+        quantity,
+        price,
+        currency,
+        purchaseDate,
+        ...fundingBody(funding),
+        ...(pickerEmpty(cats) ? {} : { categoryIds: cats.ids, newNames: cats.newNames, categoryScope: catScope }),
+      }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add stock.");
-    if (data.holding?.id) await assignCategories("STOCK", data.holding.id, cats);
     setCats(emptyPicker());
     setOpen(false);
     setFunding(emptyFunding());
@@ -837,7 +892,24 @@ function StockTab({
                 Already own this stock? Adding it again with the same ticker, exchange, and currency combines it into
                 your existing holding and averages the price. No duplicate row.
               </p>
-              <CategoryField value={cats} onChange={setCats} />
+              <div className="space-y-2">
+                <CategoryField value={cats} onChange={setCats} />
+                {!pickerEmpty(cats) && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="text-muted-foreground">Applies to</span>
+                    <div role="radiogroup" aria-label="Categories apply to" className="inline-flex rounded-md bg-muted p-0.5">
+                      {([["PURCHASE", "This purchase"], ["STOCK", "Every share of it"]] as const).map(([v, l]) => (
+                        <button key={v} type="button" role="radio" aria-checked={catScope === v} onClick={() => setCatScope(v)} className={`h-7 cursor-pointer rounded px-2.5 transition-colors ${catScope === v ? "bg-card font-medium shadow-card" : "text-muted-foreground hover:text-foreground"}`}>
+                          {l}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="basis-full text-muted-foreground">
+                      {catScope === "PURCHASE" ? "Just these shares, e.g. the client they're for. Other purchases of it keep their own." : "Every share, now and later, e.g. an industry."}
+                    </span>
+                  </div>
+                )}
+              </div>
               <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(quantity) * Number(price)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
@@ -850,7 +922,7 @@ function StockTab({
       <StockTable stocks={stocks} loading={loading} series={series} onView={setDetailsId} onEdit={(s) => setEditing({ id: s.id })} onDelete={handleDelete} />
 
       <StockEditor
-        holding={editing ? stocks.find((s) => s.id === editing.id) ?? null : null}
+        holding={editing ? allStocks.find((s) => s.id === editing.id) ?? null : null}
         focusLot={editing?.focusLot}
         onClose={() => setEditing(null)}
         onSaved={onChange}
@@ -905,6 +977,10 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
   );
   const initialCats = useMemo(() => (categoryCtx?.of("STOCK", holding.id) ?? []).map((c) => c.id), [categoryCtx, holding.id]);
   const [cats, setCats] = useState<PickerValue>(() => ({ ids: initialCats, newNames: [] }));
+  // Each purchase's own categories (e.g. the client it was bought for).
+  const initialLotCats = useMemo(() => Object.fromEntries(lotsInOrder.map((l) => [l.id, (categoryCtx?.ofLot(l.id) ?? []).map((c) => c.id)])), [categoryCtx, lotsInOrder]);
+  const [lotCats, setLotCats] = useState<Record<string, PickerValue>>(() => Object.fromEntries(lotsInOrder.map((l) => [l.id, { ids: initialLotCats[l.id], newNames: [] }])));
+  const changed = (v: PickerValue, was: string[]) => v.newNames.length > 0 || v.ids.length !== was.length || v.ids.some((id) => !was.includes(id));
   const [saving, setSaving] = useState(false);
 
   const paidAny = holding.lots.some((l) => l.paidFrom);
@@ -917,21 +993,23 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
     e.preventDefault();
     const t = ticker.trim().toUpperCase();
     if (!t) return toast.error("Enter the ticker.");
-    const lotEdits: { id: string; quantity?: number; price?: number; purchaseDate?: string }[] = [];
+    const lotEdits: { id: string; quantity?: number; price?: number; purchaseDate?: string; categoryIds?: string[]; newNames?: string[] }[] = [];
     for (const l of lotsInOrder) {
       const v = lots[l.id];
       const q = Number(v.quantity);
       const p = Number(v.price);
       if (!(q > 0) || !(p > 0)) return toast.error("Each purchase needs a quantity and price above zero.");
       if (!v.date) return toast.error("Each purchase needs the date it was bought.");
+      const own = lotCats[l.id];
       const edit = {
         ...(q !== Number(l.quantity) ? { quantity: q } : {}),
         ...(p !== Number(l.price) ? { price: p } : {}),
         ...(v.date !== l.purchaseDate.slice(0, 10) ? { purchaseDate: v.date } : {}),
+        ...(changed(own, initialLotCats[l.id]) ? { categoryIds: own.ids, newNames: own.newNames } : {}),
       };
       if (Object.keys(edit).length) lotEdits.push({ id: l.id, ...edit });
     }
-    const catsChanged = cats.newNames.length > 0 || cats.ids.length !== initialCats.length || cats.ids.some((id) => !initialCats.includes(id));
+    const catsChanged = changed(cats, initialCats);
     const body = {
       ...(t !== holding.ticker ? { ticker: t } : {}),
       ...((exchange.trim() || null) !== holding.exchange ? { exchange: exchange.trim() || null } : {}),
@@ -1017,6 +1095,10 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">{paidNote(l)}</p>
+              <div className="space-y-1.5 border-t border-border/70 pt-2">
+                <Label className="text-xs text-muted-foreground">{single ? "Categories for this purchase" : `Categories for these ${Number(lots[l.id].quantity) || ""} shares`}</Label>
+                <CategoryPicker compact value={lotCats[l.id]} onChange={(v) => setLotCats((all) => ({ ...all, [l.id]: v }))} categories={categoryCtx?.categories ?? []} />
+              </div>
             </div>
           ))}
         </div>
@@ -1025,7 +1107,11 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
         </p>
       </div>
 
-      <CategoryField value={cats} onChange={setCats} />
+      <div className="space-y-1.5">
+        <Label>Categories for the whole stock <span className="font-normal text-muted-foreground">(optional)</span></Label>
+        <p className="text-xs text-muted-foreground">Every share, now and later, e.g. an industry. Use a purchase&apos;s own categories above for who it was bought for.</p>
+        <CategoryPicker value={cats} onChange={setCats} categories={categoryCtx?.categories ?? []} />
+      </div>
 
       <DialogFooter className="gap-2">
         <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>

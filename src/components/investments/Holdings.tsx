@@ -13,10 +13,10 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { toast } from "sonner";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useSort, SortTh } from "@/components/investments/table-kit";
-import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Search, Trash2 } from "lucide-react";
+import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useSell } from "@/components/investments/SellDialog";
 import { cn } from "@/lib/utils";
-import { CategoryChips, useCategories, useCategorySortKey } from "@/components/investments/Categories";
+import { CategoryChips, Dot, useCategories, useCategorySortKey } from "@/components/investments/Categories";
 import type { InvestmentKind } from "@/lib/category-metrics";
 
 /** Category column: shown once the user has any categories. */
@@ -26,6 +26,7 @@ function useCategoryColumn(kind: InvestmentKind) {
   return { show: !!ctx?.categories.length, key: (id: string) => key(kind, id), stamp: ctx?.categories };
 }
 const catTh = "hidden md:table-cell";
+const lotQty = (s: StockRow) => s.lots.map((l) => ({ id: l.id, quantity: Number(l.quantity) }));
 
 interface Lot { id: string; quantity: string; price: string; purchaseDate: string }
 export interface StockRow {
@@ -40,6 +41,8 @@ export interface StockRow {
   lastPriceAt: string | null;
   previousClose: string | null;
   lots: Lot[];
+  /** The row shows only some purchases (a category filter); the whole holding's quantity. */
+  partOf?: number;
 }
 interface FundLot { id: string; units: string; nav: string; purchaseDate: string }
 export interface FundRow {
@@ -108,6 +111,7 @@ export function StockTable({
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const cat = useCategoryColumn("STOCK");
+  const categoryCtx = useCategories();
   const rows = useMemo(
     () =>
       stocks
@@ -120,7 +124,7 @@ export function StockTable({
     rows,
     {
       name: (r) => r.s.ticker,
-      cat: (r) => cat.key(r.s.id),
+      cat: (r) => [cat.key(r.s.id), ...r.s.lots.flatMap((l) => (categoryCtx?.ofLot(l.id) ?? []).map((c) => c.name.toLowerCase()))].sort()[0],
       price: (r) => r.m.last,
       day: (r) => r.m.dayPct ?? -Infinity,
       invested: (r) => r.m.invested,
@@ -132,7 +136,17 @@ export function StockTable({
   );
   const [deleting, setDeleting] = useState<StockRow | null>(null);
   const sell = useSell();
-  const sellStock = (s: StockRow) =>
+  const sellStock = (s: StockRow) => {
+    // Purchases grouped by their own categories (clients), to sell from one.
+    const groups = new Map<string, { id: string; label: string; lotIds: string[] }>();
+    for (const l of s.lots) for (const c of categoryCtx?.ofLot(l.id) ?? []) {
+      const g = groups.get(c.id) ?? { id: c.id, label: c.name, lotIds: [] };
+      g.lotIds.push(l.id);
+      groups.set(c.id, g);
+    }
+    const loose = s.lots.filter((l) => !(categoryCtx?.ofLot(l.id).length));
+    if (groups.size && loose.length) groups.set("__unallocated__", { id: "__unallocated__", label: "Unallocated", lotIds: loose.map((l) => l.id) });
+    const filtered = categoryCtx?.categories.find((c) => s.lots.every((l) => categoryCtx.ofLot(l.id).some((x) => x.id === c.id)));
     sell?.({
       kind: "STOCK",
       holdingId: s.id,
@@ -140,7 +154,9 @@ export function StockTable({
       currency: s.currency,
       price: s.lastPrice != null ? Number(s.lastPrice) : null,
       lots: s.lots.map((l) => ({ id: l.id, quantity: Number(l.quantity), price: Number(l.price), purchaseDate: l.purchaseDate })),
+      ...(s.partOf ? { onlyLots: { label: filtered ? `${filtered.name}'s purchases` : "the purchases shown" } } : { groups: [...groups.values()] }),
     });
+  };
 
   if (loading) return <SkeletonBlock className="h-48" />;
   if (!stocks.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="No stocks yet">Add a holding and its price, value and one-year line show up here.</EmptyState>;
@@ -168,12 +184,12 @@ export function StockTable({
               <td className="max-w-[200px] truncate py-2.5 pr-3 pl-4">
                 <button onClick={() => onView(s.id)} className="cursor-pointer text-left font-medium hover:underline">{s.ticker}</button>
                 <p className="truncate text-xs text-muted-foreground">
-                  {Number(m.qty.toFixed(4))} × {formatMoney(Number(s.avgBuyPrice), s.currency)}
+                  {Number(m.qty.toFixed(4))}{s.partOf ? ` of ${Number(s.partOf.toFixed(4))}` : ""} × {formatMoney(Number(s.avgBuyPrice), s.currency)}
                   {s.lots.length > 1 && ` · ${s.lots.length} buys`}
                 </p>
-                {cat.show && <CategoryChips kind="STOCK" id={s.id} name={s.ticker} className="mt-1 md:hidden" />}
+                {cat.show && <CategoryChips kind="STOCK" id={s.id} name={s.ticker} lots={lotQty(s)} className="mt-1 md:hidden" />}
               </td>
-              {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="STOCK" id={s.id} name={s.ticker} /></td>}
+              {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="STOCK" id={s.id} name={s.ticker} lots={lotQty(s)} /></td>}
               <td className="hidden px-3 py-1.5 lg:table-cell">
                 <Sparkline points={series ? series[s.id] ?? [] : undefined} currency={s.currency} width={84} height={26} />
               </td>
@@ -240,6 +256,20 @@ export function StockBreakdown({ h, onEdit, onEditLot, onDeleteLot }: { h: Stock
   const pl = current - invested;
   const qty = lots.reduce((s, l) => s + l.qty, 0);
   const c = h.currency;
+  // Who the shares were bought for: purchases grouped by their own categories.
+  const categoryCtx = useCategories();
+  const split = new Map<string, { name: string; color: number; qty: number; invested: number; current: number }>();
+  let loose = { qty: 0, invested: 0, current: 0 };
+  for (const l of lots) {
+    const own = categoryCtx?.ofLot(l.id) ?? [];
+    if (!own.length) loose = { qty: loose.qty + l.qty, invested: loose.invested + l.invested, current: loose.current + l.current };
+    for (const cat of own) {
+      const g = split.get(cat.id) ?? { name: cat.name, color: cat.color, qty: 0, invested: 0, current: 0 };
+      split.set(cat.id, { ...g, qty: g.qty + l.qty, invested: g.invested + l.invested, current: g.current + l.current });
+    }
+  }
+  const wide = categoryCtx?.of("STOCK", h.id) ?? [];
+  const n = (x: number) => Number(x.toFixed(4)).toLocaleString();
   return (
     <div className="space-y-5">
       <DialogHeader>
@@ -265,8 +295,33 @@ export function StockBreakdown({ h, onEdit, onEditLot, onDeleteLot }: { h: Stock
           </div>
         ))}
       </div>
+      {(split.size > 0 || wide.length > 0) && (
+        <div className="space-y-2">
+          {split.size > 0 && (
+            <ul className="divide-y divide-border/60 rounded-xl border border-border text-sm" aria-label="Shares by category">
+              {[...split.values()].map((g) => (
+                <li key={g.name} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-4 py-2">
+                  <span className="flex min-w-0 items-center gap-2 font-medium"><Dot color={g.color} className="h-2 w-2" />{g.name}</span>
+                  <span className="tabular-nums text-muted-foreground">{n(g.qty)} {g.qty === 1 ? "share" : "shares"}</span>
+                  <span className="ml-auto tabular-nums">{formatMoney(g.current, c)}</span>
+                  <span className={cn("w-24 text-right text-xs tabular-nums", tone(g.current - g.invested))}>{signed(g.current - g.invested, c)}</span>
+                </li>
+              ))}
+              {loose.qty > 0 && (
+                <li className="flex flex-wrap items-center gap-x-3 px-4 py-2 text-muted-foreground">
+                  <span className="italic">Unallocated</span>
+                  <span className="tabular-nums">{n(loose.qty)} {loose.qty === 1 ? "share" : "shares"}</span>
+                  <span className="ml-auto tabular-nums">{formatMoney(loose.current, c)}</span>
+                  <span className="w-24" />
+                </li>
+              )}
+            </ul>
+          )}
+          {wide.length > 0 && <p className="text-xs text-muted-foreground">Every share is also in {wide.map((w) => w.name).join(", ")}.</p>}
+        </div>
+      )}
       <div className="overflow-x-auto rounded-xl border border-border">
-        <table className="w-full min-w-[620px] text-sm">
+        <table className="w-full min-w-[720px] text-sm">
           <thead>
             <tr className="border-b border-border text-[11px] tracking-[0.06em] text-muted-foreground uppercase">
               <th className="px-4 py-2.5 text-left font-medium">Bought</th>
@@ -275,6 +330,7 @@ export function StockBreakdown({ h, onEdit, onEditLot, onDeleteLot }: { h: Stock
               <th className="px-3 py-2.5 text-right font-medium">Invested</th>
               <th className="px-3 py-2.5 text-right font-medium">Value now</th>
               <th className="px-3 py-2.5 text-right font-medium">Profit / loss</th>
+              <th className="px-3 py-2.5 text-left font-medium">Categories</th>
               <th className="w-20" />
             </tr>
           </thead>
@@ -287,6 +343,9 @@ export function StockBreakdown({ h, onEdit, onEditLot, onDeleteLot }: { h: Stock
                 <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.invested, c)}<Equivalent both stack value={l.invested} currency={c} /></td>
                 <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(l.current, c)}<Equivalent both stack value={l.current} currency={c} /></td>
                 <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(l.pl))}>{signed(l.pl, c)} <span className="text-xs">({pct(l.plPct)})</span><Equivalent both stack signed value={l.pl} currency={c} /></td>
+                <td className="min-w-[10rem] px-3 py-2.5">
+                  <LotCategories lotId={l.id} name={`${n(l.qty)} ${h.ticker} bought ${formatDate(l.purchaseDate)}`} />
+                </td>
                 <td className="pr-3 text-right">
                   <div className="flex justify-end gap-0.5">
                     <Button variant="ghost" size="icon-sm" aria-label={`Edit purchase of ${formatDate(l.purchaseDate)}`} onClick={() => onEditLot(l.lot)}><Pencil className="h-3.5 w-3.5" /></Button>
@@ -311,11 +370,37 @@ export function StockBreakdown({ h, onEdit, onEditLot, onDeleteLot }: { h: Stock
               <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(current, c)}<Equivalent both stack value={current} currency={c} /></td>
               <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(pl))}>{signed(pl, c)}<Equivalent both stack signed value={pl} currency={c} /></td>
               <td />
+              <td />
             </tr>
           </tfoot>
         </table>
       </div>
       <p className="text-xs text-muted-foreground">Every purchase is valued at the latest price. Adding the same stock again records a new purchase here.</p>
+    </div>
+  );
+}
+
+/** One purchase's own categories, and the way to change only those. */
+function LotCategories({ lotId, name }: { lotId: string; name: string }) {
+  const ctx = useCategories();
+  if (!ctx) return null;
+  const own = ctx.ofLot(lotId);
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {own.map((c) => (
+        <span key={c.id} className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 py-px text-[11px] text-muted-foreground">
+          <Dot color={c.color} className="h-1.5 w-1.5" />
+          {c.name}
+        </span>
+      ))}
+      <button
+        type="button"
+        onClick={() => ctx.edit("STOCK_LOT", lotId, name)}
+        aria-label={own.length ? `Change categories for ${name}` : `Add a category to ${name}`}
+        className={cn("inline-flex h-[18px] cursor-pointer items-center gap-0.5 rounded-full px-1 text-[11px] text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground", !own.length && "border border-dashed border-border px-1.5")}
+      >
+        {own.length ? <Pencil className="h-2.5 w-2.5" /> : <><Plus className="h-2.5 w-2.5" />Category</>}
+      </button>
     </div>
   );
 }

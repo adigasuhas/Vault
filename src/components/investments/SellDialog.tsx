@@ -23,6 +23,10 @@ interface UnitsTarget {
   /** Latest price or NAV, to prefill. */
   price: number | null;
   lots: { id: string; quantity: number; price: number; purchaseDate: string }[];
+  /** Only these purchases can be sold (a row filtered to one client's). */
+  onlyLots?: { label: string };
+  /** Purchases grouped by their own categories (clients), to sell from one. */
+  groups?: { id: string; label: string; lotIds: string[] }[];
 }
 
 export type SellTarget =
@@ -107,6 +111,12 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
   }, [accounts, target]);
   // Proceeds go to an account, or stay with the investments to be reinvested.
   const [destination, setDestination] = useState<"ACCOUNT" | "REINVEST">("ACCOUNT");
+  // Which purchases to sell from: all of them, or one group's (oldest first either way).
+  const [fromGroup, setFromGroup] = useState("");
+  const units = target.kind === "STOCK" || target.kind === "MUTUAL_FUND" ? target : null;
+  const group = units?.groups?.find((g) => g.id === fromGroup) ?? null;
+  const sellLots = useMemo(() => (units ? (group ? units.lots.filter((l) => group.lotIds.includes(l.id)) : units.lots) : []), [units, group]);
+  const restricted = !!(units?.onlyLots || group);
   const accountId = destination === "ACCOUNT" ? picked || suggested : "";
   const account = accounts.find((a) => a.id === accountId);
   const crossCurrency = !!(account && account.currency !== target.currency);
@@ -116,13 +126,16 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
     const fee = Number(charges) || 0;
     if (target.kind === "STOCK" || target.kind === "MUTUAL_FUND") {
       const qty = Number(quantity), px = Number(price);
-      const owned = r6(target.lots.reduce((s, l) => s + l.quantity, 0));
+      const owned = r6(sellLots.reduce((s, l) => s + l.quantity, 0));
       if (!(qty > 0) || !(px >= 0) || price === "") return { owned };
       try {
-        const { used } = matchLotsFifo(target.lots.map((l) => ({ ...l, purchaseDate: new Date(l.purchaseDate) })), qty, new Date(soldOn));
+        const { used } = matchLotsFifo(sellLots.map((l) => ({ ...l, purchaseDate: new Date(l.purchaseDate) })), qty, new Date(soldOn));
         const gross = roundMoney(qty * px);
         const cost = roundMoney(used.reduce((s, l) => s + l.cost, 0));
-        return { owned, gross, cost, net: roundMoney(gross - fee), used, closes: qty >= owned - 1e-9 };
+        // A row filtered to one client lists only their purchases; the stock
+        // closes only when nothing at all is left.
+        const all = r6(target.lots.reduce((s, l) => s + l.quantity, 0));
+        return { owned, gross, cost, net: roundMoney(gross - fee), used, closes: !units?.onlyLots && qty >= all - 1e-9 };
       } catch (e) {
         return { owned, error: (e as Error).message };
       }
@@ -133,7 +146,7 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
     const since = target.kind === "FIXED_DEPOSIT" ? target.startDate : target.purchaseDate;
     const used: SoldLot[] = [{ lotId: null, purchaseDate: since, quantity: null, price: null, cost }];
     return { gross, cost, net: roundMoney(gross - fee), used, closes: true };
-  }, [target, quantity, price, amount, charges, soldOn]);
+  }, [target, units, sellLots, quantity, price, amount, charges, soldOn]);
 
   const copy = COPY[target.kind];
   const c = target.currency;
@@ -152,6 +165,7 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
       note: note || undefined,
       ...(crossCurrency ? { creditedAmount: credited } : {}),
       ...(target.kind === "STOCK" || target.kind === "MUTUAL_FUND" ? { quantity, price } : { amount }),
+      ...(target.kind === "STOCK" && restricted ? { lotIds: sellLots.map((l) => l.id) } : {}),
     };
     const res = await fetch("/api/investments/sales", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
@@ -174,8 +188,10 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
         <DialogHeader>
           <DialogTitle>{copy.title} {target.name}</DialogTitle>
           <DialogDescription>
-            {target.kind === "STOCK" || target.kind === "MUTUAL_FUND"
-              ? `The oldest purchases are sold first. You hold ${preview?.owned ?? 0} ${copy.unit.toLowerCase()}.`
+            {units?.onlyLots
+              ? `From ${units.onlyLots.label} only, oldest first: ${preview?.owned ?? 0} ${copy.unit.toLowerCase()}. Its other purchases aren't touched.`
+              : target.kind === "STOCK" || target.kind === "MUTUAL_FUND"
+              ? `The oldest purchases are sold first. You hold ${preview?.owned ?? 0} ${copy.unit.toLowerCase()}${group ? ` in ${group.label}` : ""}.`
               : target.kind === "FIXED_DEPOSIT"
                 ? `${formatMoney(target.principal, c)} at ${target.rate}% a year, maturing ${formatDate(target.maturityDate)}.`
                 : `Bought for ${formatMoney(target.cost, c)} on ${formatDate(target.purchaseDate)}.`}
@@ -183,6 +199,21 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
         </DialogHeader>
 
         <form onSubmit={submit} className="space-y-4">
+          {units?.groups && units.groups.length > 0 && !units.onlyLots && (
+            <div className="space-y-2">
+              <Label>Sell from</Label>
+              <Select value={fromGroup || "__all__"} onValueChange={(v) => setFromGroup(v === "__all__" ? "" : v)}>
+                <SelectTrigger className="w-full" aria-label="Sell from"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">Any purchase, oldest first</SelectItem>
+                  {units.groups.map((g) => {
+                    const qty = r6(units.lots.filter((l) => g.lotIds.includes(l.id)).reduce((t, l) => t + l.quantity, 0));
+                    return <SelectItem key={g.id} value={g.id}>{g.label} · {qty} {copy.unit.toLowerCase()}</SelectItem>;
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           {(target.kind === "STOCK" || target.kind === "MUTUAL_FUND") && (
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">

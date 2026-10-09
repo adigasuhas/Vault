@@ -64,7 +64,7 @@ export async function GET() {
     db.expenseProject.findMany({ where: { userId } }),
     db.notebookEntry.findMany({ where: { userId }, orderBy: { date: "asc" } }),
     db.investmentSale.findMany({ where: { userId }, orderBy: { soldOn: "asc" } }),
-    db.investmentCategory.findMany({ where: { userId }, include: { links: { select: { kind: true, holdingId: true } } }, orderBy: { name: "asc" } }),
+    db.investmentCategory.findMany({ where: { userId }, include: { links: { select: { kind: true, holdingId: true } }, lotLinks: { select: { lotId: true } } }, orderBy: { name: "asc" } }),
   ]);
 
   const profile = user

@@ -17,7 +17,7 @@ const clean = (name: string) => name.trim().replace(/\s+/g, " ");
 export async function listCategories(userId: string) {
   return db.investmentCategory.findMany({
     where: { userId },
-    include: { links: { select: { kind: true, holdingId: true } } },
+    include: { links: { select: { kind: true, holdingId: true } }, lotLinks: { select: { lotId: true } } },
     orderBy: { name: "asc" },
   });
 }
@@ -56,10 +56,10 @@ export async function updateCategory(userId: string, id: string, input: { name?:
 /** Removes a category. Its investments stay exactly as they are; they just
  * stop being grouped under it. */
 export async function deleteCategory(userId: string, id: string) {
-  const cat = await db.investmentCategory.findFirst({ where: { id, userId }, include: { _count: { select: { links: true } } } });
+  const cat = await db.investmentCategory.findFirst({ where: { id, userId }, include: { _count: { select: { links: true, lotLinks: true } } } });
   if (!cat) throw new ValidationError("Category not found.");
   await db.investmentCategory.delete({ where: { id } });
-  return { name: cat.name, unlinked: cat._count.links };
+  return { name: cat.name, unlinked: cat._count.links + cat._count.lotLinks };
 }
 
 async function assertHolding(client: Tx | typeof db, userId: string, kind: InvestmentKind, holdingId: string) {
@@ -88,16 +88,7 @@ export async function setHoldingCategories(userId: string, input: HoldingCategor
  * edit saves its categories with the rest of the change, or not at all). */
 export async function applyHoldingCategories(tx: Tx, userId: string, input: HoldingCategoriesInput) {
   await assertHolding(tx, userId, input.kind, input.holdingId);
-  const ids = new Set(input.categoryIds ?? []);
-  if (ids.size) {
-    const owned = await tx.investmentCategory.count({ where: { userId, id: { in: [...ids] } } });
-    if (owned !== ids.size) throw new ValidationError("One of those categories doesn't exist.");
-  }
-  for (const name of input.newNames ?? []) {
-    if (!clean(name)) continue;
-    const { category } = await findOrCreateCategory(tx, userId, name);
-    ids.add(category.id);
-  }
+  const ids = await resolveCategories(tx, userId, input);
   if ((input.mode ?? "replace") === "replace") {
     await tx.investmentCategoryLink.deleteMany({
       where: { kind: input.kind, holdingId: input.holdingId, category: { userId }, ...(ids.size ? { categoryId: { notIn: [...ids] } } : {}) },
@@ -111,6 +102,43 @@ export async function applyHoldingCategories(tx: Tx, userId: string, input: Hold
     });
   }
   return tx.investmentCategoryLink.findMany({ where: { kind: input.kind, holdingId: input.holdingId, category: { userId } }, select: { categoryId: true } });
+}
+
+/** The categories for the ids and new names given (created, or matched to an
+ * existing name), all checked to be the user's. */
+async function resolveCategories(tx: Tx, userId: string, input: { categoryIds?: string[]; newNames?: string[] }) {
+  const ids = new Set(input.categoryIds ?? []);
+  if (ids.size) {
+    const owned = await tx.investmentCategory.count({ where: { userId, id: { in: [...ids] } } });
+    if (owned !== ids.size) throw new ValidationError("One of those categories doesn't exist.");
+  }
+  for (const name of input.newNames ?? []) {
+    if (!clean(name)) continue;
+    const { category } = await findOrCreateCategory(tx, userId, name);
+    ids.add(category.id);
+  }
+  return ids;
+}
+
+/** Sets one stock purchase's own categories (a client, say). Only that
+ * purchase changes; the stock's other purchases and its stock-wide
+ * categories are left as they are. */
+export async function applyLotCategories(tx: Tx, userId: string, lotId: string, input: { categoryIds?: string[]; newNames?: string[]; mode?: "replace" | "add" }) {
+  const lot = await tx.stockPurchaseLot.findFirst({ where: { id: lotId, stockHolding: { userId } }, select: { id: true } });
+  if (!lot) throw new ValidationError("Purchase not found.");
+  const ids = await resolveCategories(tx, userId, input);
+  if ((input.mode ?? "replace") === "replace") {
+    await tx.stockLotCategoryLink.deleteMany({ where: { lotId, category: { userId }, ...(ids.size ? { categoryId: { notIn: [...ids] } } : {}) } });
+  }
+  for (const categoryId of ids) {
+    await tx.stockLotCategoryLink.upsert({ where: { categoryId_lotId: { categoryId, lotId } }, update: {}, create: { categoryId, lotId } });
+  }
+  return tx.stockLotCategoryLink.findMany({ where: { lotId, category: { userId } }, select: { categoryId: true } });
+}
+
+/** Purchases deleted outright (entered by mistake) leave no categories. */
+export async function unlinkLots(client: Tx | typeof db, userId: string, lotIds: string[]) {
+  if (lotIds.length) await client.stockLotCategoryLink.deleteMany({ where: { lotId: { in: lotIds }, category: { userId } } });
 }
 
 /** An investment deleted outright (added by mistake) leaves no categories

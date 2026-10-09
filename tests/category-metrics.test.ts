@@ -121,3 +121,79 @@ describe("categoryGrowth", () => {
     expect(last.invested).toBe(10000);
   });
 });
+
+describe("purchase-level categories (clients)", () => {
+  // Stock A: 100 bought for Client A at 10, 50 for Client B at 20; price now 30.
+  const stockA: Position = {
+    kind: "STOCK", id: "sa", name: "A", currency: "INR", invested: 2000, value: 4500,
+    lots: [
+      { id: "lotA", qty: 100, cost: 1000, date: "2026-04-01" },
+      { id: "lotB", qty: 50, cost: 1000, date: "2026-10-01" },
+    ],
+  };
+  const clientA: CategoryLite = { id: "ca", name: "Client A", color: 1, links: [], lotLinks: [{ lotId: "lotA" }] };
+  const clientB: CategoryLite = { id: "cb", name: "Client B", color: 2, links: [], lotLinks: [{ lotId: "lotB" }] };
+  const tech: CategoryLite = { id: "t", name: "Tech", color: 3, links: [{ kind: "STOCK", holdingId: "sa" }] };
+  const total = 4500;
+
+  it("each client holds only their shares, at their own cost", () => {
+    const [a, b] = categoryRows([clientA, clientB], [stockA], [], toBase, total);
+    expect(a.positions[0].part).toEqual({ qty: 100, of: 150 });
+    expect(a.invested).toBe(1000);
+    expect(a.value).toBe(3000);
+    expect(a.pnl).toBe(2000);
+    expect(b.positions[0].part).toEqual({ qty: 50, of: 150 });
+    expect(b.invested).toBe(1000);
+    expect(b.value).toBe(1500);
+    expect(b.pct).toBe(50);
+  });
+
+  it("clients reconcile to the stock without double counting", () => {
+    const rows = categoryRows([clientA, clientB], [stockA], [], toBase, total);
+    expect(rows.reduce((t, r) => t + r.value, 0)).toBe(stockA.value);
+    expect(rows.reduce((t, r) => t + r.invested, 0)).toBe(stockA.invested);
+    expect(rows.reduce((t, r) => t + r.allocation, 0)).toBeCloseTo(100);
+    expect(uncategorised([clientA, clientB], [stockA])).toEqual([]);
+  });
+
+  it("unallocated shares show as not in a category", () => {
+    const loose = uncategorised([clientA], [stockA]);
+    expect(loose).toHaveLength(1);
+    expect(loose[0].part).toEqual({ qty: 50, of: 150 });
+    expect(loose[0].value).toBe(1500);
+  });
+
+  it("a stock-wide category still covers every share", () => {
+    const [t] = categoryRows([tech], [stockA], [], toBase, total);
+    expect(t.positions[0]).toBe(stockA);
+    expect(t.value).toBe(4500);
+    expect(uncategorised([tech, clientA], [stockA])).toEqual([]);
+  });
+
+  it("after a partial sale, a client's remaining shares and cost follow its purchase", () => {
+    // 20 of Client B's sold: lotB now 30 shares costing 600.
+    const after: Position = { ...stockA, invested: 1600, value: 3900, lots: [stockA.lots![0], { id: "lotB", qty: 30, cost: 600, date: "2026-10-01" }] };
+    const [, b] = categoryRows([clientA, clientB], [after], [], toBase, 3900);
+    expect(b.positions[0].part).toEqual({ qty: 30, of: 130 });
+    expect(b.invested).toBe(600);
+    expect(b.value).toBe(900);
+  });
+
+  it("splits a sale's realised result between the purchases it used", () => {
+    // Sold 120 at 30 less 60 charges: net 3540. FIFO used all 100 of lotA (1000) + 20 of lotB (400).
+    const sale: SaleLite = { kind: "STOCK", holdingId: "sa", currency: "INR", realizedPnl: 3540 - 1400, reversedAt: null, quantity: 120, netProceeds: 3540, lots: [{ lotId: "lotA", quantity: 100, cost: 1000 }, { lotId: "lotB", quantity: 20, cost: 400 }] };
+    const [a, b, t] = categoryRows([clientA, clientB, tech], [], [sale], toBase, 0);
+    expect(a.realized).toBeCloseTo(2950 - 1000);
+    expect(b.realized).toBeCloseTo(590 - 400);
+    expect(a.realized + b.realized).toBeCloseTo(sale.realizedPnl);
+    expect(t.realized).toBe(sale.realizedPnl);
+  });
+
+  it("charts a client's growth from their own purchases only", () => {
+    const series = { sa: [{ d: "2026-04-01", v: 10 }, { d: "2026-10-01", v: 20 }, { d: "2026-10-05", v: 30 }] };
+    const [, b] = categoryRows([clientA, clientB], [stockA], [], toBase, total);
+    const g = categoryGrowth(b.positions, series, toBase, {}, "2026-10-05");
+    expect(g.points[0].d).toBe("2026-10-01");
+    expect(g.points.at(-1)).toEqual({ d: "2026-10-05", value: 1500, invested: 1000 });
+  });
+});

@@ -6,6 +6,7 @@ import { recomputeHoldingFromLots } from "@/lib/stocks";
 import { parseJson, toErrorResponse } from "@/lib/validate";
 import { createStockSchema } from "@/lib/schemas";
 import { fundPurchase } from "@/lib/investment-funding";
+import { applyHoldingCategories, applyLotCategories } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 
 export const dynamic = "force-dynamic";
@@ -96,9 +97,14 @@ export async function POST(req: NextRequest) {
       });
       await fundPurchase(tx, session.userId, `STOCK_LOT:${lot.id}`, { cost: quantityNum * priceNum, currency, date: purchaseDateVal, label: `${quantityNum} ${tickerUpper}` }, funding);
       await recomputeHoldingFromLots(holdingId, tx);
-      return tx.stockHolding.findUnique({ where: { id: holdingId }, include: { lots: true } });
+      const cats = { categoryIds: input.categoryIds, newNames: input.newNames, mode: "add" as const };
+      if (input.categoryIds?.length || input.newNames?.length) {
+        if (input.categoryScope === "STOCK") await applyHoldingCategories(tx, session.userId, { kind: "STOCK", holdingId, ...cats });
+        else await applyLotCategories(tx, session.userId, lot.id, cats);
+      }
+      return { holding: await tx.stockHolding.findUnique({ where: { id: holdingId }, include: { lots: true } }), lotId: lot.id };
     });
-    return NextResponse.json({ holding: result, merged: !!existing }, { status: existing ? 200 : 201 });
+    return NextResponse.json({ holding: result.holding, lotId: result.lotId, merged: !!existing }, { status: existing ? 200 : 201 });
   } catch (err) {
     const { body: errBody, status } = toErrorResponse(err);
     return NextResponse.json(errBody, { status });

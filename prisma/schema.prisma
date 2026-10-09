@@ -941,6 +941,7 @@ model InvestmentCategory {
   createdAt DateTime                 @default(now())
   updatedAt DateTime                 @updatedAt
   links     InvestmentCategoryLink[]
+  lotLinks  StockLotCategoryLink[]
 
   @@unique([userId, name])
   @@index([userId])
@@ -950,6 +951,20 @@ model InvestmentCategory {
 // deposit or other asset (by `kind`); it isn't a foreign key so a fully sold
 // holding — recreated with the same id if the sale is undone — keeps its
 // categories, and realised results can be attributed to them.
+// A category on one stock purchase (e.g. the client it was bought for),
+// rather than the whole stock. lotId has no foreign key on purpose: a lot a
+// sale used up keeps its categories, so the sale's result stays attributed,
+// and undoing the sale restores the lot under the same id.
+model StockLotCategoryLink {
+  categoryId String
+  category   InvestmentCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  lotId      String
+  createdAt  DateTime           @default(now())
+
+  @@id([categoryId, lotId])
+  @@index([lotId])
+}
+
 model InvestmentCategoryLink {
   categoryId String
   category   InvestmentCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)

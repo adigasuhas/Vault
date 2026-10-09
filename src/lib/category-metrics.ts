@@ -6,6 +6,12 @@ import { fdCurrentValue } from "@/lib/investments";
  * up. An investment in two categories counts fully in both, so category
  * totals can add up to more than the portfolio; the portfolio total is
  * always computed from the holdings themselves, never from categories.
+ *
+ * A stock can be categorised as a whole (every share) or purchase by purchase
+ * (e.g. the client each was bought for). A category with only some of a
+ * stock's purchases holds just those shares, at their own cost and today's
+ * price. Purchases with no category of their own are "not in a category"
+ * unless the whole stock is.
  */
 
 export type InvestmentKind = "STOCK" | "MUTUAL_FUND" | "FIXED_DEPOSIT" | "OTHER";
@@ -16,6 +22,8 @@ export interface CategoryLite {
   name: string;
   color: number;
   links: { kind: InvestmentKind; holdingId: string }[];
+  /** Stock purchases in this category on their own. */
+  lotLinks?: { lotId: string }[];
 }
 
 /** A current holding, in its own currency. */
@@ -27,7 +35,9 @@ export interface Position {
   invested: number;
   value: number;
   /** Purchases with a quantity (stocks, funds), for valuing at past prices. */
-  lots?: { qty: number; cost: number; date: string }[];
+  lots?: { id?: string; qty: number; cost: number; date: string }[];
+  /** Only some of a stock's purchases: the shares here, of how many held. */
+  part?: { qty: number; of: number };
   deposit?: { principal: number; rate: number; start: string; maturity: string };
   /** Valued by hand (other assets): when it was last valued. */
   valuedOn?: string | null;
@@ -39,6 +49,10 @@ export interface SaleLite {
   currency: string;
   realizedPnl: number;
   reversedAt: string | null;
+  /** For splitting a stock sale's result between the purchases it used. */
+  quantity?: number | null;
+  netProceeds?: number;
+  lots?: { lotId: string | null; quantity: number | null; cost: number }[];
 }
 
 export type ToBase = (amount: number, currency: string) => number;
@@ -63,19 +77,58 @@ export interface CategoryRow {
   positions: Position[];
 }
 
-export function membersOf(cat: Pick<CategoryLite, "links">, positions: Position[]) {
+/** The part of a stock made of these purchases, valued at today's price. */
+export function partOf(p: Position, keep: (lotId: string) => boolean): Position | null {
+  if (!p.lots?.length) return null;
+  const lots = p.lots.filter((l) => l.id && keep(l.id));
+  if (!lots.length) return null;
+  if (lots.length === p.lots.length) return p;
+  const of = p.lots.reduce((t, l) => t + l.qty, 0);
+  const qty = lots.reduce((t, l) => t + l.qty, 0);
+  const unit = of > 0 ? p.value / of : 0;
+  return { ...p, lots, invested: lots.reduce((t, l) => t + l.cost, 0), value: qty * unit, part: { qty, of } };
+}
+
+/** What a category holds: whole holdings, and the parts of stocks whose
+ * purchases are in it. */
+export function membersOf(cat: Pick<CategoryLite, "links" | "lotLinks">, positions: Position[]) {
   const keys = new Set(cat.links.map((l) => linkKey(l.kind, l.holdingId)));
-  return positions.filter((p) => keys.has(linkKey(p.kind, p.id)));
+  const lots = new Set((cat.lotLinks ?? []).map((l) => l.lotId));
+  const out: Position[] = [];
+  for (const p of positions) {
+    if (keys.has(linkKey(p.kind, p.id))) out.push(p);
+    else if (p.kind === "STOCK" && lots.size) {
+      const part = partOf(p, (id) => lots.has(id));
+      if (part) out.push(part);
+    }
+  }
+  return out;
+}
+
+/** A sale's realised result that belongs to a category: all of it when the
+ * whole holding is in it, else the share from the purchases that are. */
+export function realizedIn(sale: SaleLite, keys: Set<string>, lots: Set<string>) {
+  if (keys.has(linkKey(sale.kind, sale.holdingId))) return sale.realizedPnl;
+  if (!lots.size || !sale.lots?.length || !sale.quantity || sale.netProceeds == null) return null;
+  let share = 0;
+  let any = false;
+  for (const l of sale.lots) {
+    if (!l.lotId || !lots.has(l.lotId) || l.quantity == null) continue;
+    any = true;
+    share += (sale.netProceeds * l.quantity) / sale.quantity - l.cost;
+  }
+  return any ? share : null;
 }
 
 export function categoryRows(categories: CategoryLite[], positions: Position[], sales: SaleLite[], toBase: ToBase, portfolioValue: number): CategoryRow[] {
   return categories.map((c) => {
     const members = membersOf(c, positions);
     const keys = new Set(c.links.map((l) => linkKey(l.kind, l.holdingId)));
+    const lotKeys = new Set((c.lotLinks ?? []).map((l) => l.lotId));
     const invested = members.reduce((t, p) => t + toBase(p.invested, p.currency), 0);
     const value = members.reduce((t, p) => t + toBase(p.value, p.currency), 0);
     // A sold holding keeps its categories, so its realised result stays here.
-    const sold = sales.filter((s) => !s.reversedAt && keys.has(linkKey(s.kind, s.holdingId)));
+    const sold = sales.filter((s) => !s.reversedAt).map((s) => ({ s, r: realizedIn(s, keys, lotKeys) })).filter((x) => x.r != null);
     const manual = members.filter((p) => p.valuedOn !== undefined);
     const oldest = manual.map((p) => p.valuedOn).filter((d): d is string => !!d).sort()[0] ?? null;
     return {
@@ -88,7 +141,7 @@ export function categoryRows(categories: CategoryLite[], positions: Position[], 
       pnl: value - invested,
       pct: invested > 0 ? ((value - invested) / invested) * 100 : null,
       allocation: portfolioValue > 0 ? (value / portfolioValue) * 100 : 0,
-      realized: sold.reduce((t, s) => t + toBase(s.realizedPnl, s.currency), 0),
+      realized: sold.reduce((t, x) => t + toBase(x.r!, x.s.currency), 0),
       soldCount: sold.length,
       manual: manual.length,
       oldestValuation: oldest,
@@ -97,10 +150,20 @@ export function categoryRows(categories: CategoryLite[], positions: Position[], 
   });
 }
 
-/** Holdings that are in no category, so the figures can be reconciled. */
+/** Holdings, and stock purchases, in no category, so the figures can be
+ * reconciled (a stock's unallocated shares show here). */
 export function uncategorised(categories: CategoryLite[], positions: Position[]) {
   const keys = new Set(categories.flatMap((c) => c.links.map((l) => linkKey(l.kind, l.holdingId))));
-  return positions.filter((p) => !keys.has(linkKey(p.kind, p.id)));
+  const lots = new Set(categories.flatMap((c) => (c.lotLinks ?? []).map((l) => l.lotId)));
+  const out: Position[] = [];
+  for (const p of positions) {
+    if (keys.has(linkKey(p.kind, p.id))) continue;
+    if (p.kind === "STOCK" && p.lots?.length && lots.size) {
+      const part = partOf(p, (id) => !lots.has(id));
+      if (part) out.push(part);
+    } else out.push(p);
+  }
+  return out;
 }
 
 export interface GrowthPoint { d: string; value: number; invested: number }

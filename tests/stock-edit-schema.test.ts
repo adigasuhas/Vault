@@ -3,13 +3,18 @@ import { createStockSchema, patchStockSchema } from "@/lib/schemas";
 
 // Editing a stock offers what adding one does. Purchase fields are edited per
 // purchase (lots); how it was paid stays as recorded.
-const ADD_TO_EDIT: Record<string, string> = {
-  ticker: "ticker",
-  exchange: "exchange",
-  currency: "currency",
-  quantity: "lots.quantity",
-  price: "lots.price",
-  purchaseDate: "lots.purchaseDate",
+// Categories picked when adding go on the purchase or the whole stock
+// (categoryScope); editing offers both.
+const ADD_TO_EDIT: Record<string, string[]> = {
+  ticker: ["ticker"],
+  exchange: ["exchange"],
+  currency: ["currency"],
+  quantity: ["lots.quantity"],
+  price: ["lots.price"],
+  purchaseDate: ["lots.purchaseDate"],
+  categoryIds: ["categoryIds", "lots.categoryIds"],
+  newNames: ["newNames", "lots.newNames"],
+  categoryScope: ["categoryIds", "lots.categoryIds"],
 };
 const FUNDING = ["paidFromAccountId", "budgetCategoryId", "fromSaleId", "paidAmount"];
 
@@ -18,10 +23,12 @@ describe("stock edit schema", () => {
     const lot = (patchStockSchema.shape.lots.unwrap().element as unknown as { shape: Record<string, unknown> }).shape;
     for (const key of Object.keys(createStockSchema.shape)) {
       if (FUNDING.includes(key)) continue;
-      const target = ADD_TO_EDIT[key];
-      expect(target, `add field "${key}" has no edit counterpart`).toBeDefined();
-      if (target.startsWith("lots.")) expect(lot[target.slice(5)]).toBeDefined();
-      else expect(patchStockSchema.shape[target as keyof typeof patchStockSchema.shape]).toBeDefined();
+      const targets = ADD_TO_EDIT[key];
+      expect(targets, `add field "${key}" has no edit counterpart`).toBeDefined();
+      for (const target of targets) {
+        if (target.startsWith("lots.")) expect(lot[target.slice(5)], target).toBeDefined();
+        else expect(patchStockSchema.shape[target as keyof typeof patchStockSchema.shape], target).toBeDefined();
+      }
     }
     expect(patchStockSchema.shape.categoryIds).toBeDefined();
     expect(patchStockSchema.shape.newNames).toBeDefined();

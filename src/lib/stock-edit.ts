@@ -1,6 +1,6 @@
 import { ValidationError } from "@/lib/validate";
 import { refundPurchase } from "@/lib/investment-funding";
-import { applyHoldingCategories } from "@/lib/investment-categories";
+import { applyHoldingCategories, applyLotCategories } from "@/lib/investment-categories";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
 import type { Tx } from "@/lib/ledger";
 
@@ -20,8 +20,9 @@ export interface StockEdit {
   ticker?: string;
   exchange?: string | null;
   currency?: string;
-  lots?: { id: string; quantity?: number; price?: number; purchaseDate?: Date }[];
-  /** Replaces the holding's categories when given. */
+  /** categoryIds/newNames, when given, replace that purchase's own categories. */
+  lots?: { id: string; quantity?: number; price?: number; purchaseDate?: Date; categoryIds?: string[]; newNames?: string[] }[];
+  /** Replaces the stock-wide categories when given. */
   categories?: { categoryIds?: string[]; newNames?: string[] };
 }
 
@@ -60,6 +61,9 @@ export async function editStock(tx: Tx, userId: string, id: string, input: Stock
   for (const edit of input.lots ?? []) {
     const lot = existing.lots.find((l) => l.id === edit.id);
     if (!lot) throw new ValidationError("That purchase isn't part of this stock.");
+    if (edit.categoryIds !== undefined || edit.newNames !== undefined) {
+      await applyLotCategories(tx, userId, lot.id, { categoryIds: edit.categoryIds, newNames: edit.newNames });
+    }
     const next = {
       quantity: edit.quantity ?? Number(lot.quantity),
       price: edit.price ?? Number(lot.price),

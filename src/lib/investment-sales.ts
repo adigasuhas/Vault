@@ -59,7 +59,10 @@ async function prepare(tx: Tx, userId: string, input: CreateSaleInput): Promise<
       const h = await tx.stockHolding.findFirst({ where: { id: input.holdingId, userId }, include: { lots: true } });
       if (!h) throw new ValidationError("Holding not found.");
       const lots = h.lots.map((l) => ({ id: l.id, quantity: Number(l.quantity), price: Number(l.price), purchaseDate: l.purchaseDate }));
-      const { used, remaining } = matchLotsFifo(lots, input.quantity, input.soldOn);
+      // Selling one client's shares: oldest first among their purchases only.
+      const from = input.lotIds ? lots.filter((l) => input.lotIds!.includes(l.id)) : lots;
+      if (input.lotIds && from.length !== new Set(input.lotIds).size) throw new ValidationError("One of those purchases isn't part of this holding.");
+      const { used, remaining } = matchLotsFifo(from, input.quantity, input.soldOn);
       const left = r6(lots.reduce((s, l) => s + l.quantity, 0) - input.quantity);
       return {
         kind: "STOCK",

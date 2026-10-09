@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { unfundPurchase } from "@/lib/investment-funding";
 import { editStock } from "@/lib/stock-edit";
 import { fetchStockQuote } from "@/lib/market-data";
-import { unlinkHolding } from "@/lib/investment-categories";
+import { unlinkHolding, unlinkLots } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
@@ -81,6 +81,7 @@ export async function DELETE(_req: NextRequest, context: { params: Promise<{ id:
     await db.$transaction(async (tx: Tx) => {
       for (const lot of existing.lots) await unfundPurchase(tx, session.userId, `STOCK_LOT:${lot.id}`, `${existing.ticker} purchase`);
       await unlinkHolding(tx, session.userId, "STOCK", id);
+      await unlinkLots(tx, session.userId, existing.lots.map((l) => l.id));
       await tx.stockHolding.delete({ where: { id } });
     });
   } catch (err) {

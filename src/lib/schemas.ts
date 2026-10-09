@@ -254,6 +254,10 @@ export const createStockSchema = z.object({
   currency: CURRENCY,
   purchaseDate: zIsoDate,
   ...fundingFields,
+  /** Categories to file it under: this purchase only (a client), or the whole stock. */
+  categoryIds: z.array(zId).max(50).optional(),
+  newNames: z.array(z.string().max(80)).max(20).optional(),
+  categoryScope: z.enum(["PURCHASE", "STOCK"]).default("PURCHASE"),
 });
 export const patchLotSchema = z.object({
   quantity: zPositive.optional(),
@@ -266,7 +270,7 @@ export const patchStockSchema = z.object({
   ticker: z.string().trim().min(1).max(30).optional(),
   exchange: z.string().trim().max(10).nullish(),
   currency: CURRENCY.optional(),
-  lots: z.array(patchLotSchema.extend({ id: zId })).max(500).optional(),
+  lots: z.array(patchLotSchema.extend({ id: zId, categoryIds: z.array(zId).max(50).optional(), newNames: z.array(z.string().max(80)).max(20).optional() })).max(500).optional(),
   categoryIds: z.array(zId).max(50).optional(),
   newNames: z.array(z.string().max(80)).max(20).optional(),
   quantity: zPositive.optional(),
@@ -360,7 +364,8 @@ const saleCommon = {
 };
 export const createSaleSchema = z.discriminatedUnion("kind", [
   // Shares or fund units, at a price (or NAV) per unit.
-  z.object({ kind: z.literal("STOCK"), quantity: zPositive, price: zNonNegative, ...saleCommon }),
+  // lotIds: sell only from these purchases (e.g. one client's), oldest first.
+  z.object({ kind: z.literal("STOCK"), quantity: zPositive, price: zNonNegative, lotIds: z.array(zId).min(1).max(500).optional(), ...saleCommon }),
   z.object({ kind: z.literal("MUTUAL_FUND"), quantity: zPositive, price: zNonNegative, ...saleCommon }),
   // A whole deposit or asset, for one amount (before charges).
   z.object({ kind: z.literal("FIXED_DEPOSIT"), amount: zMoney, ...saleCommon }),

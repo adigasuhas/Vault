@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { formatCompactMoney, formatMoney } from "@/lib/currencies";
 import { formatDate } from "@/lib/format";
 import { tooltipStyle } from "@/lib/chart-colors";
-import { categoryGrowth, categoryRows, linkKey, uncategorised, type CategoryLite, type CategoryRow, type InvestmentKind, type Position, type SaleLite } from "@/lib/category-metrics";
+import { categoryGrowth, categoryRows, linkKey, membersOf, uncategorised, type CategoryLite, type CategoryRow, type InvestmentKind, type Position, type SaleLite } from "@/lib/category-metrics";
 import { EmptyState, Panel, SkeletonBlock } from "@/components/app/PageHeader";
 import { ConfirmAction } from "@/components/ConfirmAction";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,11 @@ export type Category = CategoryLite & { createdAt?: string };
 export const KIND_LABEL: Record<InvestmentKind, string> = { STOCK: "Stock", MUTUAL_FUND: "Fund", FIXED_DEPOSIT: "Deposit", OTHER: "Other asset" };
 export const swatch = (color: number) => `var(--series-${Math.min(8, Math.max(1, color || 1))})`;
 
+/** What a category can be put on: a holding, or one stock purchase. */
+export type LinkTarget = InvestmentKind | "STOCK_LOT";
+/** How many links a category has, purchases included. */
+export const linkCount = (c: Category) => c.links.length + (c.lotLinks?.length ?? 0);
+
 /** Filter value: a category id, "__none__" (in no category) or "" (all). */
 export const UNCATEGORISED = "__none__";
 
@@ -34,9 +39,11 @@ interface Ctx {
   categories: Category[];
   loaded: boolean;
   of: (kind: InvestmentKind, id: string) => Category[];
+  /** A stock purchase's own categories. */
+  ofLot: (lotId: string) => Category[];
   reload: () => Promise<void>;
   /** Opens the picker for one investment. */
-  edit: (kind: InvestmentKind, id: string, name: string) => void;
+  edit: (kind: LinkTarget, id: string, name: string) => void;
   /** Narrows the page to one category (or clears with ""). */
   setFilter: (id: string) => void;
 }
@@ -46,7 +53,7 @@ export const useCategories = () => useContext(CategoryContext);
 export function CategoryProvider({ children, onFilter }: { children: ReactNode; onFilter: (id: string) => void }) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [target, setTarget] = useState<{ kind: InvestmentKind; id: string; name: string } | null>(null);
+  const [target, setTarget] = useState<{ kind: LinkTarget; id: string; name: string } | null>(null);
   const reload = useCallback(async () => {
     const res = await fetch("/api/investments/categories").catch(() => null);
     if (res?.ok) setCategories((await res.json()).categories ?? []);
@@ -66,6 +73,7 @@ export function CategoryProvider({ children, onFilter }: { children: ReactNode; 
   const index = useMemo(() => {
     const m = new Map<string, Category[]>();
     for (const c of categories) for (const l of c.links) m.set(linkKey(l.kind, l.holdingId), [...(m.get(linkKey(l.kind, l.holdingId)) ?? []), c]);
+    for (const c of categories) for (const l of c.lotLinks ?? []) m.set(`LOT:${l.lotId}`, [...(m.get(`LOT:${l.lotId}`) ?? []), c]);
     return m;
   }, [categories]);
   const value = useMemo<Ctx>(
@@ -73,6 +81,7 @@ export function CategoryProvider({ children, onFilter }: { children: ReactNode; 
       categories,
       loaded,
       of: (kind, id) => index.get(linkKey(kind, id)) ?? [],
+      ofLot: (lotId) => index.get(`LOT:${lotId}`) ?? [],
       reload,
       edit: (kind, id, name) => setTarget({ kind, id, name }),
       setFilter: onFilter,
@@ -97,20 +106,39 @@ export function Dot({ color, className }: { color: number; className?: string })
   return <span aria-hidden className={cn("inline-block h-2 w-2 shrink-0 rounded-full", className)} style={{ background: swatch(color) }} />;
 }
 
-/** The categories on one row, and the way to change them. */
-export function CategoryChips({ kind, id, name, className }: { kind: InvestmentKind; id: string; name: string; className?: string }) {
+const chipClass = "inline-flex max-w-[9rem] cursor-pointer items-center gap-1 rounded-full border border-border bg-card px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground";
+
+/** The categories on one row, and the way to change them. For a stock, its
+ * purchases' own categories show too, with how many shares each holds. */
+export function CategoryChips({ kind, id, name, lots, className }: { kind: InvestmentKind; id: string; name: string; lots?: { id: string; quantity: number }[]; className?: string }) {
   const ctx = useCategories();
   if (!ctx) return null;
   const cats = ctx.of(kind, id);
+  const byLot = new Map<string, { c: Category; qty: number }>();
+  let unallocated = 0;
+  for (const l of lots ?? []) {
+    const own = ctx.ofLot(l.id);
+    if (!own.length) unallocated += l.quantity;
+    for (const c of own) byLot.set(c.id, { c, qty: (byLot.get(c.id)?.qty ?? 0) + l.quantity });
+  }
+  const fmt = (n: number) => Number(n.toFixed(4)).toLocaleString();
   return (
     <div className={cn("flex min-w-0 flex-wrap items-center gap-1", className)}>
+      {[...byLot.values()].map(({ c, qty }) => (
+        <button key={`lot-${c.id}`} type="button" onClick={() => ctx.setFilter(c.id)} title={`${fmt(qty)} shares bought for ${c.name}. Show only ${c.name}.`} className={chipClass}>
+          <Dot color={c.color} className="h-1.5 w-1.5" />
+          <span className="truncate">{c.name}</span>
+          <span className="tabular-nums text-muted-foreground/80">{fmt(qty)}</span>
+        </button>
+      ))}
+      {byLot.size > 0 && unallocated > 0 && <span className="text-[11px] text-muted-foreground" title="Shares from purchases with no category of their own">{fmt(unallocated)} unallocated</span>}
       {cats.slice(0, 3).map((c) => (
         <button
           key={c.id}
           type="button"
           onClick={() => ctx.setFilter(c.id)}
-          title={`Show only ${c.name}`}
-          className="inline-flex max-w-[9rem] cursor-pointer items-center gap-1 rounded-full border border-border bg-card px-1.5 py-px text-[11px] text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+          title={byLot.size ? `Every share. Show only ${c.name}` : `Show only ${c.name}`}
+          className={chipClass}
         >
           <Dot color={c.color} className="h-1.5 w-1.5" />
           <span className="truncate">{c.name}</span>
@@ -121,13 +149,13 @@ export function CategoryChips({ kind, id, name, className }: { kind: InvestmentK
         type="button"
         onClick={() => ctx.edit(kind, id, name)}
         aria-label={cats.length ? `Change categories for ${name}` : `Add ${name} to a category`}
-        title={cats.length ? "Change categories" : "Add to a category"}
+        title={byLot.size ? "Categories for the whole stock (each purchase's own are in its details)" : cats.length ? "Change categories" : "Add to a category"}
         className={cn(
           "inline-flex h-[18px] cursor-pointer items-center gap-0.5 rounded-full px-1 text-[11px] text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground",
           !cats.length && "border border-dashed border-border px-1.5"
         )}
       >
-        {cats.length ? <Pencil className="h-2.5 w-2.5" /> : <><Plus className="h-2.5 w-2.5" />Category</>}
+        {cats.length || byLot.size ? <Pencil className="h-2.5 w-2.5" /> : <><Plus className="h-2.5 w-2.5" />Category</>}
       </button>
     </div>
   );
@@ -139,7 +167,7 @@ export const pickerEmpty = (v: PickerValue) => !v.ids.length && !v.newNames.leng
 
 /** Pick categories, or type a new one. A typed name that matches an existing
  * category (any capitals) selects that one instead of making a duplicate. */
-export function CategoryPicker({ value, onChange, categories }: { value: PickerValue; onChange: (v: PickerValue) => void; categories: Category[] }) {
+export function CategoryPicker({ value, onChange, categories, compact }: { value: PickerValue; onChange: (v: PickerValue) => void; categories: Category[]; compact?: boolean }) {
   const [draft, setDraft] = useState("");
   const toggle = (id: string) => onChange({ ...value, ids: value.ids.includes(id) ? value.ids.filter((x) => x !== id) : [...value.ids, id] });
   const add = () => {
@@ -164,7 +192,8 @@ export function CategoryPicker({ value, onChange, categories }: { value: PickerV
                 aria-pressed={on}
                 onClick={() => toggle(c.id)}
                 className={cn(
-                  "inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
+                  "inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
+                  compact ? "h-6" : "h-7",
                   on ? "border-foreground/40 bg-foreground/[0.06] font-medium text-foreground" : "border-border text-muted-foreground hover:border-foreground/25 hover:text-foreground"
                 )}
               >
@@ -195,11 +224,11 @@ export function CategoryPicker({ value, onChange, categories }: { value: PickerV
             }
           }}
           maxLength={60}
-          placeholder={categories.length ? "New category, e.g. Retirement" : "Name a category, e.g. Tech, Dad's, Retirement"}
+          placeholder={compact ? "New category, e.g. Client A" : categories.length ? "New category, e.g. Retirement" : "Name a category, e.g. Tech, Dad's, Retirement"}
           aria-label="New category name"
-          className="h-8"
+          className={compact ? "h-7 text-xs" : "h-8"}
         />
-        <Button type="button" variant="outline" size="sm" onClick={add} disabled={!draft.trim()}>Add</Button>
+        <Button type="button" variant="outline" size="sm" onClick={add} disabled={!draft.trim()} className={compact ? "h-7" : undefined}>Add</Button>
       </div>
       {suggestions.length > 0 && (
         <p className="text-xs text-muted-foreground">
@@ -217,7 +246,7 @@ export function CategoryPicker({ value, onChange, categories }: { value: PickerV
 }
 
 /** Puts a newly added investment in the chosen categories. */
-export async function assignCategories(kind: InvestmentKind, holdingId: string, v: PickerValue, mode: "add" | "replace" = "add") {
+export async function assignCategories(kind: LinkTarget, holdingId: string, v: PickerValue, mode: "add" | "replace" = "add") {
   if (mode === "add" && pickerEmpty(v)) return true;
   const res = await fetch("/api/investments/categories/assign", {
     method: "PUT",
@@ -243,15 +272,15 @@ export function CategoryField({ value, onChange }: { value: PickerValue; onChang
   );
 }
 
-function AssignDialog({ target, onClose }: { target: { kind: InvestmentKind; id: string; name: string } | null; onClose: () => void }) {
+function AssignDialog({ target, onClose }: { target: { kind: LinkTarget; id: string; name: string } | null; onClose: () => void }) {
   const ctx = useCategories()!;
   const [value, setValue] = useState<PickerValue>(emptyPicker);
   const [saving, setSaving] = useState(false);
   const [openFor, setOpenFor] = useState<string | null>(null);
-  const key = target ? linkKey(target.kind, target.id) : null;
+  const key = target ? `${target.kind}:${target.id}` : null;
   if (key && openFor !== key) {
     setOpenFor(key);
-    setValue({ ids: ctx.of(target!.kind, target!.id).map((c) => c.id), newNames: [] });
+    setValue({ ids: (target!.kind === "STOCK_LOT" ? ctx.ofLot(target!.id) : ctx.of(target!.kind, target!.id)).map((c) => c.id), newNames: [] });
   }
   if (!key && openFor) setOpenFor(null);
   async function save() {
@@ -270,7 +299,11 @@ function AssignDialog({ target, onClose }: { target: { kind: InvestmentKind; id:
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Categories for {target?.name}</DialogTitle>
-          <DialogDescription>Group it however you like. Its value, purchases and sales don&apos;t change.</DialogDescription>
+          <DialogDescription>
+            {target?.kind === "STOCK_LOT"
+              ? "Only this purchase's shares go in these categories (a client, say). The stock's other purchases keep theirs."
+              : "Group it however you like. Its value, purchases and sales don't change."}
+          </DialogDescription>
         </DialogHeader>
         <CategoryPicker value={value} onChange={setValue} categories={ctx.categories} />
         <DialogFooter>
@@ -299,7 +332,7 @@ export function CategoryBar({ filter, onFilter, onManage }: { filter: string; on
           <button key={c.id} role="radio" aria-checked={filter === c.id} onClick={() => onFilter(filter === c.id ? "" : c.id)} className={pill(filter === c.id)}>
             <Dot color={c.color} />
             {c.name}
-            <span className="tabular-nums text-muted-foreground">{c.links.length}</span>
+            <span className="tabular-nums text-muted-foreground">{linkCount(c)}</span>
           </button>
         ))}
         {cats.length > 0 && (
@@ -330,7 +363,7 @@ export function CategoryManager({ open, onOpenChange, positions }: { open: boole
   const [editing, setEditing] = useState<{ id: string; name: string } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [removing, setRemoving] = useState<Category | null>(null);
-  const byKey = useMemo(() => new Map(positions.map((p) => [linkKey(p.kind, p.id), p])), [positions]);
+  const known = useMemo(() => ({ holdings: new Set(positions.map((p) => linkKey(p.kind, p.id))), lots: new Set(positions.flatMap((p) => (p.lots ?? []).map((l) => l.id ?? ""))) }), [positions]);
 
   async function call(url: string, method: string, body?: unknown) {
     setBusy(true);
@@ -385,8 +418,9 @@ export function CategoryManager({ open, onOpenChange, positions }: { open: boole
           ) : (
             <ul className="divide-y divide-border rounded-lg border border-border">
               {ctx.categories.map((c) => {
-                const members = c.links.map((l) => byKey.get(linkKey(l.kind, l.holdingId))).filter((p): p is Position => !!p);
-                const closed = c.links.length - members.length;
+                const members = membersOf(c, positions);
+                // Sold, closed or used up by a sale, kept for the realised result.
+                const closed = c.links.filter((l) => !known.holdings.has(linkKey(l.kind, l.holdingId))).length + (c.lotLinks ?? []).filter((l) => !known.lots.has(l.lotId)).length;
                 return (
                   <li key={c.id} className="space-y-2 p-3">
                     <div className="flex items-center gap-2">
@@ -436,8 +470,8 @@ export function CategoryManager({ open, onOpenChange, positions }: { open: boole
                         <ul className="space-y-1">
                           {members.map((p) => (
                             <li key={linkKey(p.kind, p.id)} className="flex items-center justify-between gap-2">
-                              <span className="min-w-0 truncate">{p.name} <span className="text-muted-foreground">· {KIND_LABEL[p.kind]}</span></span>
-                              <button type="button" className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground" onClick={() => ctx.edit(p.kind, p.id, p.name)}>Change</button>
+                              <span className="min-w-0 truncate">{p.name} <span className="text-muted-foreground">· {p.part ? `${Number(p.part.qty.toFixed(4))} of ${Number(p.part.of.toFixed(4))} shares` : KIND_LABEL[p.kind]}</span></span>
+                              {!p.part && <button type="button" className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground" onClick={() => ctx.edit(p.kind, p.id, p.name)}>Change</button>}
                             </li>
                           ))}
                         </ul>
@@ -457,7 +491,7 @@ export function CategoryManager({ open, onOpenChange, positions }: { open: boole
         title={`Remove "${removing?.name}"?`}
         description={
           <p>
-            The category goes. {removing?.links.length ? `Its ${removing.links.length} ${removing.links.length === 1 ? "investment stays" : "investments stay"} exactly as they are, with their purchases, sales and history; they're just no longer grouped under it.` : "Nothing is in it."}
+            The category goes. {removing && linkCount(removing) ? `Everything in it (${linkCount(removing)} ${linkCount(removing) === 1 ? "investment or purchase" : "investments and purchases"}) stays exactly as it is, with its purchases, sales and history; it's just no longer grouped under it.` : "Nothing is in it."}
           </p>
         }
         confirmLabel="Remove category"
@@ -509,11 +543,13 @@ export function CategoryPerformance({
   const loose = useMemo(() => uncategorised(cats, positions), [cats, positions]);
   const looseValue = loose.reduce((t, p) => t + toBase(p.value, p.currency), 0);
   const allocSum = rows.reduce((t, r) => t + r.allocation, 0);
+  // Holdings with shares counted in more than one category (a stock in
+  // "Tech" whose purchases are also split between clients, say).
   const overlap = useMemo(() => {
-    const seen = new Map<string, number>();
-    for (const c of cats) for (const l of c.links) seen.set(linkKey(l.kind, l.holdingId), (seen.get(linkKey(l.kind, l.holdingId)) ?? 0) + 1);
-    return positions.filter((p) => (seen.get(linkKey(p.kind, p.id)) ?? 0) > 1).length;
-  }, [cats, positions]);
+    const shares = new Map<string, number>();
+    for (const r of rows) for (const p of r.positions) shares.set(linkKey(p.kind, p.id), (shares.get(linkKey(p.kind, p.id)) ?? 0) + (p.part?.qty ?? p.lots?.reduce((t, l) => t + l.qty, 0) ?? 1));
+    return positions.filter((p) => (shares.get(linkKey(p.kind, p.id)) ?? 0) > (p.lots?.reduce((t, l) => t + l.qty, 0) ?? 1) + 1e-9).length;
+  }, [rows, positions]);
   const current = rows.find((r) => r.id === selected) ?? null;
 
   if (!ctx?.loaded) return <SkeletonBlock className="h-48" />;
@@ -699,7 +735,7 @@ function CategoryDetail({ row, series, toBase, currency, range }: { row: Categor
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-medium">{p.name}</p>
                       <p className="text-xs text-muted-foreground">
-                        {KIND_LABEL[p.kind]}
+                        {p.part ? `${Number(p.part.qty.toFixed(4))} of ${Number(p.part.of.toFixed(4))} shares, from purchases in this category` : KIND_LABEL[p.kind]}
                         {p.valuedOn !== undefined && ` · valued by hand${p.valuedOn ? `, updated ${formatDate(p.valuedOn)}` : ""}`}
                       </p>
                     </div>
@@ -707,7 +743,7 @@ function CategoryDetail({ row, series, toBase, currency, range }: { row: Categor
                       <p>{formatMoney(p.value, p.currency)}</p>
                       <p className={cn("text-xs", tone(pl))}>{signed(pl, p.currency)}</p>
                     </div>
-                    <Button variant="ghost" size="icon-sm" aria-label={`Change categories for ${p.name}`} onClick={() => ctx.edit(p.kind, p.id, p.name)}><Tags className="h-3.5 w-3.5" /></Button>
+                    {p.part ? <span className="w-8" /> : <Button variant="ghost" size="icon-sm" aria-label={`Change categories for ${p.name}`} onClick={() => ctx.edit(p.kind, p.id, p.name)}><Tags className="h-3.5 w-3.5" /></Button>}
                   </li>
                 );
               })}
