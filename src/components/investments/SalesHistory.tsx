@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 
 export interface SaleRow {
   id: string;
+  holdingId: string;
   kind: "STOCK" | "MUTUAL_FUND" | "FIXED_DEPOSIT" | "OTHER";
   name: string;
   detail: string | null;

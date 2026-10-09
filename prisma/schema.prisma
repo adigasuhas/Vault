@@ -165,6 +165,7 @@ model User {
   auditEvents       AuditEvent[]
   expenseProjects   ExpenseProject[]
   notebookEntries   NotebookEntry[]
+  investmentCategories InvestmentCategory[]
 
   auditLogsActed      AdminAuditLog[]      @relation("AuditActor")
   auditLogsTargeted   AdminAuditLog[]      @relation("AuditTarget")
@@ -925,4 +926,37 @@ model RateLimitBucket {
   resetAt DateTime
 
   @@index([resetAt])
+}
+
+// User-defined groupings for investments of every kind — an industry
+// ("Banking"), an owner ("Client A"), a strategy ("Long-term"), a purpose.
+// An investment can be in several; nothing about its value or history changes.
+model InvestmentCategory {
+  id        String                   @id @default(uuid())
+  userId    String
+  user      User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  // Slot 1–8 of the chart palette (--series-N), so it adapts to the theme.
+  color     Int                      @default(1)
+  createdAt DateTime                 @default(now())
+  updatedAt DateTime                 @updatedAt
+  links     InvestmentCategoryLink[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// One investment in one category. `holdingId` points at a stock, fund,
+// deposit or other asset (by `kind`); it isn't a foreign key so a fully sold
+// holding — recreated with the same id if the sale is undone — keeps its
+// categories, and realised results can be attributed to them.
+model InvestmentCategoryLink {
+  categoryId String
+  category   InvestmentCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  kind       InvestmentKind
+  holdingId  String
+  createdAt  DateTime           @default(now())
+
+  @@id([categoryId, kind, holdingId])
+  @@index([kind, holdingId])
 }

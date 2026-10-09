@@ -16,6 +16,16 @@ import { useSort, SortTh } from "@/components/investments/table-kit";
 import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Search, Trash2 } from "lucide-react";
 import { useSell } from "@/components/investments/SellDialog";
 import { cn } from "@/lib/utils";
+import { CategoryChips, useCategories, useCategorySortKey } from "@/components/investments/Categories";
+import type { InvestmentKind } from "@/lib/category-metrics";
+
+/** Category column: shown once the user has any categories. */
+function useCategoryColumn(kind: InvestmentKind) {
+  const ctx = useCategories();
+  const key = useCategorySortKey();
+  return { show: !!ctx?.categories.length, key: (id: string) => key(kind, id), stamp: ctx?.categories };
+}
+const catTh = "hidden md:table-cell";
 
 interface Lot { id: string; quantity: string; price: string; purchaseDate: string }
 export interface StockRow {
@@ -97,17 +107,20 @@ export function StockTable({
 }) {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const cat = useCategoryColumn("STOCK");
   const rows = useMemo(
     () =>
       stocks
         .map((s) => ({ s, m: stockMetrics(s) }))
         .filter(({ s, m }) => (!q || `${s.ticker} ${s.exchange ?? ""}`.toLowerCase().includes(q.toLowerCase())) && (filter === "all" || (filter === "gainers" ? m.pl > 0 : m.pl < 0))),
-    [stocks, q, filter]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [stocks, q, filter, cat.stamp]
   );
   const sort = useSort(
     rows,
     {
       name: (r) => r.s.ticker,
+      cat: (r) => cat.key(r.s.id),
       price: (r) => r.m.last,
       day: (r) => r.m.dayPct ?? -Infinity,
       invested: (r) => r.m.invested,
@@ -140,6 +153,7 @@ export function StockTable({
         <thead>
           <tr className="border-b border-border text-left text-[11px] tracking-[0.06em] text-muted-foreground">
             <SortTh k="name" label="Holding" sort={sort} className="pl-4" />
+            {cat.show && <SortTh k="cat" label="Category" sort={sort} className={catTh} />}
             <th className="hidden px-3 py-2.5 font-medium uppercase lg:table-cell">1 year</th>
             <SortTh k="price" label="Price" sort={sort} align="right" className="hidden sm:table-cell" />
             <SortTh k="invested" label="Invested" sort={sort} align="right" className="hidden md:table-cell" />
@@ -157,7 +171,9 @@ export function StockTable({
                   {Number(m.qty.toFixed(4))} × {formatMoney(Number(s.avgBuyPrice), s.currency)}
                   {s.lots.length > 1 && ` · ${s.lots.length} buys`}
                 </p>
+                {cat.show && <CategoryChips kind="STOCK" id={s.id} name={s.ticker} className="mt-1 md:hidden" />}
               </td>
+              {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="STOCK" id={s.id} name={s.ticker} /></td>}
               <td className="hidden px-3 py-1.5 lg:table-cell">
                 <Sparkline points={series ? series[s.id] ?? [] : undefined} currency={s.currency} width={84} height={26} />
               </td>
@@ -316,14 +332,16 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
   const [filter, setFilter] = useState<Filter>("all");
   const [open, setOpen] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<FundRow | null>(null);
+  const cat = useCategoryColumn("MUTUAL_FUND");
   const rows = useMemo(
     () =>
       funds
         .map((f) => ({ f, m: fundMetrics(f) }))
         .filter(({ f, m }) => (!q || f.fundName.toLowerCase().includes(q.toLowerCase())) && (filter === "all" || (filter === "gainers" ? m.pl > 0 : m.pl < 0))),
-    [funds, q, filter]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [funds, q, filter, cat.stamp]
   );
-  const sort = useSort(rows, { name: (r) => r.f.fundName, nav: (r) => r.m.nav, invested: (r) => r.m.invested, current: (r) => r.m.current, pl: (r) => r.m.pl }, "current");
+  const sort = useSort(rows, { name: (r) => r.f.fundName, cat: (r) => cat.key(r.f.id), nav: (r) => r.m.nav, invested: (r) => r.m.invested, current: (r) => r.m.current, pl: (r) => r.m.pl }, "current");
 
   if (loading) return <SkeletonBlock className="h-48" />;
   if (!funds.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="No funds yet">Add a fund with its scheme code to track its NAV automatically.</EmptyState>;
@@ -336,6 +354,7 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
         <thead>
           <tr className="border-b border-border text-left text-[11px] tracking-[0.06em] text-muted-foreground">
             <SortTh k="name" label="Fund" sort={sort} className="pl-4" />
+            {cat.show && <SortTh k="cat" label="Category" sort={sort} className={catTh} />}
             <th className="hidden px-3 py-2.5 font-medium uppercase lg:table-cell">1 year</th>
             <SortTh k="invested" label="Invested" sort={sort} align="right" className="hidden md:table-cell" />
             <SortTh k="current" label="Value" sort={sort} align="right" />
@@ -349,7 +368,9 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
               <td className="max-w-[280px] py-2.5 pr-3 pl-4">
                 <button onClick={() => setOpen(f.id)} className="block w-full cursor-pointer truncate text-left font-medium hover:underline" title={f.fundName}>{f.fundName}</button>
                 <p className="truncate text-xs text-muted-foreground">{Number(m.units.toFixed(3))} units · NAV {formatMoney(m.nav, f.currency)}{(f.lots?.length ?? 0) > 1 && ` · ${f.lots!.length} buys`}</p>
+                {cat.show && <CategoryChips kind="MUTUAL_FUND" id={f.id} name={f.fundName} className="mt-1 md:hidden" />}
               </td>
+              {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="MUTUAL_FUND" id={f.id} name={f.fundName} /></td>}
               <td className="hidden px-3 py-1.5 lg:table-cell">
                 {f.schemeCode ? <Sparkline points={series ? series[f.id] ?? [] : undefined} currency={f.currency} width={84} height={26} /> : <span className="text-xs text-muted-foreground" title="Add the AMFI scheme code to see NAV history">No scheme code</span>}
               </td>
@@ -585,11 +606,13 @@ export function DepositTable({ deposits, loading, onDelete }: { deposits: Deposi
   const [now] = useState(() => Date.now());
   const [open, setOpen] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<DepositRow | null>(null);
+  const cat = useCategoryColumn("FIXED_DEPOSIT");
   const rows = useMemo(
     () => deposits.map((d) => ({ d, m: depositMetrics(d, now) })).filter(({ m }) => show === "all" || (show === "matured" ? m.matured : !m.matured)),
-    [deposits, show, now]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deposits, show, now, cat.stamp]
   );
-  const sort = useSort(rows, { bank: (r) => r.d.bank, rate: (r) => r.m.rate, principal: (r) => r.m.principal, value: (r) => r.m.value, maturity: (r) => r.d.maturityDate }, "maturity", "asc");
+  const sort = useSort(rows, { bank: (r) => r.d.bank, cat: (r) => cat.key(r.d.id), rate: (r) => r.m.rate, principal: (r) => r.m.principal, value: (r) => r.m.value, maturity: (r) => r.d.maturityDate }, "maturity", "asc");
 
   if (loading) return <SkeletonBlock className="h-40" />;
   if (!deposits.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="No fixed deposits yet">Add one to watch the interest build up until it matures.</EmptyState>;
@@ -613,6 +636,7 @@ export function DepositTable({ deposits, loading, onDelete }: { deposits: Deposi
           <thead>
             <tr className="border-b border-border text-left text-[11px] tracking-[0.06em] text-muted-foreground">
               <SortTh k="bank" label="Deposit" sort={sort} className="pl-4" />
+              {cat.show && <SortTh k="cat" label="Category" sort={sort} className={catTh} />}
               <SortTh k="rate" label="Rate" sort={sort} align="right" className="hidden sm:table-cell" />
               <SortTh k="principal" label="Invested" sort={sort} align="right" className="hidden md:table-cell" />
               <SortTh k="value" label="Value now" sort={sort} align="right" />
@@ -626,7 +650,9 @@ export function DepositTable({ deposits, loading, onDelete }: { deposits: Deposi
                 <td className="py-2.5 pr-3 pl-4">
                   <button onClick={() => setOpen(d.id)} className="cursor-pointer text-left font-medium hover:underline">{d.bank}</button>
                   <div className="mt-1 h-1 w-28 overflow-hidden rounded-full bg-muted"><div className="h-full bg-positive" style={{ width: `${m.progress}%` }} /></div>
+                  {cat.show && <CategoryChips kind="FIXED_DEPOSIT" id={d.id} name={`${d.bank} deposit`} className="mt-1 md:hidden" />}
                 </td>
+                {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="FIXED_DEPOSIT" id={d.id} name={`${d.bank} deposit`} /></td>}
                 <td className="hidden px-3 py-2.5 text-right tabular-nums sm:table-cell">{m.rate}%</td>
                 <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.principal, d.currency)}<Equivalent both stack value={m.principal} currency={d.currency} /></td>
                 <td className="px-3 py-2.5 text-right tabular-nums">
@@ -722,6 +748,7 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
   const [deleting, setDeleting] = useState<AssetRow | null>(null);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const cat = useCategoryColumn("OTHER");
   const types = [...new Set(assets.map((a) => a.assetType))];
   const rows = useMemo(
     () =>
@@ -732,9 +759,10 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
           const cur = Number(a.currentValue);
           return { a, cost, cur, pl: cur - cost, plPct: cost > 0 ? ((cur - cost) / cost) * 100 : 0 };
         }),
-    [assets, type]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [assets, type, cat.stamp]
   );
-  const sort = useSort(rows, { name: (r) => r.a.name, cost: (r) => r.cost, cur: (r) => r.cur, pl: (r) => r.pl }, "cur");
+  const sort = useSort(rows, { name: (r) => r.a.name, cat: (r) => cat.key(r.a.id), cost: (r) => r.cost, cur: (r) => r.cur, pl: (r) => r.pl }, "cur");
 
   if (loading) return <SkeletonBlock className="h-40" />;
   if (!assets.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="Nothing here yet">Gold, property, crypto, collectibles: anything with a value you want counted.</EmptyState>;
@@ -773,6 +801,7 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
           <thead>
             <tr className="border-b border-border text-left text-[11px] tracking-[0.06em] text-muted-foreground">
               <SortTh k="name" label="Asset" sort={sort} className="pl-4" />
+              {cat.show && <SortTh k="cat" label="Category" sort={sort} className={catTh} />}
               <SortTh k="cost" label="Paid" sort={sort} align="right" className="hidden md:table-cell" />
               <SortTh k="cur" label="Value now" sort={sort} align="right" />
               <SortTh k="pl" label="Profit / loss" sort={sort} align="right" />
@@ -785,7 +814,9 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
                 <td className="max-w-[240px] py-2.5 pr-3 pl-4">
                   <button onClick={() => { setOpen(a.id); setValue(String(Number(a.currentValue))); }} className="block cursor-pointer truncate text-left font-medium hover:underline">{a.name}</button>
                   <p className="truncate text-xs text-muted-foreground">{typeLabel(a.assetType)}{a.quantity ? ` · ${Number(a.quantity)} ${a.unit ?? ""}` : ""}</p>
+                  {cat.show && <CategoryChips kind="OTHER" id={a.id} name={a.name} className="mt-1 md:hidden" />}
                 </td>
+                {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="OTHER" id={a.id} name={a.name} /></td>}
                 <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(cost, a.currency)}<Equivalent both stack value={cost} currency={a.currency} /></td>
                 <td className="px-3 py-2.5 text-right tabular-nums">
                   {formatMoney(cur, a.currency)}

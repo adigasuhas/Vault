@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { refundPurchase, unfundPurchase } from "@/lib/investment-funding";
+import { unlinkHolding } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
@@ -84,6 +85,7 @@ export async function DELETE(_req: NextRequest, context: { params: Promise<{ id:
   try {
     await db.$transaction(async (tx: Tx) => {
       for (const lot of existing.lots) await unfundPurchase(tx, session.userId, `STOCK_LOT:${lot.id}`, `${existing.ticker} purchase`);
+      await unlinkHolding(tx, session.userId, "STOCK", id);
       await tx.stockHolding.delete({ where: { id } });
     });
   } catch (err) {

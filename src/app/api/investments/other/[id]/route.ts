@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { unfundPurchase } from "@/lib/investment-funding";
+import { unlinkHolding } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
@@ -47,6 +48,7 @@ export async function DELETE(_req: NextRequest, context: { params: Promise<{ id:
   // An asset added by mistake: whatever paid for it goes back.
   await db.$transaction(async (tx: Tx) => {
     await unfundPurchase(tx, session.userId, `ASSET:${id}`, existing.name);
+    await unlinkHolding(tx, session.userId, "OTHER", id);
     await tx.otherAsset.delete({ where: { id } });
   });
   return NextResponse.json({ success: true });

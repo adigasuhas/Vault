@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { refundPurchase, unfundPurchase } from "@/lib/investment-funding";
+import { unlinkHolding } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { authed, notFound } from "@/lib/api";
@@ -34,7 +35,9 @@ export const DELETE = authed<{ id: string; lotId: string }>(async (_req, { userI
   const holding = await db.$transaction(async (tx: Tx) => {
     await unfundPurchase(tx, userId, `FUND_LOT:${lot.id}`, "Fund purchase");
     await tx.mutualFundLot.delete({ where: { id: lot.id } });
-    return recomputeFundFromLots(params.id, tx);
+    const left = await recomputeFundFromLots(params.id, tx);
+    if (left === null) await unlinkHolding(tx, userId, "MUTUAL_FUND", params.id);
+    return left;
   });
   return { holding, holdingDeleted: holding === null };
 });

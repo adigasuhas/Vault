@@ -9,6 +9,8 @@ import { StockTable, FundTable, StockBreakdown, DepositTable, AssetTable } from 
 import { SellContext, SellDialog, type SellTarget } from "@/components/investments/SellDialog";
 import { SalesHistory, type SaleRow } from "@/components/investments/SalesHistory";
 import { FundingFields, emptyFunding, fundingBody, type FundingValue } from "@/components/investments/FundingFields";
+import { CategoryBar, CategoryField, CategoryManager, CategoryPerformance, CategoryProvider, Dot, UNCATEGORISED, assignCategories, emptyPicker, useCategories, type PickerValue } from "@/components/investments/Categories";
+import { categoryRows, linkKey, type InvestmentKind, type Position } from "@/lib/category-metrics";
 import { useSession } from "@/context/SessionContext";
 import { formatMoney } from "@/lib/currencies";
 import { SUPPORTED_CURRENCIES } from "@/lib/currencies";
@@ -83,6 +85,7 @@ interface OtherAsset {
   currentValue: string;
   currency: string;
   purchaseDate: string;
+  updatedAt?: string;
 }
 
 const OTHER_ASSET_TYPES = [
@@ -253,7 +256,22 @@ function TickerAutocomplete({
 }
 
 export default function InvestmentsPage() {
+  // Category filter: a category id, UNCATEGORISED, or "" for everything.
+  const [catFilter, setCatFilter] = useState("");
+  return (
+    <CategoryProvider onFilter={setCatFilter}>
+      <InvestmentsView catFilter={catFilter} setCatFilter={setCatFilter} />
+    </CategoryProvider>
+  );
+}
+
+function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCatFilter: (id: string) => void }) {
   const { user } = useSession();
+  const categoryCtx = useCategories()!;
+  const reloadCategories = categoryCtx.reload;
+  const [managing, setManaging] = useState(false);
+  const [tab, setTab] = useState("stocks");
+  const priceSeries = usePriceSeries();
   const currency = useCurrency().primary || user?.baseCurrency || "INR";
 
   const [stocks, setStocks] = useState<StockHolding[]>([]);
@@ -283,7 +301,9 @@ export default function InvestmentsPage() {
     setOtherAssets((await oRes.json()).assets || []);
     setSales(salesRes.ok ? (await salesRes.json()).sales || [] : []);
     setLoading(false);
-  }, []);
+    // Deleting a holding also drops its categories.
+    reloadCategories();
+  }, [reloadCategories]);
 
   useEffect(() => {
     load();
@@ -416,16 +436,96 @@ export default function InvestmentsPage() {
       realized: sold.reduce((t, x) => t + toBase(Number(x.realizedPnl), x.currency), 0),
     };
   }, [ranged, inRange, stocks, funds, deposits, otherAssets, sales, toBase]);
+  // Every current holding, valued the same way as the totals above, for
+  // category figures. Categories only pick which of these to add up.
+  const positions = useMemo<Position[]>(
+    () => [
+      ...stocks.map((h) => ({
+        kind: "STOCK" as const,
+        id: h.id,
+        name: h.ticker,
+        currency: h.currency,
+        invested: Number(h.avgBuyPrice) * Number(h.quantity),
+        value: Number(h.lastPrice ?? h.avgBuyPrice) * Number(h.quantity),
+        lots: h.lots.map((l) => ({ qty: Number(l.quantity), cost: Number(l.quantity) * Number(l.price), date: l.purchaseDate })),
+      })),
+      ...funds.map((f) => ({
+        kind: "MUTUAL_FUND" as const,
+        id: f.id,
+        name: f.fundName,
+        currency: f.currency,
+        invested: Number(f.avgNav) * Number(f.units),
+        value: Number(f.lastNav ?? f.avgNav) * Number(f.units),
+        lots: f.lots?.length
+          ? f.lots.map((l) => ({ qty: Number(l.units), cost: Number(l.units) * Number(l.nav), date: l.purchaseDate }))
+          : [{ qty: Number(f.units), cost: Number(f.units) * Number(f.avgNav), date: f.purchaseDate }],
+      })),
+      ...deposits.map((d) => ({
+        kind: "FIXED_DEPOSIT" as const,
+        id: d.id,
+        name: `${d.bank} deposit`,
+        currency: d.currency,
+        invested: Number(d.principal),
+        value: fdCurrentValue(Number(d.principal), Number(d.interestRate), d.startDate, d.maturityDate),
+        deposit: { principal: Number(d.principal), rate: Number(d.interestRate), start: d.startDate, maturity: d.maturityDate },
+      })),
+      ...otherAssets.map((a) => ({
+        kind: "OTHER" as const,
+        id: a.id,
+        name: a.name,
+        currency: a.currency,
+        invested: Number(a.purchasePrice),
+        value: Number(a.currentValue),
+        valuedOn: a.updatedAt ? a.updatedAt.slice(0, 10) : null,
+      })),
+    ],
+    [stocks, funds, deposits, otherAssets]
+  );
+  const saleLites = useMemo(() => sales.map((x) => ({ kind: x.kind, holdingId: x.holdingId, currency: x.currency, realizedPnl: Number(x.realizedPnl), reversedAt: x.reversedAt })), [sales]);
+
+  // A removed category can't stay selected.
+  const activeCategory = categoryCtx.categories.find((c) => c.id === catFilter) ?? null;
+  useEffect(() => {
+    if (categoryCtx.loaded && catFilter && catFilter !== UNCATEGORISED && !activeCategory) setCatFilter("");
+    if (categoryCtx.loaded && catFilter === UNCATEGORISED && !categoryCtx.categories.length) setCatFilter("");
+  }, [categoryCtx.loaded, categoryCtx.categories.length, catFilter, activeCategory, setCatFilter]);
+  const inCategory = useMemo(() => {
+    if (!catFilter) return null;
+    if (catFilter === UNCATEGORISED) {
+      const linked = new Set(categoryCtx.categories.flatMap((c) => c.links.map((l) => linkKey(l.kind, l.holdingId))));
+      return (kind: InvestmentKind, id: string) => !linked.has(linkKey(kind, id));
+    }
+    const keys = new Set((activeCategory?.links ?? []).map((l) => linkKey(l.kind, l.holdingId)));
+    return (kind: InvestmentKind, id: string) => keys.has(linkKey(kind, id));
+  }, [catFilter, categoryCtx.categories, activeCategory]);
+  const categoryRow = useMemo(
+    () => (activeCategory ? categoryRows([activeCategory], positions, saleLites, toBase, totalValue)[0] : null),
+    [activeCategory, positions, saleLites, toBase, totalValue]
+  );
+
   const view = useMemo(() => {
-    if (!ranged) return { stocks, funds, deposits, otherAssets, sales };
-    return {
-      stocks: stocks.filter((h) => h.lots.some((l) => inRange(l.purchaseDate))),
-      funds: funds.filter((f) => (f.lots?.length ? f.lots.some((l) => inRange(l.purchaseDate)) : inRange(f.purchaseDate))),
-      deposits: deposits.filter((d) => inRange(d.startDate)),
-      otherAssets: otherAssets.filter((a) => inRange(a.purchaseDate)),
-      sales: sales.filter((x) => inRange(x.soldOn)),
-    };
-  }, [ranged, inRange, stocks, funds, deposits, otherAssets, sales]);
+    let v = { stocks, funds, deposits, otherAssets, sales };
+    if (ranged) {
+      v = {
+        stocks: stocks.filter((h) => h.lots.some((l) => inRange(l.purchaseDate))),
+        funds: funds.filter((f) => (f.lots?.length ? f.lots.some((l) => inRange(l.purchaseDate)) : inRange(f.purchaseDate))),
+        deposits: deposits.filter((d) => inRange(d.startDate)),
+        otherAssets: otherAssets.filter((a) => inRange(a.purchaseDate)),
+        sales: sales.filter((x) => inRange(x.soldOn)),
+      };
+    }
+    if (inCategory) {
+      v = {
+        stocks: v.stocks.filter((h) => inCategory("STOCK", h.id)),
+        funds: v.funds.filter((f) => inCategory("MUTUAL_FUND", f.id)),
+        deposits: v.deposits.filter((d) => inCategory("FIXED_DEPOSIT", d.id)),
+        otherAssets: v.otherAssets.filter((a) => inCategory("OTHER", a.id)),
+        sales: v.sales.filter((x) => inCategory(x.kind, x.holdingId)),
+      };
+    }
+    return v;
+  }, [ranged, inRange, inCategory, stocks, funds, deposits, otherAssets, sales]);
+  const narrowed = ranged || !!inCategory;
 
   return (
     <div className="space-y-6">
@@ -440,7 +540,11 @@ export default function InvestmentsPage() {
         }
       />
 
-      <RangeBar range={range} onChange={setRange} />
+      <div className="space-y-3">
+        <RangeBar range={range} onChange={setRange} />
+        <CategoryBar filter={catFilter} onFilter={setCatFilter} onManage={() => setManaging(true)} />
+      </div>
+      <CategoryManager open={managing} onOpenChange={setManaging} positions={positions} />
 
       {period ? (
         <Panel className="settle overflow-hidden p-0">
@@ -514,15 +618,30 @@ export default function InvestmentsPage() {
           The tabs show holdings with a purchase in this period (each row still shows the whole holding, so editing stays safe) and sales made in it.
         </p>
       )}
+      {categoryRow && (
+        <div className="settle -mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-lg border border-border bg-card px-4 py-2.5 text-sm">
+          <span className="flex items-center gap-2 font-medium"><Dot color={categoryRow.color} className="h-2.5 w-2.5" />{categoryRow.name}</span>
+          <span className="text-muted-foreground">{categoryRow.count} {categoryRow.count === 1 ? "holding" : "holdings"}</span>
+          <span>Value <span className="tabular-nums">{formatMoney(Math.round(categoryRow.value), currency)}</span></span>
+          <span className={gainClass(categoryRow.pnl)}>
+            {categoryRow.pnl >= 0 ? "+" : "−"}{formatMoney(Math.abs(Math.round(categoryRow.pnl)), currency)}
+            {categoryRow.pct != null && ` (${categoryRow.pct >= 0 ? "+" : "−"}${Math.abs(categoryRow.pct).toFixed(1)}%)`}
+          </span>
+          <span className="text-muted-foreground">{categoryRow.allocation.toFixed(1)}% of your portfolio</span>
+          <button type="button" onClick={() => setTab("categories")} className="ml-auto cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">How it has grown</button>
+          <span className="basis-full text-xs text-muted-foreground">The totals above are for your whole portfolio; the tabs below show only this category.</span>
+        </div>
+      )}
 
       <SellContext.Provider value={setSellTarget}>
-      <Tabs defaultValue="stocks">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="max-w-full justify-start overflow-x-auto">
-          <TabsTrigger value="stocks" className="cursor-pointer">Stocks{ranged ? ` (${view.stocks.length})` : ""}</TabsTrigger>
-          <TabsTrigger value="funds" className="cursor-pointer">Mutual funds{ranged ? ` (${view.funds.length})` : ""}</TabsTrigger>
-          <TabsTrigger value="fds" className="cursor-pointer">Fixed deposits{ranged ? ` (${view.deposits.length})` : ""}</TabsTrigger>
-          <TabsTrigger value="other" className="cursor-pointer">Other assets{ranged ? ` (${view.otherAssets.length})` : ""}</TabsTrigger>
-          <TabsTrigger value="sold" className="cursor-pointer">Sold &amp; closed{ranged ? ` (${view.sales.filter((x) => !x.reversedAt).length})` : liveSales ? ` (${liveSales})` : ""}</TabsTrigger>
+          <TabsTrigger value="stocks" className="cursor-pointer">Stocks{narrowed ? ` (${view.stocks.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="funds" className="cursor-pointer">Mutual funds{narrowed ? ` (${view.funds.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="fds" className="cursor-pointer">Fixed deposits{narrowed ? ` (${view.deposits.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="other" className="cursor-pointer">Other assets{narrowed ? ` (${view.otherAssets.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="categories" className="cursor-pointer">By category</TabsTrigger>
+          <TabsTrigger value="sold" className="cursor-pointer">Sold &amp; closed{narrowed ? ` (${view.sales.filter((x) => !x.reversedAt).length})` : liveSales ? ` (${liveSales})` : ""}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="stocks" className="space-y-4">
@@ -536,6 +655,20 @@ export default function InvestmentsPage() {
         </TabsContent>
         <TabsContent value="other" className="space-y-4">
           <OtherAssetTab assets={view.otherAssets} loading={loading} defaultCurrency={currency} onChange={load} />
+        </TabsContent>
+        <TabsContent value="categories" className="space-y-4">
+          <CategoryPerformance
+            positions={positions}
+            sales={saleLites}
+            series={priceSeries}
+            toBase={toBase}
+            currency={currency}
+            portfolioValue={totalValue}
+            selected={activeCategory?.id ?? ""}
+            onSelect={setCatFilter}
+            range={range}
+            onManage={() => setManaging(true)}
+          />
         </TabsContent>
         <TabsContent value="sold" className="space-y-4">
           <SalesHistory sales={view.sales} loading={loading} onChanged={load} />
@@ -561,6 +694,7 @@ function StockTab({
   const series = usePriceSeries();
   const [open, setOpen] = useState(false);
   const [funding, setFunding] = useState<FundingValue>(emptyFunding);
+  const [cats, setCats] = useState<PickerValue>(emptyPicker);
   const [saving, setSaving] = useState(false);
   const [ticker, setTicker] = useState("");
   const [exchange, setExchange] = useState("");
@@ -599,6 +733,8 @@ function StockTab({
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add stock.");
+    if (data.holding?.id) await assignCategories("STOCK", data.holding.id, cats);
+    setCats(emptyPicker());
     setOpen(false);
     setFunding(emptyFunding());
     setTicker("");
@@ -751,6 +887,7 @@ function StockTab({
                 Already own this stock? Adding it again with the same ticker, exchange, and currency combines it into
                 your existing holding and averages the price. No duplicate row.
               </p>
+              <CategoryField value={cats} onChange={setCats} />
               <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(quantity) * Number(price)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
@@ -847,6 +984,7 @@ function FundTab({
   const series = usePriceSeries();
   const [open, setOpen] = useState(false);
   const [funding, setFunding] = useState<FundingValue>(emptyFunding);
+  const [cats, setCats] = useState<PickerValue>(emptyPicker);
   const [saving, setSaving] = useState(false);
   const [fundName, setFundName] = useState("");
   const [schemeCode, setSchemeCode] = useState("");
@@ -866,6 +1004,8 @@ function FundTab({
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add fund.");
+    if (data.holding?.id) await assignCategories("MUTUAL_FUND", data.holding.id, cats);
+    setCats(emptyPicker());
     setOpen(false);
     setFunding(emptyFunding());
     setFundName("");
@@ -926,6 +1066,7 @@ function FundTab({
                 <Label>Bought on</Label>
                 <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
               </div>
+              <CategoryField value={cats} onChange={setCats} />
               <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(units) * Number(avgNav)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
@@ -953,6 +1094,7 @@ function FixedDepositTab({
 }) {
   const [open, setOpen] = useState(false);
   const [funding, setFunding] = useState<FundingValue>(emptyFunding);
+  const [cats, setCats] = useState<PickerValue>(emptyPicker);
   const [saving, setSaving] = useState(false);
   const [bank, setBank] = useState("");
   const [principal, setPrincipal] = useState("");
@@ -972,6 +1114,8 @@ function FixedDepositTab({
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add fixed deposit.");
+    if (data.deposit?.id) await assignCategories("FIXED_DEPOSIT", data.deposit.id, cats);
+    setCats(emptyPicker());
     setOpen(false);
     setFunding(emptyFunding());
     setBank("");
@@ -1033,6 +1177,7 @@ function FixedDepositTab({
                   </SelectContent>
                 </Select>
               </div>
+              <CategoryField value={cats} onChange={setCats} />
               <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(principal)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
@@ -1060,6 +1205,7 @@ function OtherAssetTab({
 }) {
   const [open, setOpen] = useState(false);
   const [funding, setFunding] = useState<FundingValue>(emptyFunding);
+  const [cats, setCats] = useState<PickerValue>(emptyPicker);
   const [saving, setSaving] = useState(false);
   const [assetType, setAssetType] = useState("GOLD");
   const [name, setName] = useState("");
@@ -1079,6 +1225,8 @@ function OtherAssetTab({
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add asset.");
+    if (data.asset?.id) await assignCategories("OTHER", data.asset.id, cats);
+    setCats(emptyPicker());
     setOpen(false);
     setFunding(emptyFunding());
     setName("");
@@ -1146,6 +1294,7 @@ function OtherAssetTab({
                   <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
                 </div>
               </div>
+              <CategoryField value={cats} onChange={setCats} />
               <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(purchasePrice)} />
               <DialogFooter>
                 <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>

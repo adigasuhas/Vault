@@ -4,10 +4,10 @@
  * figure. Shared by the Investments page and anywhere else (Dashboard,
  * Analytics) that needs a fixed deposit's current value rather than just
  * its principal. */
-export function fdCurrentValue(principal: number, annualRatePercent: number, startDate: Date | string, maturityDate: Date | string) {
+export function fdCurrentValue(principal: number, annualRatePercent: number, startDate: Date | string, maturityDate: Date | string, asOf: Date | string | number = Date.now()) {
   const start = new Date(startDate).getTime();
   const maturity = new Date(maturityDate).getTime();
-  const now = Date.now();
+  const now = new Date(asOf).getTime();
   const elapsedMs = Math.min(Math.max(now - start, 0), maturity - start);
   const yearsElapsed = elapsedMs / (365.25 * 24 * 60 * 60 * 1000);
   return principal * (1 + (annualRatePercent / 100) * yearsElapsed);

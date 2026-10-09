@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
 import { refundPurchase, unfundPurchase } from "@/lib/investment-funding";
+import { unlinkHolding } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 import { parseJson, toErrorResponse } from "@/lib/validate";
 import { patchLotSchema } from "@/lib/schemas";
@@ -79,7 +80,9 @@ export async function DELETE(_req: NextRequest, context: { params: Promise<{ id:
       // A purchase entered by mistake: what paid for it goes back.
       await unfundPurchase(tx, session.userId, `STOCK_LOT:${lotId}`, "Stock purchase");
       await tx.stockPurchaseLot.delete({ where: { id: lotId } });
-      return recomputeHoldingFromLots(id, tx);
+      const left = await recomputeHoldingFromLots(id, tx);
+      if (left === null) await unlinkHolding(tx, session.userId, "STOCK", id);
+      return left;
     });
     return NextResponse.json({ holding, holdingDeleted: holding === null });
   } catch (err) {

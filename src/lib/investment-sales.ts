@@ -283,7 +283,11 @@ export async function undoSale(userId: string, saleId: string) {
         for (const l of lots) {
           const existing = l.lotId ? await tx.stockPurchaseLot.findFirst({ where: { id: l.lotId, stockHoldingId: holding.id } }) : null;
           if (existing) await tx.stockPurchaseLot.update({ where: { id: existing.id }, data: { quantity: { increment: l.quantity ?? 0 } } });
-          else await tx.stockPurchaseLot.create({ data: { stockHoldingId: holding.id, quantity: l.quantity ?? 0, price: l.price ?? 0, purchaseDate: new Date(l.purchaseDate) } });
+          else {
+            // Same id as before, so a purchase paid from an account stays tied to that payment.
+            const free = l.lotId && !(await tx.stockPurchaseLot.findUnique({ where: { id: l.lotId }, select: { id: true } }));
+            await tx.stockPurchaseLot.create({ data: { ...(free ? { id: l.lotId! } : {}), stockHoldingId: holding.id, quantity: l.quantity ?? 0, price: l.price ?? 0, purchaseDate: new Date(l.purchaseDate) } });
+          }
         }
         await recomputeHoldingFromLots(holding.id, tx);
         break;
@@ -310,7 +314,10 @@ export async function undoSale(userId: string, saleId: string) {
         for (const l of lots) {
           const existing = l.lotId ? await tx.mutualFundLot.findFirst({ where: { id: l.lotId, holdingId: fund.id } }) : null;
           if (existing) await tx.mutualFundLot.update({ where: { id: existing.id }, data: { units: { increment: l.quantity ?? 0 } } });
-          else await tx.mutualFundLot.create({ data: { holdingId: fund.id, units: l.quantity ?? 0, nav: l.price ?? 0, purchaseDate: new Date(l.purchaseDate) } });
+          else {
+            const free = l.lotId && !(await tx.mutualFundLot.findUnique({ where: { id: l.lotId }, select: { id: true } }));
+            await tx.mutualFundLot.create({ data: { ...(free ? { id: l.lotId! } : {}), holdingId: fund.id, units: l.quantity ?? 0, nav: l.price ?? 0, purchaseDate: new Date(l.purchaseDate) } });
+          }
         }
         await recomputeFundFromLots(fund.id, tx);
         break;

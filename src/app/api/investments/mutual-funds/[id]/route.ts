@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { refundPurchase, unfundPurchase } from "@/lib/investment-funding";
+import { unlinkHolding } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 import { authed, notFound } from "@/lib/api";
 import { parseJson, ValidationError } from "@/lib/validate";
@@ -37,6 +38,7 @@ export const DELETE = authed<{ id: string }>(async (_req, { userId, params }) =>
   // A fund added by mistake: whatever paid for its purchases goes back.
   await db.$transaction(async (tx: Tx) => {
     for (const lot of existing.lots) await unfundPurchase(tx, userId, `FUND_LOT:${lot.id}`, `${existing.fundName} purchase`);
+    await unlinkHolding(tx, userId, "MUTUAL_FUND", existing.id);
     await tx.mutualFundHolding.delete({ where: { id: existing.id } });
   });
   return { ok: true };
