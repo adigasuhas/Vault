@@ -224,7 +224,7 @@ export function StockTable({
   );
 }
 
-export function StockBreakdown({ h, onEditLot, onDeleteLot }: { h: StockRow; onEditLot: (lot: Lot) => void; onDeleteLot: (lotId: string) => void }) {
+export function StockBreakdown({ h, onEdit, onEditLot, onDeleteLot }: { h: StockRow; onEdit?: () => void; onEditLot: (lot: Lot) => void; onDeleteLot: (lotId: string) => void }) {
   const last = Number(h.lastPrice ?? h.avgBuyPrice);
   const lots = [...h.lots]
     .sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate))
@@ -243,7 +243,10 @@ export function StockBreakdown({ h, onEditLot, onDeleteLot }: { h: StockRow; onE
   return (
     <div className="space-y-5">
       <DialogHeader>
-        <DialogTitle className="text-lg">{h.ticker}</DialogTitle>
+        <div className="flex items-center gap-3 pr-8">
+          <DialogTitle className="text-lg">{h.ticker}</DialogTitle>
+          {onEdit && <Button variant="outline" size="sm" className="ml-auto" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />Edit stock</Button>}
+        </div>
         <DialogDescription>
           {[h.exchange, c, `${Number(qty.toFixed(4))} shares`, h.lastPrice ? `last price ${formatMoney(last, c)}${h.lastPriceAt ? ` (${formatDate(h.lastPriceAt, { day: "numeric", month: "short" })})` : ""}` : "no live price yet, valued at cost"].filter(Boolean).join(" · ")}
         </DialogDescription>
@@ -286,7 +289,7 @@ export function StockBreakdown({ h, onEditLot, onDeleteLot }: { h: StockRow; onE
                 <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(l.pl))}>{signed(l.pl, c)} <span className="text-xs">({pct(l.plPct)})</span><Equivalent both stack signed value={l.pl} currency={c} /></td>
                 <td className="pr-3 text-right">
                   <div className="flex justify-end gap-0.5">
-                    <Button variant="ghost" size="icon-sm" aria-label="Edit purchase" onClick={() => onEditLot(l.lot)}><Pencil className="h-3.5 w-3.5" /></Button>
+                    <Button variant="ghost" size="icon-sm" aria-label={`Edit purchase of ${formatDate(l.purchaseDate)}`} onClick={() => onEditLot(l.lot)}><Pencil className="h-3.5 w-3.5" /></Button>
                     <ConfirmAction
                       title="Delete this purchase?"
                       description={<p>The holding&apos;s quantity and average price are recalculated from the other purchases. If it&apos;s the only one, the holding goes too.</p>}

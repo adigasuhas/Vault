@@ -255,15 +255,22 @@ export const createStockSchema = z.object({
   purchaseDate: zIsoDate,
   ...fundingFields,
 });
-export const patchStockSchema = z.object({
-  quantity: zPositive.optional(),
-  avgBuyPrice: zPositive.optional(),
-  exchange: z.string().trim().max(10).nullish(),
-});
 export const patchLotSchema = z.object({
   quantity: zPositive.optional(),
   price: zPositive.optional(),
   purchaseDate: zIsoDate.optional(),
+});
+/** Everything editable on a stock (see lib/stock-edit). quantity and
+ * avgBuyPrice are the older single-purchase shorthand. */
+export const patchStockSchema = z.object({
+  ticker: z.string().trim().min(1).max(30).optional(),
+  exchange: z.string().trim().max(10).nullish(),
+  currency: CURRENCY.optional(),
+  lots: z.array(patchLotSchema.extend({ id: zId })).max(500).optional(),
+  categoryIds: z.array(zId).max(50).optional(),
+  newNames: z.array(z.string().max(80)).max(20).optional(),
+  quantity: zPositive.optional(),
+  avgBuyPrice: zPositive.optional(),
 });
 export const createFundSchema = z.object({
   fundName: z.string().trim().min(1).max(160),

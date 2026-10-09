@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
-import { refundPurchase, unfundPurchase } from "@/lib/investment-funding";
+import { unfundPurchase } from "@/lib/investment-funding";
+import { editStock } from "@/lib/stock-edit";
 import { unlinkHolding } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
 import { parseJson, toErrorResponse } from "@/lib/validate";
@@ -39,25 +40,8 @@ export async function PATCH(req: NextRequest, context: { params: Promise<{ id: s
   }
 
   try {
-    const holding = await db.$transaction(async (tx: Tx) => {
-      const updated = await tx.stockPurchaseLot.update({
-        where: { id: lotId },
-        data: {
-          ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
-          ...(input.price !== undefined ? { price: input.price } : {}),
-          ...(input.purchaseDate !== undefined ? { purchaseDate: input.purchaseDate } : {}),
-        },
-        include: { stockHolding: true },
-      });
-      // Whatever paid for it is re-booked at the corrected cost.
-      await refundPurchase(tx, session.userId, `STOCK_LOT:${lotId}`, {
-        cost: Number(updated.quantity) * Number(updated.price),
-        currency: updated.stockHolding.currency,
-        date: updated.purchaseDate,
-        label: `${Number(updated.quantity)} ${updated.stockHolding.ticker}`,
-      });
-      return recomputeHoldingFromLots(id, tx);
-    });
+    // Same path as editing the whole stock, so the two can't drift apart.
+    const { holding } = await db.$transaction((tx: Tx) => editStock(tx, session.userId, id, { lots: [{ id: lotId, ...input }] }));
     return NextResponse.json({ holding });
   } catch (err) {
     const { body: errBody, status } = toErrorResponse(err);

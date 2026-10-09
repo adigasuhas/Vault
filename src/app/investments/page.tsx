@@ -36,6 +36,8 @@ interface StockPurchaseLot {
   quantity: string;
   price: string;
   purchaseDate: string;
+  /** How it was paid; null when it's only tracked. */
+  paidFrom?: { kind: "ACCOUNT" | "SALE"; name: string; amount?: string; currency?: string } | null;
 }
 
 interface StockHolding {
@@ -50,6 +52,8 @@ interface StockHolding {
   lastPriceAt: string | null;
   previousClose: string | null;
   lots: StockPurchaseLot[];
+  /** Sales recorded against it (not undone). */
+  saleCount?: number;
 }
 
 interface MutualFundHolding {
@@ -170,6 +174,9 @@ function TickerAutocomplete({
   const requestIdRef = useRef(0);
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipNextSearchRef = useRef(false);
+  // A value it opens with (editing a stock) is already chosen: no search
+  // until it is changed.
+  const openedWithRef = useRef(value.trim());
 
   useEffect(() => {
     if (skipNextSearchRef.current) {
@@ -178,6 +185,10 @@ function TickerAutocomplete({
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const query = value.trim();
+    if (openedWithRef.current) {
+      if (query === openedWithRef.current) return;
+      openedWithRef.current = "";
+    }
     if (query.length < 2) {
       setSuggestions([]);
       setSearching(false);
@@ -706,21 +717,12 @@ function StockTab({
   // for by this app's primary (Indian) audience.
   const [searchExchange, setSearchExchange] = useState(defaultCurrency === "INR" ? "NSI" : ALL_EXCHANGES);
 
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editExchange, setEditExchange] = useState("");
-  const [editQuantity, setEditQuantity] = useState("");
-  const [editPrice, setEditPrice] = useState("");
-  const [editSaving, setEditSaving] = useState(false);
+  // One edit form for every way in: the row's Edit, and Edit / a purchase's
+  // pencil in its details. focusLot puts the cursor on that purchase.
+  const [editing, setEditing] = useState<{ id: string; focusLot?: string } | null>(null);
 
   const [detailsId, setDetailsId] = useState<string | null>(null);
   const detailsHolding = stocks.find((s) => s.id === detailsId) || null;
-  const editingHolding = stocks.find((s) => s.id === editingId) || null;
-
-  const [editingLot, setEditingLot] = useState<{ holdingId: string; lot: StockPurchaseLot } | null>(null);
-  const [lotQuantity, setLotQuantity] = useState("");
-  const [lotPrice, setLotPrice] = useState("");
-  const [lotDate, setLotDate] = useState("");
-  const [lotSaving, setLotSaving] = useState(false);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -754,58 +756,6 @@ function StockTab({
       toast.success("Removed.");
       onChange();
     }
-  }
-
-  function openEdit(s: StockHolding) {
-    setEditingId(s.id);
-    setEditExchange(s.exchange || "");
-    setEditQuantity(s.quantity);
-    setEditPrice(s.avgBuyPrice);
-  }
-
-  async function handleEditSave(e: React.FormEvent) {
-    e.preventDefault();
-    if (!editingHolding) return;
-    setEditSaving(true);
-    const singleLot = editingHolding.lots.length <= 1;
-    const res = await fetch(`/api/investments/stocks/${editingHolding.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        exchange: editExchange,
-        ...(singleLot ? { quantity: editQuantity, avgBuyPrice: editPrice } : {}),
-      }),
-    });
-    setEditSaving(false);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return toast.error(data.error || "Failed to update stock.");
-    setEditingId(null);
-    toast.success("Stock updated.");
-    onChange();
-  }
-
-  function openLotEdit(holdingId: string, lot: StockPurchaseLot) {
-    setEditingLot({ holdingId, lot });
-    setLotQuantity(lot.quantity);
-    setLotPrice(lot.price);
-    setLotDate(lot.purchaseDate.slice(0, 10));
-  }
-
-  async function handleLotSave(e: React.FormEvent) {
-    e.preventDefault();
-    if (!editingLot) return;
-    setLotSaving(true);
-    const res = await fetch(`/api/investments/stocks/${editingLot.holdingId}/lots/${editingLot.lot.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quantity: lotQuantity, price: lotPrice, purchaseDate: lotDate }),
-    });
-    setLotSaving(false);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return toast.error(data.error || "Failed to update purchase.");
-    setEditingLot(null);
-    toast.success("Purchase updated.");
-    onChange();
   }
 
   async function handleLotDelete(holdingId: string, lotId: string) {
@@ -897,76 +847,191 @@ function StockTab({
         </Dialog>
       </div>
 
-      <StockTable stocks={stocks} loading={loading} series={series} onView={setDetailsId} onEdit={openEdit} onDelete={handleDelete} />
+      <StockTable stocks={stocks} loading={loading} series={series} onView={setDetailsId} onEdit={(s) => setEditing({ id: s.id })} onDelete={handleDelete} />
 
-      {/* Edit holding */}
-      <Dialog open={!!editingId} onOpenChange={(o) => !o && setEditingId(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader><DialogTitle>Edit {editingHolding?.ticker}</DialogTitle></DialogHeader>
-          {editingHolding && (
-            <form onSubmit={handleEditSave} className="space-y-4">
-              <div className="space-y-2">
-                <Label>Exchange</Label>
-                <Input value={editExchange} onChange={(e) => setEditExchange(e.target.value)} placeholder="Optional" />
-              </div>
-              {editingHolding.lots.length <= 1 ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-2">
-                    <Label>Quantity</Label>
-                    <Input type="number" step="0.0001" value={editQuantity} onChange={(e) => setEditQuantity(e.target.value)} required />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Average price</Label>
-                    <Input type="number" step="0.01" value={editPrice} onChange={(e) => setEditPrice(e.target.value)} required />
-                  </div>
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  This holding has {editingHolding.lots.length} separate purchases, so quantity and average price are
-                  derived from them. Use &quot;View purchases&quot; to fix an individual one.
-                </p>
-              )}
-              <DialogFooter>
-                <Button type="submit" disabled={editSaving} className="w-full cursor-pointer">{editSaving ? "Saving…" : "Save changes"}</Button>
-              </DialogFooter>
-            </form>
-          )}
-        </DialogContent>
-      </Dialog>
+      <StockEditor
+        holding={editing ? stocks.find((s) => s.id === editing.id) ?? null : null}
+        focusLot={editing?.focusLot}
+        onClose={() => setEditing(null)}
+        onSaved={onChange}
+      />
 
       {/* Purchase breakdown */}
       <Dialog open={!!detailsId} onOpenChange={(o) => !o && setDetailsId(null)}>
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
-          {detailsHolding && <StockBreakdown h={detailsHolding} onEditLot={(lot) => openLotEdit(detailsHolding.id, lot)} onDeleteLot={(lotId) => handleLotDelete(detailsHolding.id, lotId)} />}
+          {detailsHolding && <StockBreakdown h={detailsHolding} onEdit={() => setEditing({ id: detailsHolding.id })} onEditLot={(lot) => setEditing({ id: detailsHolding.id, focusLot: lot.id })} onDeleteLot={(lotId) => handleLotDelete(detailsHolding.id, lotId)} />}
         </DialogContent>
       </Dialog>
 
-      {/* Edit a single purchase */}
-      <Dialog open={!!editingLot} onOpenChange={(o) => !o && setEditingLot(null)}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader><DialogTitle>Edit purchase</DialogTitle></DialogHeader>
-          <form onSubmit={handleLotSave} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label>Quantity</Label>
-                <Input type="number" step="0.0001" value={lotQuantity} onChange={(e) => setLotQuantity(e.target.value)} required />
-              </div>
-              <div className="space-y-2">
-                <Label>Price</Label>
-                <Input type="number" step="0.01" value={lotPrice} onChange={(e) => setLotPrice(e.target.value)} required />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label>Bought on</Label>
-              <Input type="date" value={lotDate} onChange={(e) => setLotDate(e.target.value)} required />
-            </div>
-            <DialogFooter>
-              <Button type="submit" disabled={lotSaving} className="w-full cursor-pointer">{lotSaving ? "Saving…" : "Save"}</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
     </div>
+  );
+}
+
+/** Edit a stock: the same fields as adding one (ticker, exchange, currency,
+ * each purchase's quantity, price and date, categories), with how each
+ * purchase was paid shown but kept as recorded. Every way into editing a
+ * stock opens this, and it saves through one request. */
+function StockEditor({ holding, focusLot, onClose, onSaved }: { holding: StockHolding | null; focusLot?: string; onClose: () => void; onSaved: () => void }) {
+  return (
+    <Dialog open={!!holding} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent
+        className="max-h-[90dvh] overflow-y-auto sm:max-w-lg"
+        onOpenAutoFocus={(e) => {
+          // Opened from a purchase's pencil: start on that purchase.
+          const el = focusLot ? document.getElementById(`lot-quantity-${focusLot}`) : null;
+          if (el) {
+            e.preventDefault();
+            el.focus();
+          }
+        }}
+      >
+        <DialogHeader><DialogTitle>Edit {holding?.ticker}</DialogTitle></DialogHeader>
+        {/* Keyed so it starts from the stock's saved values each time it opens. */}
+        {holding && <StockEditForm key={`${holding.id}:${focusLot ?? ""}`} holding={holding} focusLot={focusLot} onClose={onClose} onSaved={onSaved} />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: StockHolding; focusLot?: string; onClose: () => void; onSaved: () => void }) {
+  const categoryCtx = useCategories();
+  const lotsInOrder = useMemo(() => [...holding.lots].sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate)), [holding.lots]);
+  const [searchExchange, setSearchExchange] = useState(holding.currency === "INR" ? "NSI" : ALL_EXCHANGES);
+  const [ticker, setTicker] = useState(holding.ticker);
+  const [exchange, setExchange] = useState(holding.exchange ?? "");
+  const [currency, setCurrency] = useState(holding.currency);
+  const [lots, setLots] = useState(() =>
+    Object.fromEntries(lotsInOrder.map((l) => [l.id, { quantity: String(Number(l.quantity)), price: String(Number(l.price)), date: l.purchaseDate.slice(0, 10) }]))
+  );
+  const initialCats = useMemo(() => (categoryCtx?.of("STOCK", holding.id) ?? []).map((c) => c.id), [categoryCtx, holding.id]);
+  const [cats, setCats] = useState<PickerValue>(() => ({ ids: initialCats, newNames: [] }));
+  const [saving, setSaving] = useState(false);
+
+  const paidAny = holding.lots.some((l) => l.paidFrom);
+  const currencyLocked = paidAny || (holding.saleCount ?? 0) > 0;
+  const single = lotsInOrder.length === 1;
+  const setLot = (id: string, patch: Partial<(typeof lots)[string]>) => setLots((all) => ({ ...all, [id]: { ...all[id], ...patch } }));
+  const totals = lotsInOrder.reduce((t, l) => ({ qty: t.qty + Number(lots[l.id].quantity || 0), cost: t.cost + Number(lots[l.id].quantity || 0) * Number(lots[l.id].price || 0) }), { qty: 0, cost: 0 });
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    const t = ticker.trim().toUpperCase();
+    if (!t) return toast.error("Enter the ticker.");
+    const lotEdits: { id: string; quantity?: number; price?: number; purchaseDate?: string }[] = [];
+    for (const l of lotsInOrder) {
+      const v = lots[l.id];
+      const q = Number(v.quantity);
+      const p = Number(v.price);
+      if (!(q > 0) || !(p > 0)) return toast.error("Each purchase needs a quantity and price above zero.");
+      if (!v.date) return toast.error("Each purchase needs the date it was bought.");
+      const edit = {
+        ...(q !== Number(l.quantity) ? { quantity: q } : {}),
+        ...(p !== Number(l.price) ? { price: p } : {}),
+        ...(v.date !== l.purchaseDate.slice(0, 10) ? { purchaseDate: v.date } : {}),
+      };
+      if (Object.keys(edit).length) lotEdits.push({ id: l.id, ...edit });
+    }
+    const catsChanged = cats.newNames.length > 0 || cats.ids.length !== initialCats.length || cats.ids.some((id) => !initialCats.includes(id));
+    const body = {
+      ...(t !== holding.ticker ? { ticker: t } : {}),
+      ...((exchange.trim() || null) !== holding.exchange ? { exchange: exchange.trim() || null } : {}),
+      ...(currency !== holding.currency ? { currency } : {}),
+      ...(lotEdits.length ? { lots: lotEdits } : {}),
+      ...(catsChanged ? { categoryIds: cats.ids, newNames: cats.newNames } : {}),
+    };
+    if (!Object.keys(body).length) return onClose();
+    setSaving(true);
+    const res = await fetch(`/api/investments/stocks/${holding.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    setSaving(false);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return toast.error(data.error || "Couldn't save the changes.");
+    toast.success("Stock updated.");
+    onClose();
+    onSaved();
+  }
+
+  const paidNote = (l: StockPurchaseLot) =>
+    !l.paidFrom
+      ? "Only tracked: no account or budget was changed."
+      : l.paidFrom.kind === "ACCOUNT"
+        ? `Paid from ${l.paidFrom.name}${l.paidFrom.amount ? ` · ${formatMoney(Number(l.paidFrom.amount), l.paidFrom.currency ?? holding.currency)}` : ""}. A new cost re-books that payment.`
+        : `Paid from the ${l.paidFrom.name} sale's proceeds. A new cost updates that reinvestment.`;
+
+  return (
+    <form onSubmit={save} className="space-y-4">
+      <div className="space-y-2">
+        <Label>Search in</Label>
+        <Select value={searchExchange} onValueChange={setSearchExchange}>
+          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {EXCHANGE_FILTERS.map((e) => <SelectItem key={e.code} value={e.code}>{e.label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          <Label>Ticker</Label>
+          <TickerAutocomplete value={ticker} onChange={setTicker} onSelect={(s) => { setTicker(s.symbol); setExchange(s.exchange); }} exchangeFilter={searchExchange} />
+        </div>
+        <div className="space-y-2">
+          <Label>Exchange</Label>
+          <Input value={exchange} onChange={(e) => setExchange(e.target.value)} placeholder="Optional" aria-label="Exchange" />
+        </div>
+      </div>
+      {ticker.trim().toUpperCase() !== holding.ticker && (
+        <p className="-mt-2 text-xs text-muted-foreground">Its price is fetched again for the new ticker. Sales already recorded keep the name they were sold under.</p>
+      )}
+      <div className="space-y-2">
+        <Label>Currency</Label>
+        <Select value={currency} onValueChange={setCurrency} disabled={currencyLocked}>
+          <SelectTrigger className="w-full" aria-label="Currency"><SelectValue /></SelectTrigger>
+          <SelectContent>{SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}</SelectContent>
+        </Select>
+        {currencyLocked && (
+          <p className="text-xs text-muted-foreground">
+            Fixed at {holding.currency}: {paidAny ? "a purchase was paid for in it" : "it has sales recorded in it"}. To change it, delete {paidAny ? "that purchase" : "this stock"} and add it again in the right currency.
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-baseline justify-between gap-2">
+          <Label>{single ? "Purchase" : `Purchases (${lotsInOrder.length})`}</Label>
+          {!single && <span className="text-xs text-muted-foreground tabular-nums">{Number(totals.qty.toFixed(4))} shares · avg {formatMoney(totals.qty ? totals.cost / totals.qty : 0, currency)}</span>}
+        </div>
+        <div className="space-y-2">
+          {lotsInOrder.map((l, i) => (
+            <div key={l.id} className={`space-y-2 rounded-lg border p-3 ${focusLot === l.id ? "border-foreground/40 bg-muted/40" : "border-border"}`}>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Quantity</Label>
+                  <Input type="number" step="0.0001" min="0" value={lots[l.id].quantity} onChange={(e) => setLot(l.id, { quantity: e.target.value })} required id={`lot-quantity-${l.id}`} aria-label={`Quantity, purchase ${i + 1}`} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Price paid</Label>
+                  <Input type="number" step="0.01" min="0" value={lots[l.id].price} onChange={(e) => setLot(l.id, { price: e.target.value })} required aria-label={`Price, purchase ${i + 1}`} />
+                </div>
+                <div className="col-span-2 space-y-1.5 sm:col-span-1">
+                  <Label className="text-xs text-muted-foreground">Bought on</Label>
+                  <Input type="date" value={lots[l.id].date} onChange={(e) => setLot(l.id, { date: e.target.value })} required aria-label={`Date, purchase ${i + 1}`} />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">{paidNote(l)}</p>
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          How a purchase was paid stays as recorded; it&apos;s part of that account&apos;s history. To change it, delete the purchase from the stock&apos;s details and add it again.{!single && " Quantity and average price are worked out from these purchases."}
+        </p>
+      </div>
+
+      <CategoryField value={cats} onChange={setCats} />
+
+      <DialogFooter className="gap-2">
+        <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+        <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
+      </DialogFooter>
+    </form>
   );
 }
 

@@ -19,7 +19,30 @@ export async function GET() {
     include: { lots: { orderBy: { purchaseDate: "desc" } } },
     orderBy: { createdAt: "desc" },
   });
-  return NextResponse.json({ holdings });
+  // How each purchase was paid, and whether a stock has sales: the edit form
+  // shows the first and uses both to say what can safely change.
+  const refs = holdings.flatMap((h) => h.lots.map((l) => `STOCK_LOT:${l.id}`));
+  const [paid, reinvesting, sold] = await Promise.all([
+    db.ledgerEntry.findMany({
+      where: { userId: session.userId, investmentRef: { in: refs }, type: "INVESTMENT_PURCHASE", reversedAt: null },
+      select: { investmentRef: true, amount: true, currency: true, account: { select: { name: true } } },
+    }),
+    db.investmentSale.findMany({ where: { userId: session.userId, NOT: { reinvestments: { equals: [] } } }, select: { name: true, reinvestments: true } }),
+    db.investmentSale.groupBy({ by: ["holdingId"], where: { userId: session.userId, kind: "STOCK", reversedAt: null }, _count: true }),
+  ]);
+  const paidFrom = new Map<string, { kind: "ACCOUNT" | "SALE"; name: string; amount?: string; currency?: string }>();
+  for (const e of paid) if (e.investmentRef) paidFrom.set(e.investmentRef, { kind: "ACCOUNT", name: e.account?.name ?? "an account", amount: e.amount.toString(), currency: e.currency });
+  for (const sale of reinvesting) {
+    for (const r of (sale.reinvestments as { ref?: string }[] | null) ?? []) if (r.ref) paidFrom.set(r.ref, { kind: "SALE", name: sale.name });
+  }
+  const sales = new Map(sold.map((g) => [g.holdingId, g._count]));
+  return NextResponse.json({
+    holdings: holdings.map((h) => ({
+      ...h,
+      saleCount: sales.get(h.id) ?? 0,
+      lots: h.lots.map((l) => ({ ...l, paidFrom: paidFrom.get(`STOCK_LOT:${l.id}`) ?? null })),
+    })),
+  });
 }
 
 export async function POST(req: NextRequest) {

@@ -75,39 +75,42 @@ async function assertHolding(client: Tx | typeof db, userId: string, kind: Inves
   if (!found) throw new ValidationError("Investment not found.");
 }
 
+export type HoldingCategoriesInput = { kind: InvestmentKind; holdingId: string; categoryIds?: string[]; newNames?: string[]; mode?: "replace" | "add" };
+
 /** Sets an investment's categories: existing ones by id, plus new ones by
  * name (created, or matched to an existing name). `add` keeps the ones it
  * already has. */
-export async function setHoldingCategories(
-  userId: string,
-  input: { kind: InvestmentKind; holdingId: string; categoryIds?: string[]; newNames?: string[]; mode?: "replace" | "add" }
-) {
-  return db.$transaction(async (tx: Tx) => {
-    await assertHolding(tx, userId, input.kind, input.holdingId);
-    const ids = new Set(input.categoryIds ?? []);
-    if (ids.size) {
-      const owned = await tx.investmentCategory.count({ where: { userId, id: { in: [...ids] } } });
-      if (owned !== ids.size) throw new ValidationError("One of those categories doesn't exist.");
-    }
-    for (const name of input.newNames ?? []) {
-      if (!clean(name)) continue;
-      const { category } = await findOrCreateCategory(tx, userId, name);
-      ids.add(category.id);
-    }
-    if ((input.mode ?? "replace") === "replace") {
-      await tx.investmentCategoryLink.deleteMany({
-        where: { kind: input.kind, holdingId: input.holdingId, category: { userId }, ...(ids.size ? { categoryId: { notIn: [...ids] } } : {}) },
-      });
-    }
-    for (const categoryId of ids) {
-      await tx.investmentCategoryLink.upsert({
-        where: { categoryId_kind_holdingId: { categoryId, kind: input.kind, holdingId: input.holdingId } },
-        update: {},
-        create: { categoryId, kind: input.kind, holdingId: input.holdingId },
-      });
-    }
-    return tx.investmentCategoryLink.findMany({ where: { kind: input.kind, holdingId: input.holdingId, category: { userId } }, select: { categoryId: true } });
-  });
+export async function setHoldingCategories(userId: string, input: HoldingCategoriesInput) {
+  return db.$transaction((tx: Tx) => applyHoldingCategories(tx, userId, input));
+}
+
+/** setHoldingCategories inside a transaction the caller already has (a stock
+ * edit saves its categories with the rest of the change, or not at all). */
+export async function applyHoldingCategories(tx: Tx, userId: string, input: HoldingCategoriesInput) {
+  await assertHolding(tx, userId, input.kind, input.holdingId);
+  const ids = new Set(input.categoryIds ?? []);
+  if (ids.size) {
+    const owned = await tx.investmentCategory.count({ where: { userId, id: { in: [...ids] } } });
+    if (owned !== ids.size) throw new ValidationError("One of those categories doesn't exist.");
+  }
+  for (const name of input.newNames ?? []) {
+    if (!clean(name)) continue;
+    const { category } = await findOrCreateCategory(tx, userId, name);
+    ids.add(category.id);
+  }
+  if ((input.mode ?? "replace") === "replace") {
+    await tx.investmentCategoryLink.deleteMany({
+      where: { kind: input.kind, holdingId: input.holdingId, category: { userId }, ...(ids.size ? { categoryId: { notIn: [...ids] } } : {}) },
+    });
+  }
+  for (const categoryId of ids) {
+    await tx.investmentCategoryLink.upsert({
+      where: { categoryId_kind_holdingId: { categoryId, kind: input.kind, holdingId: input.holdingId } },
+      update: {},
+      create: { categoryId, kind: input.kind, holdingId: input.holdingId },
+    });
+  }
+  return tx.investmentCategoryLink.findMany({ where: { kind: input.kind, holdingId: input.holdingId, category: { userId } }, select: { categoryId: true } });
 }
 
 /** An investment deleted outright (added by mistake) leaves no categories
