@@ -142,7 +142,7 @@ export default function AnalyticsPage() {
 
       {tab === "reports" ? <ReportsPanel /> : <>
 
-      <nav aria-label="Analytics sections" className="sticky top-14 z-20 -mx-4 overflow-x-auto border-y border-border bg-background/90 px-4 backdrop-blur-md md:top-14 md:-mx-8 md:px-8">
+      <nav aria-label="Analytics sections" className="sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-20 -mx-4 overflow-x-auto border-y border-border bg-background/90 px-4 backdrop-blur-md md:top-14 md:-mx-6 md:px-6 lg:-mx-8 lg:px-8">
         <ul className="flex gap-5 text-[13px] whitespace-nowrap">
           {SECTIONS.map(([id, label]) => (
             <li key={id}><a href={`#${id}`} className="block py-2.5 text-muted-foreground transition-colors hover:text-foreground">{label}</a></li>

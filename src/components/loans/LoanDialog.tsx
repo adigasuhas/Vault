@@ -195,7 +195,7 @@ export function LoanDialog({
               <Input id="l-r" type="number" min="0" step="0.01" value={f.rate} onChange={(e) => setF({ ...f, rate: e.target.value })} placeholder="0 (none)" />
             </div>
           </div>
-          <div className="grid grid-cols-[1fr_1fr_0.7fr] gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-[1fr_1fr_0.7fr]">
             <div className="space-y-1.5">
               <Label htmlFor="l-s">First EMI</Label>
               <Input id="l-s" disabled={locked} type="date" value={f.startDate} onChange={(e) => setStart(e.target.value)} />
@@ -204,7 +204,7 @@ export function LoanDialog({
               <Label htmlFor="l-e">Last EMI</Label>
               <Input id="l-e" type="date" min={f.startDate} value={f.endDate} onChange={(e) => setEnd(e.target.value)} />
             </div>
-            <div className="space-y-1.5">
+            <div className="col-span-2 space-y-1.5 sm:col-span-1">
               <Label htmlFor="l-n">Months</Label>
               <Input id="l-n" type="number" min="1" max="600" required value={f.installments} onChange={(e) => setMonths(e.target.value)} />
             </div>

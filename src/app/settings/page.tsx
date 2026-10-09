@@ -358,7 +358,7 @@ export default function SettingsPage() {
 
       <div className="mt-6 grid grid-cols-[minmax(0,1fr)] gap-8 pb-28 md:grid-cols-[188px_minmax(0,1fr)]">
         {/* Section index: a sticky list on wide screens, a scrolling strip on phones. */}
-        <nav aria-label="Settings sections" className="sticky top-14 z-20 -mx-4 min-w-0 border-b border-border bg-background/90 px-4 py-2 backdrop-blur-md md:top-20 md:mx-0 md:self-start md:border-0 md:bg-transparent md:p-0 md:backdrop-blur-none">
+        <nav aria-label="Settings sections" className="sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-20 -mx-4 min-w-0 border-b border-border bg-background/90 px-4 py-2 backdrop-blur-md md:top-20 md:mx-0 md:self-start md:border-0 md:bg-transparent md:p-0 md:backdrop-blur-none">
           <ul className="flex gap-1 overflow-x-auto md:flex-col md:overflow-visible">
             {SECTIONS.map((x) => {
               const Icon = x.icon;

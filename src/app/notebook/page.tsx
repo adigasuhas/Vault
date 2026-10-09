@@ -89,12 +89,16 @@ function EntryDialog({
   const [f, setF] = useState(blank);
   const [newGroup, setNewGroup] = useState("");
   const [busy, setBusy] = useState(false);
+  // Which entry this form edits, fixed when it opens: saving an edit always
+  // updates that entry, never adds another one.
+  const [editingId, setEditingId] = useState<string | null>(initial?.id ?? null);
   const [wasOpen, setWasOpen] = useState(open);
   if (open !== wasOpen) {
     setWasOpen(open);
     if (open) {
       setF(blank());
       setNewGroup("");
+      setEditingId(initial?.id ?? null);
     }
   }
 
@@ -118,9 +122,9 @@ function EntryDialog({
         notes: f.notes.trim() || null,
         projectId,
       };
-      if (initial) await api(`/api/notebook/${initial.id}`, { method: "PATCH", body });
+      if (editingId) await api(`/api/notebook/${editingId}`, { method: "PATCH", body });
       else await api("/api/notebook", { body });
-      toast.success(initial ? "Entry updated." : `${body.title} added to your notebook.`);
+      toast.success(editingId ? "Entry updated." : `${body.title} added to your notebook.`);
       onOpenChange(false);
       onSaved();
     } catch (err) {
@@ -136,14 +140,14 @@ function EntryDialog({
       <DialogContent className="sm:max-w-lg">
         <form onSubmit={submit} className="space-y-4">
           <DialogHeader>
-            <DialogTitle>{initial ? "Edit entry" : "Add to notebook"}</DialogTitle>
+            <DialogTitle>{editingId ? "Edit entry" : "Add to notebook"}</DialogTitle>
             <DialogDescription>Just a note. It doesn&apos;t touch your balances, outflow or budget until you turn it into something.</DialogDescription>
           </DialogHeader>
           <div className="space-y-1.5">
             <Label htmlFor="n-title">What was it?</Label>
             <Input id="n-title" autoFocus required value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} placeholder="Flights home, laptop, deposit…" />
           </div>
-          <div className="grid grid-cols-[1.2fr_0.8fr_1fr] gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-[1.2fr_0.8fr_1fr]">
             <div className="space-y-1.5">
               <Label htmlFor="n-amt">Amount</Label>
               <Input id="n-amt" type="number" inputMode="decimal" min="0" step="0.01" required value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} />
@@ -155,7 +159,7 @@ function EntryDialog({
                 <SelectContent>{SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}</SelectContent>
               </Select>
             </div>
-            <div className="space-y-1.5">
+            <div className="col-span-2 space-y-1.5 sm:col-span-1">
               <Label htmlFor="n-date">Date</Label>
               <Input id="n-date" type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
             </div>
@@ -171,12 +175,17 @@ function EntryDialog({
                   role="radio"
                   aria-checked={f.paidBy === p}
                   onClick={() => setF({ ...f, paidBy: p })}
-                  className={cn("h-9 cursor-pointer rounded-md border text-sm transition-colors", f.paidBy === p ? "border-foreground/50 bg-muted font-medium" : "border-border text-muted-foreground hover:text-foreground")}
+                  className={cn("min-h-10 cursor-pointer rounded-md border px-2 py-1.5 text-sm leading-tight transition-colors", f.paidBy === p ? "border-foreground/50 bg-muted font-medium" : "border-border text-muted-foreground hover:text-foreground")}
                 >
                   {p === "ME" ? "I did" : "Someone else, for me"}
                 </button>
               ))}
             </div>
+            {editingId && initial && f.paidBy !== initial.paidBy && (
+              <p className="text-xs text-muted-foreground">
+                The whole {formatMoney(Number(f.amount) || 0, f.currency)} moves from {initial.paidBy === "ME" ? "Paid by you" : "Paid for you by others"} to {f.paidBy === "ME" ? "Paid by you" : "Paid for you by others"}. It&apos;s still one entry.
+              </p>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
@@ -205,7 +214,7 @@ function EntryDialog({
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={busy || !valid}>{busy ? "Saving…" : initial ? "Save" : "Add entry"}</Button>
+            <Button type="submit" disabled={busy || !valid}>{busy ? "Saving…" : editingId ? "Save" : "Add entry"}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -323,14 +332,24 @@ export default function NotebookPage() {
   const [converting, setConverting] = useState<{ entry: Entry | null; mode: "EXPENSE" | "RECEIVABLE" }>({ entry: null, mode: "EXPENSE" });
   const [loanFrom, setLoanFrom] = useState<Entry | null>(null);
   const [deleting, setDeleting] = useState<Entry | null>(null);
+  const [duplicates, setDuplicates] = useState<string[][]>([]);
+  // Groups the user said are genuinely separate entries (kept on this device).
+  const [dismissed, setDismissed] = useState<string[]>(() => {
+    try {
+      return typeof window === "undefined" ? [] : JSON.parse(localStorage.getItem("vault.notebook.notDuplicates") ?? "[]");
+    } catch {
+      return [];
+    }
+  });
 
   const load = useCallback(async () => {
     try {
       const [n, p] = await Promise.all([
-        api<{ entries: Entry[]; currency: string }>("/api/notebook"),
+        api<{ entries: Entry[]; currency: string; possibleDuplicates?: string[][] }>("/api/notebook"),
         api<{ projects: Project[] }>("/api/expense-projects?includeArchived=1"),
       ]);
       setEntries(n.entries);
+      setDuplicates(n.possibleDuplicates ?? []);
       setCurrency(n.currency);
       setProjects(p.projects);
       setError(null);
@@ -352,6 +371,15 @@ export default function NotebookPage() {
   const open = all.filter((e) => e.status === "OPEN");
   const visible = all.filter((e) => (show === "ALL" || e.status === "OPEN") && (group === "ALL" || (group === NO_GROUP ? !e.project : e.project?.id === group)));
   const activeProjects = projects.filter((p) => !p.archivedAt);
+  const byId = new Map(all.map((e) => [e.id, e]));
+  const toReview = duplicates.filter((g) => !dismissed.includes(g.join(","))).map((g) => g.map((id) => byId.get(id)).filter((e): e is Entry => !!e)).filter((g) => g.length > 1);
+  function keepBoth(group: Entry[]) {
+    const next = [...dismissed, group.map((e) => e.id).join(",")];
+    setDismissed(next);
+    try {
+      localStorage.setItem("vault.notebook.notDuplicates", JSON.stringify(next));
+    } catch {}
+  }
 
   async function remove(e: Entry) {
     try {
@@ -390,6 +418,33 @@ export default function NotebookPage() {
             <p className="mt-1 text-xs text-muted-foreground">Log as an expense, or expect it back</p>
           </Panel>
         </div>
+      )}
+
+      {toReview.length > 0 && (
+        <Panel className="settle space-y-3 border-warning/40">
+          <div>
+            <p className="text-sm font-medium">{toReview.length === 1 ? "These look like the same entry" : `${toReview.length} entries look written down twice`}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Same title, amount and date. Each copy counts in the totals above, so the amount can show as paid by you and by someone else. Delete the copy you don&apos;t need, or keep both if they really are separate.
+            </p>
+          </div>
+          {toReview.map((group) => (
+            <div key={group.map((e) => e.id).join(",")} className="rounded-lg border border-border">
+              <ul className="divide-y divide-border/70">
+                {group.map((e) => (
+                  <li key={e.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">
+                    <span className="min-w-0 basis-full sm:flex-1 sm:basis-auto sm:truncate">{e.title} <span className="text-muted-foreground">· {formatDate(e.date, { day: "numeric", month: "short", year: "numeric" })} · {e.paidBy === "OTHER" ? `paid by ${e.person || "someone else"}` : "paid by you"}</span></span>
+                    <Money value={Number(e.amount)} currency={e.currency} tone="plain" className="font-medium" />
+                    <Button size="sm" variant="outline" className="ml-auto sm:ml-0" onClick={() => setDeleting(e)}>Delete this one</Button>
+                  </li>
+                ))}
+              </ul>
+              <div className="flex justify-end border-t border-border px-3 py-2">
+                <Button size="sm" variant="ghost" onClick={() => keepBoth(group)}>They&apos;re separate, keep both</Button>
+              </div>
+            </div>
+          ))}
+        </Panel>
       )}
 
       {activeProjects.length > 0 && (

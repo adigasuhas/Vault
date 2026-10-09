@@ -12,7 +12,9 @@ async function load(userId: string, id: string) {
   return entry;
 }
 
-/** Edits an entry. Converted ones are frozen: what they became is the record now. */
+/** Edits an entry in place (it is one row: changing who paid moves its whole
+ * amount to the other side, it never adds a second record). Converted ones
+ * are frozen: what they became is the record now. */
 export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   const entry = await load(userId, params.id);
   const input = await parseJson(req, patchNotebookEntrySchema);

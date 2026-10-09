@@ -414,8 +414,8 @@ export function ScheduleForm({
               const key = isoDate(d);
               const o = overrides[key] ?? {};
               return (
-                <li key={key} className="grid grid-cols-[1fr_140px_110px] items-center gap-2 px-3 py-1.5">
-                  <span className={cn("text-xs", (o.date || o.amount) && "text-brass")}>
+                <li key={key} className="grid grid-cols-2 items-center gap-2 px-3 py-1.5 sm:grid-cols-[1fr_140px_110px]">
+                  <span className={cn("col-span-2 text-xs sm:col-span-1", (o.date || o.amount) && "text-brass")}>
                     {d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })}
                     {overrideErrors[key] && <span className="ml-2 text-negative">{overrideErrors[key]}</span>}
                   </span>

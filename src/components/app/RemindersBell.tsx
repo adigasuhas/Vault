@@ -71,7 +71,7 @@ export function RemindersBell({ className, align = "start" }: { className?: stri
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align={align} side="bottom" className="w-[340px] p-0">
+      <PopoverContent align={align} side="bottom" className="w-[min(340px,calc(100vw-1.5rem))] p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <p className="text-sm font-semibold">Reminders</p>
           <Link href="/settings" onClick={() => setOpen(false)} className="text-xs text-muted-foreground hover:text-foreground">Settings</Link>

@@ -61,7 +61,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl border border-border bg-popover p-6 text-sm text-popover-foreground shadow-pop duration-150 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto overscroll-contain rounded-2xl border border-border bg-popover p-5 text-sm sm:p-6 has-[[data-slot=dialog-footer]:not(.hidden)]:pb-0 sm:has-[[data-slot=dialog-footer]:not(.hidden)]:pb-0 text-popover-foreground shadow-pop duration-150 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}
@@ -107,7 +107,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-6 -mb-6 mt-2 flex flex-col-reverse gap-2 rounded-b-2xl border-t bg-muted/40 px-6 py-4 sm:flex-row sm:justify-end",
+        "sticky bottom-0 z-10 -mx-5 mt-2 flex flex-col-reverse gap-2 rounded-b-2xl border-t bg-[color-mix(in_oklab,var(--muted)_40%,var(--popover))] px-5 py-4 sm:-mx-6 sm:flex-row sm:justify-end sm:px-6",
         className
       )}
       {...props}

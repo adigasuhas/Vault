@@ -1474,17 +1474,17 @@ function RangeBar({ range, onChange }: { range: { from: string; to: string }; on
   const active = presets.find(([, r]) => r.from === range.from && r.to === range.to)?.[0];
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <div role="radiogroup" aria-label="Period" className="inline-flex rounded-lg bg-muted p-0.5 text-xs">
+      <div role="radiogroup" aria-label="Period" className="inline-flex max-w-full overflow-x-auto rounded-lg bg-muted p-0.5 text-xs">
         {presets.map(([label, r]) => (
           <button key={label} role="radio" aria-checked={active === label} onClick={() => onChange(r)} className={`h-7 cursor-pointer rounded-md px-2.5 transition-colors ${active === label ? "bg-card font-medium shadow-card" : "text-muted-foreground hover:text-foreground"}`}>
             {label}
           </button>
         ))}
       </div>
-      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Input type="date" aria-label="From" value={range.from} max={range.to || undefined} onChange={(e) => onChange({ ...range, from: e.target.value })} className="h-8 w-[150px]" />
+      <div className="grid w-full grid-cols-[1fr_auto_1fr] items-center gap-1.5 text-xs text-muted-foreground sm:flex sm:w-auto">
+        <Input type="date" aria-label="From" value={range.from} max={range.to || undefined} onChange={(e) => onChange({ ...range, from: e.target.value })} className="h-9 w-full sm:h-8 sm:w-[150px]" />
         <span aria-hidden>→</span>
-        <Input type="date" aria-label="To" value={range.to} min={range.from || undefined} onChange={(e) => onChange({ ...range, to: e.target.value })} className="h-8 w-[150px]" />
+        <Input type="date" aria-label="To" value={range.to} min={range.from || undefined} onChange={(e) => onChange({ ...range, to: e.target.value })} className="h-9 w-full sm:h-8 sm:w-[150px]" />
       </div>
     </div>
   );

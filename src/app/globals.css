@@ -208,6 +208,12 @@
   .dark {
     color-scheme: dark;
   }
+  /* Grid items may shrink below their content's width, so a long name or a
+     wide table in one cell truncates or scrolls inside it instead of pushing
+     the whole page sideways on a phone. */
+  .grid > * {
+    min-width: 0;
+  }
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "ss01", "cv11";

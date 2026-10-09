@@ -97,6 +97,9 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     try {
       const stored = localStorage.getItem("vault_sidebar_collapsed");
       if (stored === "true" || stored === "false") setCollapsedState(stored === "true");
+      // No choice made yet: on a tablet the sidebar starts as icons, leaving
+      // the page most of the width. Not saved, so a wider screen gets it full.
+      else if (window.matchMedia("(min-width: 768px) and (max-width: 1099px)").matches) setCollapsedState(true);
     } catch {
       /* storage blocked */
     }
@@ -138,6 +141,18 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   }, [user, pathname, isChromeLess]);
 
   useEffect(() => setMobileOpen(false), [pathname]);
+  // The open drawer closes with Escape and holds the page behind it still.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMobileOpen(false);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [mobileOpen]);
 
   if (isChromeLess) return <Suspense>{children}</Suspense>;
 
@@ -189,7 +204,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       <aside
         aria-label="Main navigation"
         className={cn(
-          "fixed top-0 z-50 flex h-[100dvh] w-[248px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-[width,transform] duration-200 md:sticky",
+          "fixed top-0 z-50 flex h-[100dvh] w-[min(280px,85vw)] shrink-0 flex-col border-r border-sidebar-border bg-sidebar pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] transition-[width,transform] duration-200 md:sticky md:pt-0 md:pb-0",
           collapsed ? "md:w-[64px]" : "md:w-[224px]",
           mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
         )}
@@ -206,7 +221,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           >
             {collapsed ? <PanelLeftOpen className="h-4 w-4" strokeWidth={1.75} /> : <PanelLeftClose className="h-4 w-4" strokeWidth={1.75} />}
           </button>
-          <button className="cursor-pointer rounded-lg p-1.5 text-muted-foreground hover:text-foreground md:hidden" onClick={() => setMobileOpen(false)} aria-label="Close menu">
+          <button className="-mr-1.5 flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-muted-foreground hover:text-foreground md:hidden" onClick={() => setMobileOpen(false)} aria-label="Close menu">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -282,14 +297,14 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       </aside>
 
       <div className="relative z-[1] flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-background/85 px-4 backdrop-blur-md md:hidden">
-          <button onClick={() => setMobileOpen(true)} aria-label="Open menu" className="-ml-1 cursor-pointer rounded-md p-1.5 text-muted-foreground hover:text-foreground">
+        <header className="sticky top-0 z-30 flex h-[calc(3.5rem+env(safe-area-inset-top))] items-center justify-between border-b border-border bg-background/85 px-[max(0.75rem,env(safe-area-inset-left))] pt-[env(safe-area-inset-top)] backdrop-blur-md md:hidden">
+          <button onClick={() => setMobileOpen(true)} aria-label="Open menu" aria-expanded={mobileOpen} className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:text-foreground">
             <Menu className="h-5 w-5" />
           </button>
           <Link href="/dashboard" aria-label="VAULT overview"><Logo /></Link>
           <span className="flex items-center gap-1">
-          <RemindersBell align="end" />
-          <Link href="/expenses?new=1" aria-label="Log an expense" className="-mr-1 rounded-md p-1.5 text-muted-foreground hover:text-foreground">
+          <RemindersBell align="end" className="h-10 w-10" />
+          <Link href="/expenses?new=1" aria-label="Log an expense" className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:text-foreground">
             <Plus className="h-5 w-5" />
           </Link>
           </span>
@@ -301,7 +316,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           {quickAdd}
         </div>
 
-        <main id="main-content" key={pathname} className="mx-auto w-full max-w-[1280px] flex-1 px-4 pt-6 pb-28 md:px-8 md:pt-8 md:pb-16">
+        <main id="main-content" key={pathname} className="mx-auto w-full min-w-0 max-w-[1280px] flex-1 px-4 pt-6 pb-[calc(7rem+env(safe-area-inset-bottom))] md:px-6 md:pt-8 md:pb-16 lg:px-8">
           <Suspense>{children}</Suspense>
         </main>
 
@@ -316,10 +331,10 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               </Link>
             );
           })}
-          <button onClick={() => setMobileOpen(true)} className="flex h-14 cursor-pointer flex-col items-center justify-center gap-1 text-[10.5px] text-muted-foreground">
+          <button onClick={() => setMobileOpen(true)} aria-expanded={mobileOpen} className="relative flex h-14 cursor-pointer flex-col items-center justify-center gap-1 text-[10.5px] text-muted-foreground">
             <Menu className="h-[18px] w-[18px]" strokeWidth={1.75} />
             More
-            {pending.income + pending.payment > 0 && <span className="absolute top-2 ml-5 h-1.5 w-1.5 rounded-full bg-warning" />}
+            {pending.income + pending.payment > 0 && <span aria-label="Items waiting" className="absolute top-2.5 left-1/2 ml-2.5 h-1.5 w-1.5 rounded-full bg-warning" />}
           </button>
         </nav>
       </div>

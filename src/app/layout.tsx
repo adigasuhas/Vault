@@ -25,6 +25,10 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  // Lets the layout pad itself clear of notches and the home indicator.
+  viewportFit: "cover",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#f5f3ee" },
     { media: "(prefers-color-scheme: dark)", color: "#111111" },
