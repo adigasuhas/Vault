@@ -18,9 +18,17 @@ export interface ReportColumn {
   key: string;
   label: string;
   kind: ColumnKind;
+  /** Money in each row's own currency: the row field holding its code.
+   * Without it, money is in the report's currency. */
+  currencyKey?: string;
+  /** Decimal places kept in CSV (default: money 2, pct 2, number up to 6). */
+  decimals?: number;
+  /** Left out of the PDF (still in the CSV), for wide reports. */
+  csvOnly?: boolean;
 }
 export interface Report {
-  type: ReportType;
+  /** A ledger report type, or an investment report's (see lib/investment-reports). */
+  type: string;
   title: string;
   subtitle: string;
   currency: string;
@@ -29,7 +37,12 @@ export interface Report {
   totals?: Record<string, string | number | null>;
   summary: { label: string; value: number | string; kind: ColumnKind }[];
   notes?: string[];
+  /** Filters the report was built with, shown under its title. */
+  filters?: string[];
 }
+
+/** A row may set `_style: "subtotal"` (shown in bold in the PDF). */
+export const ROW_STYLE = "_style";
 
 export const REPORT_TYPES = [
   "summary",
@@ -467,14 +480,22 @@ export async function buildReport(userId: string, type: ReportType, p: ReportPar
   }
 }
 
+/** Plain values for spreadsheets: numbers without symbols or separators
+ * (money to 2 places, percentages to 2, quantities and prices up to 6),
+ * blanks for unknown values, RFC 4180 quoting. */
 export function reportToCsv(r: Report): string {
-  const esc = (v: unknown) => {
-    if (v == null) return "";
-    const s = typeof v === "number" ? String(Math.round(v * 100) / 100) : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const num = (v: number, c: ReportColumn) => {
+    const places = c.decimals ?? (c.kind === "number" ? 6 : 2);
+    const f = 10 ** places;
+    return String(Math.round(v * f) / f);
+  };
+  const esc = (v: unknown, c?: ReportColumn) => {
+    if (v == null || (typeof v === "number" && !Number.isFinite(v))) return "";
+    const s = typeof v === "number" ? (c ? num(v, c) : String(v)) : String(v);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [r.columns.map((c) => esc(c.label)).join(",")];
-  for (const row of r.rows) lines.push(r.columns.map((c) => esc(row[c.key])).join(","));
-  if (r.totals) lines.push(r.columns.map((c) => esc(r.totals![c.key])).join(","));
-  return "﻿" + lines.join("\n") + "\n";
+  for (const row of r.rows) lines.push(r.columns.map((c) => esc(row[c.key], c)).join(","));
+  if (r.totals) lines.push(r.columns.map((c) => esc(r.totals![c.key], c)).join(","));
+  return "\uFEFF" + lines.join("\n") + "\n";
 }

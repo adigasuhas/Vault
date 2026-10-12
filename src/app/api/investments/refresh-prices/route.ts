@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { fetchStockQuote, fetchMutualFundNav, type StockQuote } from "@/lib/market-data";
+import { checkPriceAlerts } from "@/lib/price-alerts";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -59,5 +60,7 @@ export async function POST() {
     }
   }
 
-  return NextResponse.json({ stocksUpdated, stocksFailed, fundsUpdated, fundsFailed });
+  // Targets and stop-losses are checked against the prices just fetched.
+  const alerts = await checkPriceAlerts({ userId: session.userId }).catch(() => ({ checked: 0, fired: 0 }));
+  return NextResponse.json({ stocksUpdated, stocksFailed, fundsUpdated, fundsFailed, alertsFired: alerts.fired });
 }

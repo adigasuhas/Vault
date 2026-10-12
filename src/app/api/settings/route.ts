@@ -33,6 +33,7 @@ export async function GET() {
     isOnboarded: user.isOnboarded,
     notifyUpcomingCredits: setting.notifyUpcomingCredits,
     notifyUpcomingBills: setting.notifyUpcomingBills,
+    notifyPriceAlerts: setting.notifyPriceAlerts,
     budgetAlertThreshold: setting.budgetAlertThreshold,
   });
 }
@@ -50,7 +51,7 @@ export async function POST(req: NextRequest) {
   }
   const {
     name, timezone, baseCurrency, secondaryCurrency, budgetCurrency, exchangeRateMode,
-    notifyUpcomingCredits, notifyUpcomingBills, budgetAlertThreshold, isOnboarded,
+    notifyUpcomingCredits, notifyUpcomingBills, notifyPriceAlerts, budgetAlertThreshold, isOnboarded,
   } = input;
 
   const before = await db.user.findUniqueOrThrow({ where: { id: session.userId }, select: { baseCurrency: true } });
@@ -93,6 +94,7 @@ export async function POST(req: NextRequest) {
     update: {
       ...(notifyUpcomingCredits !== undefined ? { notifyUpcomingCredits } : {}),
       ...(notifyUpcomingBills !== undefined ? { notifyUpcomingBills } : {}),
+      ...(notifyPriceAlerts !== undefined ? { notifyPriceAlerts } : {}),
       ...(budgetAlertThreshold !== undefined ? { budgetAlertThreshold } : {}),
     },
     create: { userId: user.id },

@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { PlCell } from "@/components/investments/Pl";
 
 /**
  * Investment categories on the Investments page: the user's own groupings
@@ -590,9 +591,13 @@ export function CategoryPerformance({
                   <td className="hidden px-3 py-2.5 text-right tabular-nums sm:table-cell">{r.count}</td>
                   <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(Math.round(r.invested), currency)}</td>
                   <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(Math.round(r.value), currency)}</td>
-                  <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(r.pnl))}>
-                    {r.count ? signed(r.pnl, currency) : "–"}
-                    <span className="block text-xs">{r.pct == null ? "" : `${r.pct >= 0 ? "+" : "−"}${Math.abs(r.pct).toFixed(1)}%`}</span>
+                  <td className="px-1.5 py-1.5 text-right">
+                    {r.count ? (
+                      <PlCell pct={r.pct}>
+                        {signed(r.pnl, currency)}
+                        <span className="block text-xs"><span aria-hidden className="text-[10px]">{r.pnl > 0.5 ? "▲ " : r.pnl < -0.5 ? "▼ " : ""}</span>{r.pct == null ? "" : `${r.pct >= 0 ? "+" : "−"}${Math.abs(r.pct).toFixed(1)}%`}</span>
+                      </PlCell>
+                    ) : <span className="px-1.5 text-muted-foreground">–</span>}
                   </td>
                   <td className="hidden px-3 py-2.5 lg:table-cell">
                     <div className="flex items-center gap-2">

@@ -2,6 +2,7 @@ import { ValidationError } from "@/lib/validate";
 import { refundPurchase } from "@/lib/investment-funding";
 import { applyHoldingCategories, applyLotCategories } from "@/lib/investment-categories";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
+import { setStockAlerts, type AlertInput } from "@/lib/price-alerts";
 import type { Tx } from "@/lib/ledger";
 
 /**
@@ -22,6 +23,8 @@ export interface StockEdit {
   currency?: string;
   /** categoryIds/newNames, when given, replace that purchase's own categories. */
   lots?: { id: string; quantity?: number; price?: number; purchaseDate?: Date; categoryIds?: string[]; newNames?: string[] }[];
+  /** Replaces the stock's price alerts when given. */
+  alerts?: AlertInput[];
   /** Replaces the stock-wide categories when given. */
   categories?: { categoryIds?: string[]; newNames?: string[] };
 }
@@ -88,6 +91,7 @@ export async function editStock(tx: Tx, userId: string, id: string, input: Stock
   });
   await recomputeHoldingFromLots(id, tx);
 
+  if (input.alerts) await setStockAlerts(tx, userId, id, input.alerts);
   if (input.categories) {
     await applyHoldingCategories(tx, userId, { kind: "STOCK", holdingId: id, ...input.categories, mode: "replace" });
   }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { unfundPurchase } from "@/lib/investment-funding";
 import { editStock } from "@/lib/stock-edit";
+import { checkPriceAlerts } from "@/lib/price-alerts";
 import { fetchStockQuote } from "@/lib/market-data";
 import { unlinkHolding, unlinkLots } from "@/lib/investment-categories";
 import type { Tx } from "@/lib/ledger";
@@ -47,8 +48,10 @@ export async function PATCH(req: NextRequest, context: { params: Promise<{ id: s
 
   try {
     const { holding, tickerChanged } = await db.$transaction((tx: Tx) =>
-      editStock(tx, session.userId, id, { ticker: input.ticker, exchange: input.exchange, currency: input.currency, lots, categories })
+      editStock(tx, session.userId, id, { ticker: input.ticker, exchange: input.exchange, currency: input.currency, lots, categories, alerts: input.alerts })
     );
+    // New or changed thresholds are checked against the latest quote straight away.
+    if (input.alerts) await checkPriceAlerts({ stockHoldingIds: [id] }).catch(() => {});
     // Best-effort price for a corrected ticker; a slow feed never blocks the edit.
     if (tickerChanged && holding) {
       const quote = await fetchStockQuote(holding.ticker).catch(() => null);

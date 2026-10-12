@@ -30,3 +30,22 @@ export async function sendReminderDigest(to: string, name: string | null, lines:
     `Hi${name ? ` ${name.split(" ")[0]}` : ""},\n\n` + lines.map((l) => `• ${l}`).join("\n") + `\n\nOpen VAULT: ${appUrl}/dashboard\n\nChange what you hear about in Settings → Reminders.`
   );
 }
+
+export async function sendPriceAlertEmail(
+  to: string,
+  name: string | null,
+  a: { kind: "TARGET" | "STOP_LOSS"; ticker: string; scopeLabel: string | null; threshold: number; price: number; currency: string; priceAt: Date }
+) {
+  const target = a.kind === "TARGET";
+  const who = a.scopeLabel ? ` (${a.scopeLabel})` : "";
+  await send(
+    to,
+    target ? `VAULT: ${a.ticker} reached your target` : `VAULT: ${a.ticker} hit your stop-loss`,
+    `Hi${name ? ` ${name.split(" ")[0]}` : ""},\n\n` +
+      (target
+        ? `${a.ticker}${who} reached your target price of ${a.threshold} ${a.currency}.`
+        : `${a.ticker}${who} fell to your stop-loss of ${a.threshold} ${a.currency}. You may want to review this position.`) +
+      `\nLatest price: ${a.price} ${a.currency}, quoted ${a.priceAt.toISOString().slice(0, 16).replace("T", " ")} UTC.\n\n` +
+      `This is a notification only. VAULT never buys or sells for you.\n\nTurn these emails off in Settings → Reminders.`
+  );
+}

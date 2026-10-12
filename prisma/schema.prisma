@@ -145,27 +145,29 @@ model User {
   createdAt              DateTime         @default(now())
   updatedAt              DateTime         @updatedAt
 
-  accounts          Account[]
-  ledgerEntries     LedgerEntry[]
-  categories        Category[]
-  expenses          Expense[]
-  transfers         Transfer[]
-  scheduledCredits  ScheduledCredit[]
-  budgetPlans       BudgetPlan[]
-  stockHoldings     StockHolding[]
-  mutualFunds       MutualFundHolding[]
-  fixedDeposits     FixedDeposit[]
-  otherAssets       OtherAsset[]
-  investmentSales   InvestmentSale[]
-  exchangeRates     ExchangeRate[]
-  loans             Loan[]
-  monthlyPlans      MonthlyPlan[]
-  setting           Setting?
-  netWorthSnapshots NetWorthSnapshot[]
-  auditEvents       AuditEvent[]
-  expenseProjects   ExpenseProject[]
-  notebookEntries   NotebookEntry[]
+  accounts             Account[]
+  ledgerEntries        LedgerEntry[]
+  categories           Category[]
+  expenses             Expense[]
+  transfers            Transfer[]
+  scheduledCredits     ScheduledCredit[]
+  budgetPlans          BudgetPlan[]
+  stockHoldings        StockHolding[]
+  mutualFunds          MutualFundHolding[]
+  fixedDeposits        FixedDeposit[]
+  otherAssets          OtherAsset[]
+  investmentSales      InvestmentSale[]
+  exchangeRates        ExchangeRate[]
+  loans                Loan[]
+  monthlyPlans         MonthlyPlan[]
+  setting              Setting?
+  netWorthSnapshots    NetWorthSnapshot[]
+  auditEvents          AuditEvent[]
+  expenseProjects      ExpenseProject[]
+  notebookEntries      NotebookEntry[]
   investmentCategories InvestmentCategory[]
+  priceAlerts          StockPriceAlert[]
+  priceAlertEvents     PriceAlertEvent[]
 
   auditLogsActed      AdminAuditLog[]      @relation("AuditActor")
   auditLogsTargeted   AdminAuditLog[]      @relation("AuditTarget")
@@ -625,7 +627,8 @@ model StockHolding {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  lots StockPurchaseLot[]
+  lots        StockPurchaseLot[]
+  priceAlerts StockPriceAlert[]
 
   @@index([userId])
 }
@@ -901,6 +904,8 @@ model Setting {
   user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   notifyUpcomingCredits Boolean  @default(true)
   notifyUpcomingBills   Boolean  @default(true)
+  // Email when a stock reaches a target or stop-loss (always shown in the app).
+  notifyPriceAlerts     Boolean  @default(true)
   budgetAlertThreshold  Int      @default(90) // percent
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -932,16 +937,17 @@ model RateLimitBucket {
 // ("Banking"), an owner ("Client A"), a strategy ("Long-term"), a purpose.
 // An investment can be in several; nothing about its value or history changes.
 model InvestmentCategory {
-  id        String                   @id @default(uuid())
-  userId    String
-  user      User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name      String
+  id          String                   @id @default(uuid())
+  userId      String
+  user        User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
   // Slot 1–8 of the chart palette (--series-N), so it adapts to the theme.
-  color     Int                      @default(1)
-  createdAt DateTime                 @default(now())
-  updatedAt DateTime                 @updatedAt
-  links     InvestmentCategoryLink[]
-  lotLinks  StockLotCategoryLink[]
+  color       Int                      @default(1)
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+  links       InvestmentCategoryLink[]
+  lotLinks    StockLotCategoryLink[]
+  priceAlerts StockPriceAlert[]
 
   @@unique([userId, name])
   @@index([userId])
@@ -951,6 +957,64 @@ model InvestmentCategory {
 // deposit or other asset (by `kind`); it isn't a foreign key so a fully sold
 // holding — recreated with the same id if the sale is undone — keeps its
 // categories, and realised results can be attributed to them.
+// A price target and/or stop-loss on a stock: for the whole stock, for one
+// category's shares of it (e.g. a client), or for one purchase. Alerts only
+// inform; nothing is ever bought or sold. Each threshold fires once when the
+// price reaches it, then re-arms when the price moves back past it (by 1%) or
+// the threshold is changed.
+model StockPriceAlert {
+  id             String              @id @default(uuid())
+  userId         String
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stockHoldingId String
+  stockHolding   StockHolding        @relation(fields: [stockHoldingId], references: [id], onDelete: Cascade)
+  categoryId     String?
+  category       InvestmentCategory? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  // A purchase (no foreign key: a purchase a sale used up just stops being checked).
+  lotId          String?
+  targetPrice    Decimal?
+  stopLossPrice  Decimal?
+  targetArmed    Boolean             @default(true)
+  stopArmed      Boolean             @default(true)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  events         PriceAlertEvent[]
+
+  @@index([userId])
+  @@index([stockHoldingId])
+}
+
+enum PriceAlertKind {
+  TARGET
+  STOP_LOSS
+}
+
+// A threshold that was reached: the notification and its history. Kept when
+// the alert or stock is later removed.
+model PriceAlertEvent {
+  id             String           @id @default(uuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alertId        String?
+  alert          StockPriceAlert? @relation(fields: [alertId], references: [id], onDelete: SetNull)
+  stockHoldingId String?
+  kind           PriceAlertKind
+  ticker         String
+  exchange       String?
+  // Whose shares it is about: a category (client) or a purchase, else null.
+  scopeLabel     String?
+  threshold      Decimal
+  observedPrice  Decimal
+  currency       String
+  // When the observed price was quoted, and when the alert was detected.
+  priceAt        DateTime
+  createdAt      DateTime         @default(now())
+  readAt         DateTime?
+  dismissedAt    DateTime?
+
+  @@index([userId, createdAt])
+}
+
 // A category on one stock purchase (e.g. the client it was bought for),
 // rather than the whole stock. lotId has no foreign key on purpose: a lot a
 // sale used up keeps its categories, so the sale's result stays attributed,

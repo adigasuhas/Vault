@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { fetchStockQuote, fetchMutualFundNav, type StockQuote } from "@/lib/market-data";
+import { checkPriceAlerts } from "@/lib/price-alerts";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -73,5 +74,11 @@ export async function GET(req: NextRequest) {
     },
   });
 
-  return NextResponse.json({ stocksUpdated, stocksFailed, fundsUpdated, fundsFailed, status });
+  // Every user's targets and stop-losses, against the prices just fetched:
+  // this is what notifies people who aren't looking at the app.
+  const alerts = await checkPriceAlerts().catch((e) => {
+    console.error("price alert check failed", e);
+    return { checked: 0, fired: 0 };
+  });
+  return NextResponse.json({ stocksUpdated, stocksFailed, fundsUpdated, fundsFailed, status, alerts });
 }

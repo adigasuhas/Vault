@@ -7,6 +7,7 @@ import { parseJson, toErrorResponse } from "@/lib/validate";
 import { createStockSchema } from "@/lib/schemas";
 import { fundPurchase } from "@/lib/investment-funding";
 import { applyHoldingCategories, applyLotCategories } from "@/lib/investment-categories";
+import { checkPriceAlerts, setStockAlerts } from "@/lib/price-alerts";
 import type { Tx } from "@/lib/ledger";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +18,10 @@ export async function GET() {
 
   const holdings = await db.stockHolding.findMany({
     where: { userId: session.userId },
-    include: { lots: { orderBy: { purchaseDate: "desc" } } },
+    include: {
+      lots: { orderBy: { purchaseDate: "desc" } },
+      priceAlerts: { select: { id: true, categoryId: true, lotId: true, targetPrice: true, stopLossPrice: true, targetArmed: true, stopArmed: true }, orderBy: { createdAt: "asc" } },
+    },
     orderBy: { createdAt: "desc" },
   });
   // How each purchase was paid, and whether a stock has sales: the edit form
@@ -102,8 +106,21 @@ export async function POST(req: NextRequest) {
         if (input.categoryScope === "STOCK") await applyHoldingCategories(tx, session.userId, { kind: "STOCK", holdingId, ...cats });
         else await applyLotCategories(tx, session.userId, lot.id, cats);
       }
+      if (input.targetPrice != null || input.stopLossPrice != null) {
+        // For one client's purchase, the thresholds are that purchase's; otherwise the stock's.
+        const forPurchase = input.categoryScope === "PURCHASE" && !!(input.categoryIds?.length || input.newNames?.length);
+        const current = await tx.stockPriceAlert.findMany({ where: { stockHoldingId: holdingId, userId: session.userId } });
+        const keep = current
+          .filter((a) => (forPurchase ? true : a.categoryId || a.lotId))
+          .map((a) => ({ scope: (a.lotId ? "LOT" : a.categoryId ? "CATEGORY" : "STOCK") as "LOT" | "CATEGORY" | "STOCK", categoryId: a.categoryId, lotId: a.lotId, targetPrice: a.targetPrice != null ? Number(a.targetPrice) : null, stopLossPrice: a.stopLossPrice != null ? Number(a.stopLossPrice) : null }));
+        await setStockAlerts(tx, session.userId, holdingId, [
+          ...keep,
+          { scope: forPurchase ? "LOT" : "STOCK", lotId: forPurchase ? lot.id : null, targetPrice: input.targetPrice ?? null, stopLossPrice: input.stopLossPrice ?? null },
+        ]);
+      }
       return { holding: await tx.stockHolding.findUnique({ where: { id: holdingId }, include: { lots: true } }), lotId: lot.id };
     });
+    if (input.targetPrice != null || input.stopLossPrice != null) await checkPriceAlerts({ stockHoldingIds: [result.holding!.id] }).catch(() => {});
     return NextResponse.json({ holding: result.holding, lotId: result.lotId, merged: !!existing }, { status: existing ? 200 : 201 });
   } catch (err) {
     const { body: errBody, status } = toErrorResponse(err);

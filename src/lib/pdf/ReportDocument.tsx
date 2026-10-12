@@ -1,7 +1,7 @@
 import path from "path";
 import { Document, Page, Text, View, StyleSheet, Font } from "@react-pdf/renderer";
 import { formatMoney } from "@/lib/currencies";
-import type { Report, ColumnKind } from "@/lib/reports";
+import type { Report, ReportColumn, ColumnKind } from "@/lib/reports";
 
 // The built-in Helvetica has no glyph for the rupee sign (U+20B9) and other
 // non-Latin currency symbols — it rendered "₹" as a superscript "¹" in every
@@ -30,6 +30,8 @@ const styles = StyleSheet.create({
   meta: { textAlign: "right", color: MUTED, fontSize: 8, lineHeight: 1.5 },
   title: { fontSize: 17, fontWeight: 700, marginTop: 18 },
   subtitle: { fontSize: 9, color: MUTED, marginTop: 3 },
+  filters: { fontSize: 7.5, color: MUTED, marginTop: 4, lineHeight: 1.45 },
+  subtotal: { backgroundColor: "#F4F1EA" },
   statsRow: { flexDirection: "row", marginTop: 16, marginBottom: 6, borderTop: `0.75 solid ${RULE}`, borderBottom: `0.75 solid ${RULE}` },
   stat: { flex: 1, paddingVertical: 10, paddingHorizontal: 8, borderRight: `0.75 solid ${RULE}` },
   statLast: { flex: 1, paddingVertical: 10, paddingHorizontal: 8 },
@@ -51,19 +53,24 @@ function fmt(kind: ColumnKind, v: string | number | null | undefined, currency: 
   if (v == null || v === "") return "–";
   if (kind === "money" && typeof v === "number") return formatMoney(Math.round(v * 100) / 100, currency);
   if (kind === "pct" && typeof v === "number") return `${v.toFixed(1)}%`;
+  if (kind === "number" && typeof v === "number") return String(Math.round(v * 1e4) / 1e4);
   return String(v);
 }
+
+/** A cell's currency: its row's own (currencyKey) or the report's. */
+const cellCurrency = (c: ReportColumn, row: Record<string, string | number | null>, fallback: string) => (c.currencyKey && typeof row[c.currencyKey] === "string" ? (row[c.currencyKey] as string) : fallback);
 
 /** Column flex weights: text columns get more room than figures. */
 function weight(kind: ColumnKind, key: string) {
   if (key === "description" || key === "summary") return 3;
+  if (key === "name" || key === "instrument") return 2.2;
   if (kind === "text" || kind === "status") return 1.6;
   return 1.1;
 }
 
 /** Renders any Report (see src/lib/reports.ts) as an A4 statement. */
 export function ReportPdf({ report, userName, generatedAt }: { report: Report; userName?: string; generatedAt: Date }) {
-  const cols = report.columns.filter((c) => c.key !== "id");
+  const cols = report.columns.filter((c) => c.key !== "id" && !c.csvOnly);
   return (
     <Document title={`VAULT · ${report.title}`} author="VAULT">
       <Page size="A4" orientation={cols.length > 6 ? "landscape" : "portrait"} style={styles.page}>
@@ -80,6 +87,7 @@ export function ReportPdf({ report, userName, generatedAt }: { report: Report; u
         </View>
         <Text style={styles.title}>{report.title}</Text>
         <Text style={styles.subtitle}>{report.subtitle}</Text>
+        {report.filters?.length ? <Text style={styles.filters}>{report.filters.join("  ·  ")}</Text> : null}
         {report.summary.length > 0 && (
           <View style={styles.statsRow}>
             {report.summary.map((s, i) => (
@@ -102,13 +110,13 @@ export function ReportPdf({ report, userName, generatedAt }: { report: Report; u
             <Text style={[styles.cell, { paddingVertical: 10, color: MUTED }]}>No entries in this period.</Text>
           ) : (
             report.rows.map((r, i) => (
-              <View key={i} style={styles.row} wrap={false}>
+              <View key={i} style={r._style === "subtotal" ? [styles.row, styles.subtotal] : styles.row} wrap={false}>
                 {cols.map((c) => {
                   const v = r[c.key];
                   const numeric = c.kind === "money" || c.kind === "pct" || c.kind === "number";
                   return (
-                    <Text key={c.key} style={[styles.cell, { flex: weight(c.kind, c.key) }, numeric ? styles.num : {}, typeof v === "number" && v < 0 && c.kind === "money" ? styles.neg : {}]}>
-                      {fmt(c.kind, v, report.currency)}
+                    <Text key={c.key} style={[styles.cell, { flex: weight(c.kind, c.key) }, numeric ? styles.num : {}, typeof v === "number" && v < 0 && (c.kind === "money" || c.kind === "pct") ? styles.neg : {}, r._style === "subtotal" ? { fontWeight: 700 } : {}]}>
+                      {r._style === "subtotal" && (v == null || v === "") ? "" : fmt(c.kind, v, cellCurrency(c, r, report.currency))}
                     </Text>
                   );
                 })}
@@ -119,7 +127,7 @@ export function ReportPdf({ report, userName, generatedAt }: { report: Report; u
             <View style={styles.totalRow} wrap={false}>
               {cols.map((c) => (
                 <Text key={c.key} style={[styles.cell, { flex: weight(c.kind, c.key), fontWeight: 700 }, c.kind === "money" || c.kind === "pct" || c.kind === "number" ? styles.num : {}]}>
-                  {report.totals![c.key] == null || report.totals![c.key] === "" ? "" : fmt(c.kind, report.totals![c.key], report.currency)}
+                  {report.totals![c.key] == null || report.totals![c.key] === "" ? "" : fmt(c.kind, report.totals![c.key], cellCurrency(c, report.totals!, report.currency))}
                 </Text>
               ))}
             </View>

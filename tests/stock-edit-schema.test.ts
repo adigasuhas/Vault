@@ -15,6 +15,9 @@ const ADD_TO_EDIT: Record<string, string[]> = {
   categoryIds: ["categoryIds", "lots.categoryIds"],
   newNames: ["newNames", "lots.newNames"],
   categoryScope: ["categoryIds", "lots.categoryIds"],
+  // Thresholds set when adding are edited as the stock's alerts (whole stock, a client, or a purchase).
+  targetPrice: ["alerts"],
+  stopLossPrice: ["alerts"],
 };
 const FUNDING = ["paidFromAccountId", "budgetCategoryId", "fromSaleId", "paidAmount"];
 

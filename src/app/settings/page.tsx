@@ -34,6 +34,7 @@ interface Settings {
   exchangeRateMode: "AUTOMATIC" | "MANUAL";
   notifyUpcomingCredits: boolean;
   notifyUpcomingBills: boolean;
+  notifyPriceAlerts: boolean;
   budgetAlertThreshold: number;
 }
 interface Rate { targetCurrency: string; rate: number | null; mode: string | null; fetchedAt: string | null }
@@ -239,7 +240,7 @@ export default function SettingsPage() {
   const sectionDirty: Partial<Record<SectionId, boolean>> = {
     profile: changed("name") || changed("timezone"),
     money: changed("baseCurrency") || changed("secondaryCurrency") || changed("budgetCurrency") || changed("exchangeRateMode"),
-    reminders: changed("notifyUpcomingCredits") || changed("notifyUpcomingBills") || changed("budgetAlertThreshold"),
+    reminders: changed("notifyUpcomingCredits") || changed("notifyUpcomingBills") || changed("notifyPriceAlerts") || changed("budgetAlertThreshold"),
   };
   const thresholdOk = Number.isInteger(Number(s.budgetAlertThreshold)) && s.budgetAlertThreshold >= 1 && s.budgetAlertThreshold <= 100;
 
@@ -257,6 +258,7 @@ export default function SettingsPage() {
           exchangeRateMode: s!.exchangeRateMode,
           notifyUpcomingCredits: s!.notifyUpcomingCredits,
           notifyUpcomingBills: s!.notifyUpcomingBills,
+          notifyPriceAlerts: s!.notifyPriceAlerts,
           budgetAlertThreshold: Number(s!.budgetAlertThreshold),
         },
       });
@@ -472,6 +474,9 @@ export default function SettingsPage() {
               </Row>
               <Row label="Bills coming up" hint="Scheduled payments and EMIs due in the next few days." htmlFor="st-bills">
                 <div className="flex justify-end"><Switch id="st-bills" checked={s.notifyUpcomingBills} onCheckedChange={(v) => set({ notifyUpcomingBills: v })} /></div>
+              </Row>
+              <Row label="Email price alerts" hint="When a stock reaches a target or stop-loss you set. They always show under the bell too." htmlFor="st-price-alerts">
+                <div className="flex justify-end"><Switch id="st-price-alerts" checked={s.notifyPriceAlerts ?? true} onCheckedChange={(v) => set({ notifyPriceAlerts: v })} /></div>
               </Row>
               <Row label="Budget warning" hint={thresholdOk ? `Flag a category once it has used ${s.budgetAlertThreshold}% of its budget.` : <span className="text-negative">Use a whole number from 1 to 100.</span>} htmlFor="st-threshold">
                 <div className="flex items-center justify-end gap-2">

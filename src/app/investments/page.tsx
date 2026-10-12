@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import { type SparkPoint } from "@/components/app/Sparkline";
 import { PageHeader, Panel, Stat } from "@/components/app/PageHeader";
 import { Equivalent } from "@/components/app/Money";
@@ -11,6 +12,7 @@ import { SalesHistory, type SaleRow } from "@/components/investments/SalesHistor
 import { FundingFields, emptyFunding, fundingBody, type FundingValue } from "@/components/investments/FundingFields";
 import { CategoryBar, CategoryField, CategoryManager, CategoryPerformance, CategoryPicker, CategoryProvider, Dot, UNCATEGORISED, assignCategories, emptyPicker, pickerEmpty, useCategories, type PickerValue } from "@/components/investments/Categories";
 import { categoryRows, linkKey, type InvestmentKind, type Position } from "@/lib/category-metrics";
+import { PriceAlertsEditor, alertRowsFrom, alertsBody, alertsChanged, type AlertRow, type SavedAlert } from "@/components/investments/PriceAlerts";
 import { useSession } from "@/context/SessionContext";
 import { formatMoney } from "@/lib/currencies";
 import { SUPPORTED_CURRENCIES } from "@/lib/currencies";
@@ -27,9 +29,13 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Plus, RefreshCw } from "lucide-react";
+import { Download, Plus, RefreshCw } from "lucide-react";
+import { ExportDialog } from "@/components/investments/ExportDialog";
 import { toast } from "sonner";
 import { fdCurrentValue } from "@/lib/investments";
+import { priceStatus } from "@/lib/price-freshness";
+import { formatDateTime } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 interface StockPurchaseLot {
   id: string;
@@ -54,6 +60,7 @@ interface StockHolding {
   lots: StockPurchaseLot[];
   /** Sales recorded against it (not undone). */
   saleCount?: number;
+  priceAlerts?: SavedAlert[];
   /** Set when the row shows only some purchases (a category filter): the
    * whole holding's quantity. */
   partOf?: number;
@@ -68,6 +75,7 @@ interface MutualFundHolding {
   currency: string;
   purchaseDate: string;
   lastNav: string | null;
+  lastNavAt?: string | null;
   lots?: { id: string; units: string; nav: string; purchaseDate: string }[];
 }
 
@@ -284,6 +292,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
   const categoryCtx = useCategories()!;
   const reloadCategories = categoryCtx.reload;
   const [managing, setManaging] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [tab, setTab] = useState("stocks");
   const priceSeries = usePriceSeries();
   const currency = useCurrency().primary || user?.baseCurrency || "INR";
@@ -583,14 +592,21 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
     <div className="space-y-6">
       <PageHeader
         title="Investments"
-        description="Stocks, funds, deposits and anything else you're growing. The small line shows a year of prices."
+        description="Stocks, funds, deposits and anything else you're growing: what you paid, what it's worth now, and how it's doing."
         actions={
-          <Button variant="outline" onClick={() => handleRefreshPrices(false)} disabled={refreshing}>
-            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-            {refreshing ? "Refreshing…" : "Refresh prices"}
-          </Button>
+          <>
+            <Button variant="outline" onClick={() => setExporting(true)}>
+              <Download className="h-4 w-4" />
+              Export
+            </Button>
+            <Button variant="outline" onClick={() => handleRefreshPrices(false)} disabled={refreshing}>
+              <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+              {refreshing ? "Refreshing…" : "Refresh prices"}
+            </Button>
+          </>
         }
       />
+      <ExportDialog open={exporting} onOpenChange={setExporting} defaultCategory={activeCategory?.id} />
 
       <div className="space-y-3">
         <RangeBar range={range} onChange={setRange} />
@@ -650,9 +666,9 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
           </div>
           <div className="bg-card p-5">
             <Stat
-              label="Profit / loss"
+              label="Unrealised profit / loss"
               value={<span className={gainClass(totalGain)}>{totalGain >= 0 ? "+" : "−"}{formatMoney(Math.abs(Math.round(totalGain)), currency)}</span>}
-              hint={<><Equivalent both signed value={totalGain} currency={currency} className="block text-xs" />{totalInvested > 0 && <span className="block">{((totalGain / totalInvested) * 100).toFixed(1)}% on what you hold now</span>}</>}
+              hint={<><Equivalent both signed value={totalGain} currency={currency} className="block text-xs" />{totalInvested > 0 && <span className="block" title="Unrealised profit or loss ÷ what your current holdings cost. Sales are in Realised.">{totalGain >= 0 ? "▲ +" : "▼ −"}{Math.abs((totalGain / totalInvested) * 100).toFixed(1)}% return on what you hold now</span>}</>}
             />
           </div>
           <div className="bg-card p-5">
@@ -665,6 +681,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
         </div>
       </Panel>
       )}
+      <PriceFreshness stocks={stocks} funds={funds} />
       {ranged && (
         <p className="-mt-2 text-xs text-muted-foreground">
           The tabs show holdings with a purchase in this period (each row still shows the whole holding, so editing stays safe) and sales made in it.
@@ -763,12 +780,23 @@ function StockTab({
   const [searchExchange, setSearchExchange] = useState(defaultCurrency === "INR" ? "NSI" : ALL_EXCHANGES);
   // Categories picked when adding: this purchase only (a client) or every share.
   const [catScope, setCatScope] = useState<"PURCHASE" | "STOCK">("PURCHASE");
+  // Optional target / stop-loss per share, for this purchase (a client's) or the whole stock.
+  const [targetPrice, setTargetPrice] = useState("");
+  const [stopLossPrice, setStopLossPrice] = useState("");
 
   // One edit form for every way in: the row's Edit, and Edit / a purchase's
   // pencil in its details. focusLot puts the cursor on that purchase.
   const [editing, setEditing] = useState<{ id: string; focusLot?: string } | null>(null);
 
   const [detailsId, setDetailsId] = useState<string | null>(null);
+  // A notification links to /investments?stock=<id>: open that stock.
+  const search = useSearchParams();
+  const linked = search.get("stock");
+  const [openedLink, setOpenedLink] = useState<string | null>(null);
+  if (linked && linked !== openedLink && allStocks.some((x) => x.id === linked)) {
+    setOpenedLink(linked);
+    setDetailsId(linked);
+  }
   const detailsHolding = allStocks.find((s) => s.id === detailsId) || null;
 
   async function handleCreate(e: React.FormEvent) {
@@ -786,12 +814,16 @@ function StockTab({
         purchaseDate,
         ...fundingBody(funding),
         ...(pickerEmpty(cats) ? {} : { categoryIds: cats.ids, newNames: cats.newNames, categoryScope: catScope }),
+        ...(targetPrice.trim() ? { targetPrice: Number(targetPrice) } : {}),
+        ...(stopLossPrice.trim() ? { stopLossPrice: Number(stopLossPrice) } : {}),
       }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return toast.error(data.error || "Failed to add stock.");
     setCats(emptyPicker());
+    setTargetPrice("");
+    setStopLossPrice("");
     setOpen(false);
     setFunding(emptyFunding());
     setTicker("");
@@ -910,9 +942,21 @@ function StockTab({
                   </div>
                 )}
               </div>
+              <div className="space-y-1.5">
+                <Label>Price alerts <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input type="number" inputMode="decimal" step="any" min="0" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} placeholder="Target price" aria-label="Target price per share" />
+                  <Input type="number" inputMode="decimal" step="any" min="0" value={stopLossPrice} onChange={(e) => setStopLossPrice(e.target.value)} placeholder="Stop-loss price" aria-label="Stop-loss price per share" aria-invalid={!!(targetPrice.trim() && stopLossPrice.trim() && Number(stopLossPrice) >= Number(targetPrice))} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {targetPrice.trim() && stopLossPrice.trim() && Number(stopLossPrice) >= Number(targetPrice)
+                    ? <span className="text-negative">The stop-loss has to be below the target.</span>
+                    : <>Per share, in {currency}. {!pickerEmpty(cats) && catScope === "PURCHASE" ? "For this purchase only, so another client's shares can have their own." : "For the whole stock."} You&apos;re notified when it&apos;s reached; nothing is sold for you.</>}
+                </p>
+              </div>
               <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(quantity) * Number(price)} />
               <DialogFooter>
-                <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
+                <Button type="submit" disabled={saving || !!(targetPrice.trim() && stopLossPrice.trim() && Number(stopLossPrice) >= Number(targetPrice))} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -982,6 +1026,7 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
   const [lotCats, setLotCats] = useState<Record<string, PickerValue>>(() => Object.fromEntries(lotsInOrder.map((l) => [l.id, { ids: initialLotCats[l.id], newNames: [] }])));
   const changed = (v: PickerValue, was: string[]) => v.newNames.length > 0 || v.ids.length !== was.length || v.ids.some((id) => !was.includes(id));
   const [saving, setSaving] = useState(false);
+  const [alertRows, setAlertRows] = useState<AlertRow[]>(() => alertRowsFrom(holding));
 
   const paidAny = holding.lots.some((l) => l.paidFrom);
   const currencyLocked = paidAny || (holding.saleCount ?? 0) > 0;
@@ -1010,12 +1055,15 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
       if (Object.keys(edit).length) lotEdits.push({ id: l.id, ...edit });
     }
     const catsChanged = changed(cats, initialCats);
+    const alertsOut = alertsBody(alertRows);
+    if ("error" in alertsOut) return toast.error(alertsOut.error);
     const body = {
       ...(t !== holding.ticker ? { ticker: t } : {}),
       ...((exchange.trim() || null) !== holding.exchange ? { exchange: exchange.trim() || null } : {}),
       ...(currency !== holding.currency ? { currency } : {}),
       ...(lotEdits.length ? { lots: lotEdits } : {}),
       ...(catsChanged ? { categoryIds: cats.ids, newNames: cats.newNames } : {}),
+      ...(alertsChanged(holding, alertRows) ? alertsOut : {}),
     };
     if (!Object.keys(body).length) return onClose();
     setSaving(true);
@@ -1112,6 +1160,8 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
         <p className="text-xs text-muted-foreground">Every share, now and later, e.g. an industry. Use a purchase&apos;s own categories above for who it was bought for.</p>
         <CategoryPicker value={cats} onChange={setCats} categories={categoryCtx?.categories ?? []} />
       </div>
+
+      <PriceAlertsEditor holding={holding} rows={alertRows} onChange={setAlertRows} currency={currency} />
 
       <DialogFooter className="gap-2">
         <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
@@ -1461,6 +1511,31 @@ function OtherAssetTab({
 }
 
 /** Start → end date filter with quick presets. */
+/** How current the market prices are: live, stale or missing, when they were
+ * last quoted, and how often they update. */
+function PriceFreshness({ stocks, funds }: { stocks: StockHolding[]; funds: MutualFundHolding[] }) {
+  const [now] = useState(() => Date.now());
+  const items = [
+    ...stocks.map((h) => ({ status: priceStatus(h.lastPrice, h.lastPriceAt, now), at: h.lastPriceAt })),
+    ...funds.filter((f) => f.schemeCode).map((f) => ({ status: priceStatus(f.lastNav, f.lastNavAt, now), at: f.lastNavAt ?? null })),
+  ];
+  if (!items.length) return null;
+  const latest = items.map((i) => i.at).filter((d): d is string => !!d).sort().at(-1);
+  const stale = items.filter((i) => i.status === "stale").length;
+  const none = items.filter((i) => i.status === "none").length;
+  return (
+    <p className="-mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      <span className={cn("h-1.5 w-1.5 rounded-full", stale || none ? "bg-warning" : "bg-positive")} aria-hidden />
+      <span>Prices {latest ? `last updated ${formatDateTime(latest)}` : "not fetched yet"}</span>
+      {stale > 0 && <span className="text-warning">· {stale} stale (over 4 days old)</span>}
+      {none > 0 && <span>· {none} without a price, valued at cost</span>}
+      <span className="basis-full sm:basis-auto">
+        · Quotes from Yahoo Finance and AMFI, refreshed about 4 times a day on Indian market hours and every 15 minutes while this page is open. Exchange quotes can be delayed.
+      </span>
+    </p>
+  );
+}
+
 function RangeBar({ range, onChange }: { range: { from: string; to: string }; onChange: (r: { from: string; to: string }) => void }) {
   const today = new Date().toISOString().slice(0, 10);
   const y = today.slice(0, 4);

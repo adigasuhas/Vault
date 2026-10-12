@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { formatMoney } from "@/lib/currencies";
-import { formatDate } from "@/lib/format";
+import { formatDate, formatDateTime } from "@/lib/format";
 import { Sparkline, type SparkPoint } from "@/components/app/Sparkline";
 import { Equivalent } from "@/components/app/Money";
 import { EmptyState, Panel, SkeletonBlock } from "@/components/app/PageHeader";
@@ -16,8 +16,11 @@ import { useSort, SortTh } from "@/components/investments/table-kit";
 import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useSell } from "@/components/investments/SellDialog";
 import { cn } from "@/lib/utils";
+import { priceStatus } from "@/lib/price-freshness";
+import { PlCell } from "@/components/investments/Pl";
 import { CategoryChips, Dot, useCategories, useCategorySortKey } from "@/components/investments/Categories";
 import type { InvestmentKind } from "@/lib/category-metrics";
+import { StockAlertsSummary, type SavedAlert } from "@/components/investments/PriceAlerts";
 
 /** Category column: shown once the user has any categories. */
 function useCategoryColumn(kind: InvestmentKind) {
@@ -43,6 +46,7 @@ export interface StockRow {
   lots: Lot[];
   /** The row shows only some purchases (a category filter); the whole holding's quantity. */
   partOf?: number;
+  priceAlerts?: SavedAlert[];
 }
 interface FundLot { id: string; units: string; nav: string; purchaseDate: string }
 export interface FundRow {
@@ -82,6 +86,41 @@ function Toolbar({ q, setQ, filter, setFilter, count, noun }: { q: string; setQ:
   );
 }
 
+export function PlBadge({ pl, pct: p, currency }: { pl: number; pct: number | null; currency: string }) {
+  return (
+    <PlCell pct={p} arrow className="min-w-0 shrink-0 text-xs">
+      <span className="font-medium">{pct(p)}</span>
+      <span className="block text-[11px]">{signed(pl, currency)}</span>
+    </PlCell>
+  );
+}
+
+function MiniStat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="truncate font-medium tabular-nums text-foreground">{value}</dd>
+    </div>
+  );
+}
+
+/** The latest price, when it was quoted, and whether it can be trusted. */
+function PriceValue({ s, compact }: { s: StockRow; compact?: boolean }) {
+  const status = priceStatus(s.lastPrice, s.lastPriceAt);
+  if (status === "none") return <span className="text-muted-foreground" title="No market price yet; valued at what you paid">No price</span>;
+  const when = s.lastPriceAt ? formatDateTime(s.lastPriceAt) : "";
+  return (
+    <>
+      {formatMoney(Number(s.lastPrice), s.currency)}
+      {status === "stale" ? (
+        <span className={cn("block text-[11px] text-warning", compact && "inline font-normal")} title={`Last quoted ${when}`}>{compact ? " · " : ""}stale, {formatDate(s.lastPriceAt!, { day: "numeric", month: "short" })}</span>
+      ) : compact ? null : (
+        <span className="block text-[11px] font-normal text-muted-foreground" title={`Quoted ${when}`}>{when}</span>
+      )}
+    </>
+  );
+}
+
 function stockMetrics(s: StockRow) {
   const qty = Number(s.quantity);
   const last = Number(s.lastPrice ?? s.avgBuyPrice);
@@ -90,7 +129,9 @@ function stockMetrics(s: StockRow) {
   const pl = current - invested;
   const prev = s.previousClose != null ? Number(s.previousClose) : null;
   const dayPct = prev && s.lastPrice != null ? ((Number(s.lastPrice) - prev) / prev) * 100 : null;
-  return { qty, last, invested, current, pl, plPct: invested > 0 ? (pl / invested) * 100 : 0, dayPct };
+  // No market price yet: valued at cost (as in the totals), but its P/L is unknown, not zero.
+  const noPrice = priceStatus(s.lastPrice, s.lastPriceAt) === "none";
+  return { qty, last, avg: qty > 0 ? invested / qty : Number(s.avgBuyPrice), invested, current, pl, plPct: invested > 0 ? (pl / invested) * 100 : 0, dayPct, noPrice };
 }
 
 export function StockTable({
@@ -124,6 +165,7 @@ export function StockTable({
     rows,
     {
       name: (r) => r.s.ticker,
+      avg: (r) => r.m.avg,
       cat: (r) => [cat.key(r.s.id), ...r.s.lots.flatMap((l) => (categoryCtx?.ofLot(l.id) ?? []).map((c) => c.name.toLowerCase()))].sort()[0],
       price: (r) => r.m.last,
       day: (r) => r.m.dayPct ?? -Infinity,
@@ -164,58 +206,96 @@ export function StockTable({
   return (
     <Panel padded={false} className="overflow-hidden">
       <Toolbar q={q} setQ={setQ} filter={filter} setFilter={setFilter} count={rows.length} noun="stocks" />
-      <div className="overflow-x-auto">
+      {/* Phones: one card per holding, every figure kept. */}
+      <ul className="divide-y divide-border/70 md:hidden">
+        {sort.sorted.map(({ s, m }) => (
+          <li key={s.id} className="space-y-2.5 px-4 py-3">
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <button onClick={() => onView(s.id)} className="cursor-pointer text-left font-medium hover:underline">{s.ticker}</button>
+                <p className="truncate text-xs text-muted-foreground">
+                  {Number(m.qty.toFixed(4))}{s.partOf ? ` of ${Number(s.partOf.toFixed(4))}` : ""} shares{s.lots.length > 1 && ` · ${s.lots.length} buys`}
+                </p>
+                {cat.show && <CategoryChips kind="STOCK" id={s.id} name={s.ticker} lots={lotQty(s)} className="mt-1" />}
+              </div>
+              {m.noPrice ? <span className="shrink-0 rounded-md bg-muted/60 px-1.5 py-1 text-xs text-muted-foreground">No price yet</span> : <PlBadge pl={m.pl} pct={m.plPct} currency={s.currency} />}
+            </div>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+              <MiniStat label="Avg purchase price" value={formatMoney(m.avg, s.currency)} />
+              <MiniStat label="Current price" value={<PriceValue s={s} compact />} />
+              <MiniStat label="Invested" value={formatMoney(m.invested, s.currency)} />
+              <MiniStat label="Current value" value={formatMoney(m.current, s.currency)} />
+            </dl>
+            <div className="flex justify-end gap-1">
+              <Button variant="outline" size="sm" onClick={() => onView(s.id)}><Eye className="h-3.5 w-3.5" />Details</Button>
+              <Button variant="outline" size="sm" onClick={() => sellStock(s)}><Banknote className="h-3.5 w-3.5" />Sell</Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild><Button variant="outline" size="icon-sm" aria-label={`More for ${s.ticker}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => onEdit(s)}><Pencil className="h-4 w-4" /> Edit, alerts…</DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onClick={() => setDeleting(s)}><Trash2 className="h-4 w-4" /> Delete holding…</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="hidden overflow-x-auto md:block">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-[11px] tracking-[0.06em] text-muted-foreground">
-            <SortTh k="name" label="Holding" sort={sort} className="pl-4" />
-            {cat.show && <SortTh k="cat" label="Category" sort={sort} className={catTh} />}
-            <th className="hidden px-3 py-2.5 font-medium uppercase lg:table-cell">1 year</th>
-            <SortTh k="price" label="Price" sort={sort} align="right" className="hidden sm:table-cell" />
-            <SortTh k="invested" label="Invested" sort={sort} align="right" className="hidden md:table-cell" />
+            <SortTh k="name" label="Stock" sort={sort} className="pl-4" />
+            {cat.show && <SortTh k="cat" label="Category" sort={sort} className="hidden lg:table-cell" />}
+            <th className="hidden px-3 py-2.5 font-medium uppercase 2xl:table-cell">1 year</th>
+            <SortTh k="avg" label="Avg buy" sort={sort} align="right" />
+            <SortTh k="price" label="Price" sort={sort} align="right" />
+            <SortTh k="invested" label="Invested" sort={sort} align="right" />
             <SortTh k="current" label="Value" sort={sort} align="right" />
             <SortTh k="pl" label="Profit / loss" sort={sort} align="right" />
+            <SortTh k="plpct" label="Return" sort={sort} align="right" />
             <th />
           </tr>
         </thead>
         <tbody>
           {sort.sorted.map(({ s, m }) => (
             <tr key={s.id} className="border-b border-border/60 last:border-0 transition-colors hover:bg-muted/40">
-              <td className="max-w-[200px] truncate py-2.5 pr-3 pl-4">
+              <td className="max-w-[220px] py-2.5 pr-3 pl-4">
                 <button onClick={() => onView(s.id)} className="cursor-pointer text-left font-medium hover:underline">{s.ticker}</button>
                 <p className="truncate text-xs text-muted-foreground">
-                  {Number(m.qty.toFixed(4))}{s.partOf ? ` of ${Number(s.partOf.toFixed(4))}` : ""} × {formatMoney(Number(s.avgBuyPrice), s.currency)}
-                  {s.lots.length > 1 && ` · ${s.lots.length} buys`}
+                  {Number(m.qty.toFixed(4))}{s.partOf ? ` of ${Number(s.partOf.toFixed(4))}` : ""} shares
+                  {s.lots.length > 1 && <> · <button onClick={() => onView(s.id)} className="cursor-pointer underline-offset-2 hover:underline">{s.lots.length} buys</button></>}
                 </p>
-                {cat.show && <CategoryChips kind="STOCK" id={s.id} name={s.ticker} lots={lotQty(s)} className="mt-1 md:hidden" />}
+                {cat.show && <CategoryChips kind="STOCK" id={s.id} name={s.ticker} lots={lotQty(s)} className="mt-1 lg:hidden" />}
               </td>
-              {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="STOCK" id={s.id} name={s.ticker} lots={lotQty(s)} /></td>}
-              <td className="hidden px-3 py-1.5 lg:table-cell">
+              {cat.show && <td className="hidden max-w-[200px] px-3 py-2.5 lg:table-cell"><CategoryChips kind="STOCK" id={s.id} name={s.ticker} lots={lotQty(s)} /></td>}
+              <td className="hidden px-3 py-1.5 2xl:table-cell">
                 <Sparkline points={series ? series[s.id] ?? [] : undefined} currency={s.currency} width={84} height={26} />
               </td>
-              <td className="hidden px-3 py-2.5 text-right tabular-nums sm:table-cell">
-                {s.lastPrice ? formatMoney(Number(s.lastPrice), s.currency) : <span className="text-muted-foreground">–</span>}
-                <p className={cn("text-xs", m.dayPct == null ? "text-muted-foreground" : tone(m.dayPct))}>{m.dayPct == null ? "no quote" : `${pct(m.dayPct)} today`}</p>
-              </td>
-              <td className="hidden px-3 py-2.5 text-right tabular-nums md:table-cell">{formatMoney(m.invested, s.currency)}<p><Equivalent both stack value={m.invested} currency={s.currency} /></p></td>
+              <td className="px-3 py-2.5 text-right tabular-nums" title={s.lots.length > 1 ? "Weighted by shares across the purchases shown" : undefined}>{formatMoney(m.avg, s.currency)}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums"><PriceValue s={s} /></td>
+              <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(m.invested, s.currency)}<p><Equivalent both stack value={m.invested} currency={s.currency} /></p></td>
               <td className="px-3 py-2.5 text-right tabular-nums">
                 {formatMoney(m.current, s.currency)}
                 <p><Equivalent both stack value={m.current} currency={s.currency} /></p>
               </td>
-              <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(m.pl))}>
-                {signed(m.pl, s.currency)}
-                <p className="text-xs">{pct(m.plPct)}</p>
-                <p><Equivalent both stack value={m.pl} currency={s.currency} signed /></p>
-              </td>
+              {m.noPrice ? (
+                <td colSpan={2} className="px-3 py-2.5 text-right text-xs text-muted-foreground" title="No market price yet, so the gain or loss isn't known">Not known yet</td>
+              ) : (
+                <>
+                  <td className="px-1.5 py-1.5 text-right"><PlCell pct={m.plPct}>{signed(m.pl, s.currency)}<Equivalent both stack value={m.pl} currency={s.currency} signed /></PlCell></td>
+                  <td className="px-1.5 py-1.5 text-right"><PlCell pct={m.plPct} arrow>{pct(m.plPct)}</PlCell></td>
+                </>
+              )}
               <td className="pr-3 text-right">
                 <div className="flex justify-end gap-0.5">
-                  <Button variant="ghost" size="icon-sm" title="Purchases and returns" aria-label={`Details for ${s.ticker}`} onClick={() => onView(s.id)}><Eye className="h-4 w-4" /></Button>
+                  <Button variant="ghost" size="icon-sm" title="Purchases, clients and alerts" aria-label={`Details for ${s.ticker}`} onClick={() => onView(s.id)}><Eye className="h-4 w-4" /></Button>
                   <Button variant="ghost" size="icon-sm" title="Sell" aria-label={`Sell ${s.ticker}`} onClick={() => sellStock(s)}><Banknote className="h-4 w-4" /></Button>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={`More for ${s.ticker}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem onClick={() => sellStock(s)}><Banknote className="h-4 w-4" /> Sell…</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => onEdit(s)}><Pencil className="h-4 w-4" /> Edit</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => onEdit(s)}><Pencil className="h-4 w-4" /> Edit, alerts…</DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem variant="destructive" onClick={() => setDeleting(s)}><Trash2 className="h-4 w-4" /> Delete holding…</DropdownMenuItem>
                     </DropdownMenuContent>
@@ -375,6 +455,7 @@ export function StockBreakdown({ h, onEdit, onEditLot, onDeleteLot }: { h: Stock
           </tfoot>
         </table>
       </div>
+      <StockAlertsSummary holding={h} onEdit={onEdit} />
       <p className="text-xs text-muted-foreground">Every purchase is valued at the latest price. Adding the same stock again records a new purchase here.</p>
     </div>
   );
@@ -467,10 +548,12 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
                 {formatMoney(m.current, f.currency)}
                 <p><Equivalent both stack value={m.current} currency={f.currency} /></p>
               </td>
-              <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(m.pl))}>
-                {signed(m.pl, f.currency)}
-                <p className="text-xs">{pct(m.plPct)}</p>
-                <p><Equivalent both stack value={m.pl} currency={f.currency} signed /></p>
+              <td className="px-1.5 py-1.5 text-right">
+                <PlCell pct={m.plPct}>
+                  {signed(m.pl, f.currency)}
+                  <p className="text-xs"><span aria-hidden className="text-[10px]">{m.pl > 0 ? "▲ " : m.pl < 0 ? "▼ " : ""}</span>{pct(m.plPct)}</p>
+                  <p><Equivalent both stack value={m.pl} currency={f.currency} signed /></p>
+                </PlCell>
               </td>
               <td className="pr-3 text-right">
                 <div className="flex justify-end gap-0.5">
@@ -910,10 +993,12 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
                   {formatMoney(cur, a.currency)}
                   <Equivalent both stack value={cur} currency={a.currency} />
                 </td>
-                <td className={cn("px-3 py-2.5 text-right tabular-nums", tone(pl))}>
-                  {signed(pl, a.currency)}
-                  <p className="text-xs">{pct(plPct)}</p>
-                  <Equivalent both stack signed value={pl} currency={a.currency} />
+                <td className="px-1.5 py-1.5 text-right">
+                  <PlCell pct={plPct}>
+                    {signed(pl, a.currency)}
+                    <p className="text-xs"><span aria-hidden className="text-[10px]">{pl > 0 ? "▲ " : pl < 0 ? "▼ " : ""}</span>{pct(plPct)}</p>
+                    <Equivalent both stack signed value={pl} currency={a.currency} />
+                  </PlCell>
                 </td>
                 <td className="pr-3 text-right">
                   <div className="flex justify-end gap-0.5">

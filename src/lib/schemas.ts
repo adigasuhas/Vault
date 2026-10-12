@@ -258,6 +258,17 @@ export const createStockSchema = z.object({
   categoryIds: z.array(zId).max(50).optional(),
   newNames: z.array(z.string().max(80)).max(20).optional(),
   categoryScope: z.enum(["PURCHASE", "STOCK"]).default("PURCHASE"),
+  /** Optional target / stop-loss, per share. On this purchase when categoryScope is PURCHASE and categories are given, else the whole stock. */
+  targetPrice: zPositive.optional(),
+  stopLossPrice: zPositive.optional(),
+});
+/** A stock's price alerts (see lib/price-alerts). Per share, in its currency. */
+const alertInput = z.object({
+  scope: z.enum(["STOCK", "CATEGORY", "LOT"]),
+  categoryId: zId.nullish(),
+  lotId: zId.nullish(),
+  targetPrice: zPositive.nullish(),
+  stopLossPrice: zPositive.nullish(),
 });
 export const patchLotSchema = z.object({
   quantity: zPositive.optional(),
@@ -273,6 +284,8 @@ export const patchStockSchema = z.object({
   lots: z.array(patchLotSchema.extend({ id: zId, categoryIds: z.array(zId).max(50).optional(), newNames: z.array(z.string().max(80)).max(20).optional() })).max(500).optional(),
   categoryIds: z.array(zId).max(50).optional(),
   newNames: z.array(z.string().max(80)).max(20).optional(),
+  /** Replaces the stock's price alerts when given. */
+  alerts: z.array(alertInput).max(100).optional(),
   quantity: zPositive.optional(),
   avgBuyPrice: zPositive.optional(),
 });
@@ -385,6 +398,7 @@ export const patchSettingsSchema = z.object({
   exchangeRateMode: z.enum(["AUTOMATIC", "MANUAL"]).optional(),
   notifyUpcomingCredits: z.boolean().optional(),
   notifyUpcomingBills: z.boolean().optional(),
+  notifyPriceAlerts: z.boolean().optional(),
   budgetAlertThreshold: zInt.refine((n) => n >= 1 && n <= 100, "out of range").optional(),
   isOnboarded: z.boolean().optional(),
 });
