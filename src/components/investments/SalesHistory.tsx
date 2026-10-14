@@ -10,6 +10,7 @@ import { heldFor, type SoldLot } from "@/lib/fifo";
 import { useCurrency } from "@/context/CurrencyContext";
 import { Equivalent } from "@/components/app/Money";
 import { EmptyState, Panel, SkeletonBlock, Stat } from "@/components/app/PageHeader";
+import { EmptyOrFiltered } from "@/components/investments/table-kit";
 import { StatusBadge } from "@/components/app/StatusBadge";
 import { ConfirmAction } from "@/components/ConfirmAction";
 import { Button } from "@/components/ui/button";
@@ -143,9 +144,11 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
   if (loading) return <SkeletonBlock className="h-48" />;
   if (!sales.length)
     return (
-      <EmptyState icon={<History className="h-5 w-5" />} title="Nothing sold or closed yet">
-        Sell shares, redeem fund units, close a deposit or sell an asset from its row in the other tabs. Keep the money for reinvesting, send it to an account, or record the sale for tracking only. Each trade shows up here with its profit or loss.
-      </EmptyState>
+      <EmptyOrFiltered noun="sales or closures">
+        <EmptyState icon={<History className="h-5 w-5" />} title="Nothing sold or closed yet">
+          Sell shares, redeem fund units, close a deposit or sell an asset from its row in the other tabs. Keep the money for reinvesting, send it to an account, or record the sale for tracking only. Each trade shows up here with its profit or loss.
+        </EmptyState>
+      </EmptyOrFiltered>
     );
 
   return (

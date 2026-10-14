@@ -1,8 +1,25 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
+import { createContext, useContext, useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, ChevronsUpDown, ListFilter } from "lucide-react";
+import { EmptyState } from "@/components/app/PageHeader";
 import { cn } from "@/lib/utils";
+
+/** The page's active date and category filters, in words ("for Client A
+ * between 15 Sep and 25 Sep 2026"), or null when nothing is filtered. */
+export const FilterScope = createContext<string | null>(null);
+
+/** An empty tab: "nothing matches the filters" while they're on, otherwise
+ * the tab's own first-run message. */
+export function EmptyOrFiltered({ noun, children }: { noun: string; children: React.ReactNode }) {
+  const scope = useContext(FilterScope);
+  if (!scope) return <>{children}</>;
+  return (
+    <EmptyState icon={<ListFilter className="h-5 w-5" />} title="Nothing matches these filters">
+      No {noun} {scope}. Pick another period or category, or clear the filters to see everything.
+    </EmptyState>
+  );
+}
 
 export type SortDir = "asc" | "desc";
 

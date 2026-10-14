@@ -338,13 +338,13 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
             </button>
             {more && (
               <div className="mt-3 space-y-3">
-                {units?.groups && units.groups.length > 0 && !units.onlyLots && (
+                {units?.groups && units.groups.length > (units.onlyLots ? 1 : 0) && (
                   <div className="space-y-1.5">
                     <Label>Sell from</Label>
                     <Select value={fromGroup || "__all__"} onValueChange={(v) => setFromGroup(v === "__all__" ? "" : v)}>
                       <SelectTrigger className="w-full" aria-label="Sell from"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="__all__">Any purchase, oldest first</SelectItem>
+                        <SelectItem value="__all__">{units.onlyLots ? "Any of these purchases, oldest first" : "Any purchase, oldest first"}</SelectItem>
                         {units.groups.map((g) => {
                           const qty = r6(units.lots.filter((l) => g.lotIds.includes(l.id)).reduce((t, l) => t + l.quantity, 0));
                           return <SelectItem key={g.id} value={g.id}>{g.label} · {qty} {copy.unit.toLowerCase()}</SelectItem>;

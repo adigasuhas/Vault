@@ -12,7 +12,8 @@ import { SalesHistory, type SaleRow } from "@/components/investments/SalesHistor
 import { FundingFields, emptyFunding, fundingBody, fundingProblem, type FundingValue } from "@/components/investments/FundingFields";
 import { InvestmentCashProvider, InvestmentCashStrip, useInvestmentCash } from "@/components/investments/InvestmentCash";
 import { CategoryBar, CategoryField, CategoryManager, CategoryPerformance, CategoryPicker, CategoryProvider, Dot, UNCATEGORISED, assignCategories, emptyPicker, pickerEmpty, useCategories, type PickerValue } from "@/components/investments/Categories";
-import { categoryRows, linkKey, type InvestmentKind, type Position } from "@/lib/category-metrics";
+import { categoryRows, type Position } from "@/lib/category-metrics";
+import { categoryMatcher, filterInvestments, isFiltered, isRanged, periodSummary, type Filters } from "@/lib/investment-filters";
 import { PriceAlertsEditor, alertRowsFrom, alertsBody, alertsChanged, type AlertRow, type SavedAlert } from "@/components/investments/PriceAlerts";
 import { useSession } from "@/context/SessionContext";
 import { formatMoney } from "@/lib/currencies";
@@ -33,11 +34,12 @@ import {
 import { ChevronDown, Download, Plus, RefreshCw, ScanSearch } from "lucide-react";
 import { ResearchDrawer } from "@/components/research/ResearchDrawer";
 import { ExportDialog } from "@/components/investments/ExportDialog";
+import { FilterScope } from "@/components/investments/table-kit";
 import { newKey } from "@/lib/client";
 import { toast } from "sonner";
 import { fdCurrentValue } from "@/lib/investments";
 import { priceStatus } from "@/lib/price-freshness";
-import { formatDateTime } from "@/lib/format";
+import { formatDate, formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface StockPurchaseLot {
@@ -447,49 +449,6 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
   const totalInvested = stockCost + fundCost + depositCost + otherCost;
   const totalGain = stockValue - stockCost + (fundValue - fundCost) + (depositValue - depositCost) + (otherValue - otherCost);
 
-  const ranged = !!(range.from || range.to);
-  const inRange = useCallback((d: string) => {
-    const day = d.slice(0, 10);
-    return (!range.from || day >= range.from) && (!range.to || day <= range.to);
-  }, [range]);
-  // The period's activity, from the dated purchases and sales themselves.
-  const period = useMemo(() => {
-    if (!ranged) return null;
-    let bought = 0, worth = 0, boughtCount = 0;
-    for (const h of stocks) for (const l of h.lots) if (inRange(l.purchaseDate)) {
-      bought += toBase(Number(l.quantity) * Number(l.price), h.currency);
-      worth += toBase(Number(l.quantity) * Number(h.lastPrice ?? h.avgBuyPrice), h.currency);
-      boughtCount++;
-    }
-    for (const f of funds) for (const l of f.lots ?? []) if (inRange(l.purchaseDate)) {
-      bought += toBase(Number(l.units) * Number(l.nav), f.currency);
-      worth += toBase(Number(l.units) * Number(f.lastNav ?? f.avgNav), f.currency);
-      boughtCount++;
-    }
-    for (const d of deposits) if (inRange(d.startDate)) {
-      bought += toBase(Number(d.principal), d.currency);
-      worth += toBase(fdCurrentValue(Number(d.principal), Number(d.interestRate), d.startDate, d.maturityDate), d.currency);
-      boughtCount++;
-    }
-    for (const a of otherAssets) if (inRange(a.purchaseDate)) {
-      bought += toBase(Number(a.purchasePrice), a.currency);
-      worth += toBase(Number(a.currentValue), a.currency);
-      boughtCount++;
-    }
-    // Purchases made in the period but sold since still count as bought then.
-    let boughtSince = 0;
-    for (const x of sales) if (!x.reversedAt) for (const l of x.lots) if (inRange(l.purchaseDate)) boughtSince += toBase(Number(l.cost), x.currency);
-    const sold = sales.filter((x) => !x.reversedAt && inRange(x.soldOn));
-    return {
-      bought: bought + boughtSince,
-      boughtSince,
-      worth,
-      boughtCount,
-      soldCount: sold.length,
-      received: sold.reduce((t, x) => t + toBase(Number(x.netProceeds), x.currency), 0),
-      realized: sold.reduce((t, x) => t + toBase(Number(x.realizedPnl), x.currency), 0),
-    };
-  }, [ranged, inRange, stocks, funds, deposits, otherAssets, sales, toBase]);
   // Every current holding, valued the same way as the totals above, for
   // category figures. Categories only pick which of these to add up.
   const positions = useMemo<Position[]>(
@@ -556,68 +515,31 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
     if (categoryCtx.loaded && catFilter && catFilter !== UNCATEGORISED && !activeCategory) setCatFilter("");
     if (categoryCtx.loaded && catFilter === UNCATEGORISED && !categoryCtx.categories.length) setCatFilter("");
   }, [categoryCtx.loaded, categoryCtx.categories.length, catFilter, activeCategory, setCatFilter]);
-  // What the category filter keeps: whole holdings, or, for stocks split by
-  // purchase (clients), just the purchases in it.
-  const inCategory = useMemo(() => {
-    if (!catFilter) return null;
-    if (catFilter === UNCATEGORISED) {
-      const linked = new Set(categoryCtx.categories.flatMap((c) => c.links.map((l) => linkKey(l.kind, l.holdingId))));
-      const lots = new Set(categoryCtx.categories.flatMap((c) => (c.lotLinks ?? []).map((l) => l.lotId)));
-      return { holding: (kind: InvestmentKind, id: string) => !linked.has(linkKey(kind, id)), lot: (lotId: string) => !lots.has(lotId), whole: () => false };
-    }
-    const keys = new Set((activeCategory?.links ?? []).map((l) => linkKey(l.kind, l.holdingId)));
-    const lots = new Set((activeCategory?.lotLinks ?? []).map((l) => l.lotId));
-    return { holding: (kind: InvestmentKind, id: string) => keys.has(linkKey(kind, id)), lot: (lotId: string) => lots.has(lotId), whole: (kind: InvestmentKind, id: string) => keys.has(linkKey(kind, id)) };
-  }, [catFilter, categoryCtx.categories, activeCategory]);
-  /** A stock narrowed to the purchases the filter keeps: its row then shows
-   * only those shares, at their own cost. */
-  const stockIn = useCallback(
-    (h: StockHolding): StockHolding | null => {
-      if (!inCategory) return h;
-      if (inCategory.whole("STOCK", h.id)) return h;
-      // "Not in a category": a stock in one as a whole is out entirely.
-      if (catFilter === UNCATEGORISED && !inCategory.holding("STOCK", h.id)) return null;
-      const lots = h.lots.filter((l) => inCategory.lot(l.id));
-      if (!lots.length) return catFilter === UNCATEGORISED && !h.lots.length ? h : null;
-      if (lots.length === h.lots.length) return h;
-      const qty = lots.reduce((t, l) => t + Number(l.quantity), 0);
-      const cost = lots.reduce((t, l) => t + Number(l.quantity) * Number(l.price), 0);
-      return { ...h, lots, quantity: String(qty), avgBuyPrice: String(qty ? cost / qty : 0), partOf: Number(h.quantity) };
-    },
-    [inCategory, catFilter]
-  );
+  // Both filters apply to each purchase, sale, deposit and asset on its own
+  // date and category (src/lib/investment-filters.ts).
+  const filters = useMemo<Filters>(() => ({ range, category: categoryMatcher(categoryCtx.categories, catFilter) }), [range, categoryCtx.categories, catFilter]);
+  const ranged = isRanged(range);
+  const narrowed = isFiltered(filters);
+  const scopeLabel = activeCategory ? activeCategory.name : catFilter === UNCATEGORISED ? "investments not in a category" : null;
+  // The filters in words, for empty tabs.
+  const filterScope = useMemo(() => {
+    if (!narrowed) return null;
+    const d = (x: string) => formatDate(x, { day: "numeric", month: "short", year: "numeric" });
+    const when = range.from && range.to ? `between ${d(range.from)} and ${d(range.to)}` : range.from ? `since ${d(range.from)}` : range.to ? `up to ${d(range.to)}` : "";
+    const who = activeCategory ? `in ${activeCategory.name}` : catFilter === UNCATEGORISED ? "outside every category" : catFilter ? "in this category" : "";
+    return [who, when].filter(Boolean).join(" ");
+  }, [narrowed, range, activeCategory, catFilter]);
   const categoryRow = useMemo(
     () => (activeCategory ? categoryRows([activeCategory], positions, saleLites, toBase, totalValue)[0] : null),
     [activeCategory, positions, saleLites, toBase, totalValue]
   );
 
-  const view = useMemo(() => {
-    let v = { stocks, funds, deposits, otherAssets, sales };
-    if (ranged) {
-      v = {
-        stocks: stocks.filter((h) => h.lots.some((l) => inRange(l.purchaseDate))),
-        funds: funds.filter((f) => (f.lots?.length ? f.lots.some((l) => inRange(l.purchaseDate)) : inRange(f.purchaseDate))),
-        deposits: deposits.filter((d) => inRange(d.startDate)),
-        otherAssets: otherAssets.filter((a) => inRange(a.purchaseDate)),
-        sales: sales.filter((x) => inRange(x.soldOn)),
-      };
-    }
-    if (inCategory) {
-      v = {
-        stocks: v.stocks.map(stockIn).filter((h): h is StockHolding => !!h),
-        funds: v.funds.filter((f) => inCategory.holding("MUTUAL_FUND", f.id)),
-        deposits: v.deposits.filter((d) => inCategory.holding("FIXED_DEPOSIT", d.id)),
-        otherAssets: v.otherAssets.filter((a) => inCategory.holding("OTHER", a.id)),
-        sales: v.sales.filter((x) =>
-          catFilter === UNCATEGORISED
-            ? inCategory.holding(x.kind, x.holdingId) && (x.kind !== "STOCK" || x.lots.some((l) => !l.lotId || inCategory.lot(l.lotId)))
-            : inCategory.holding(x.kind, x.holdingId) || (x.kind === "STOCK" && x.lots.some((l) => l.lotId && inCategory.lot(l.lotId)))
-        ),
-      };
-    }
-    return v;
-  }, [ranged, inRange, inCategory, stockIn, catFilter, stocks, funds, deposits, otherAssets, sales]);
-  const narrowed = ranged || !!inCategory;
+  const view = useMemo(
+    () => (narrowed ? filterInvestments({ stocks, funds, deposits, otherAssets, sales }, filters) : { stocks, funds, deposits, otherAssets, sales }),
+    [narrowed, filters, stocks, funds, deposits, otherAssets, sales]
+  );
+  // The period's activity, from the purchases and sales both filters keep.
+  const period = useMemo(() => (ranged ? periodSummary(view, sales, filters, toBase) : null), [ranged, view, sales, filters, toBase]);
 
   return (
     <div className="space-y-6">
@@ -651,6 +573,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
 
       {period ? (
         <Panel className="settle overflow-hidden p-0">
+          {scopeLabel && <p className="border-b border-border px-5 py-2 text-xs text-muted-foreground">Only {scopeLabel}</p>}
           <div className="grid grid-cols-2 gap-px bg-border lg:grid-cols-4">
             <div className="bg-card p-5">
               <Stat
@@ -720,7 +643,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
       <InvestmentCashStrip />
       {ranged && (
         <p className="-mt-2 text-xs text-muted-foreground">
-          The tabs show holdings with a purchase in this period (each row still shows the whole holding, so editing stays safe) and sales made in it.
+          The tabs show only purchases made in this period{scopeLabel ? ` for ${scopeLabel}` : ""}, and sales made in it. A row shows just those shares at their own cost; its details and editing still cover the whole holding.
         </p>
       )}
       {categoryRow && (
@@ -734,11 +657,16 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
           </span>
           <span className="text-muted-foreground">{categoryRow.allocation.toFixed(1)}% of your portfolio</span>
           <button type="button" onClick={() => setTab("categories")} className="ml-auto cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">How it has grown</button>
-          <span className="basis-full text-xs text-muted-foreground">The totals above are for your whole portfolio; the tabs below show only this category.</span>
+          <span className="basis-full text-xs text-muted-foreground">
+            {ranged
+              ? "This line is what the category holds today. The period figures above and the tabs below show only its purchases and sales in the period."
+              : "The totals above are for your whole portfolio; the tabs below show only this category."}
+          </span>
         </div>
       )}
 
       <SellContext.Provider value={setSellTarget}>
+      <FilterScope.Provider value={filterScope}>
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="stocks" className="cursor-pointer">Stocks ({view.stocks.length})</TabsTrigger>
@@ -779,6 +707,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
           <SalesHistory sales={view.sales} loading={loading} onChanged={load} />
         </TabsContent>
       </Tabs>
+      </FilterScope.Provider>
       </SellContext.Provider>
       <SellDialog target={sellTarget} onOpenChange={(o) => !o && setSellTarget(null)} onSold={load} />
       <ResearchDrawer

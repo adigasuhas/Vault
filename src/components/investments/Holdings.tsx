@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { useSort, SortTh } from "@/components/investments/table-kit";
+import { useSort, SortTh, EmptyOrFiltered } from "@/components/investments/table-kit";
 import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Plus, ScanSearch, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSell } from "@/components/investments/SellDialog";
@@ -60,6 +60,11 @@ export interface FundRow {
   currency: string;
   purchaseDate: string;
   lastNav: string | null;
+  /** The row shows only some purchases (a date filter): the whole fund's units. */
+  partOf?: number;
+  /** The whole fund, when the row shows only some purchases. Redeeming and
+   * details always work on this. */
+  whole?: FundRow;
 }
 
 const pct = (n: number | null) => (n == null || !Number.isFinite(n) ? "–" : `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(2)}%`);
@@ -197,12 +202,14 @@ export function StockTable({
       currency: s.currency,
       price: s.lastPrice != null ? Number(s.lastPrice) : null,
       lots: s.lots.map((l) => ({ id: l.id, quantity: Number(l.quantity), price: Number(l.price), purchaseDate: l.purchaseDate })),
-      ...(s.partOf ? { onlyLots: { label: filtered ? `${filtered.name}'s purchases` : "the purchases shown" } } : { groups: [...groups.values()] }),
+      // A filtered row sells only the purchases it shows, still split by client.
+      groups: [...groups.values()],
+      ...(s.partOf ? { onlyLots: { label: filtered ? `${filtered.name}'s purchases` : "the purchases shown" } } : {}),
     });
   };
 
   if (loading) return <SkeletonBlock className="h-48" />;
-  if (!stocks.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="No stocks yet">Add a holding and its price, value and one-year line show up here.</EmptyState>;
+  if (!stocks.length) return <EmptyOrFiltered noun="stocks"><EmptyState icon={<LineChart className="h-5 w-5" />} title="No stocks yet">Add a holding and its price, value and one-year line show up here.</EmptyState></EmptyOrFiltered>;
 
   return (
     <Panel padded={false} className="overflow-hidden">
@@ -513,10 +520,14 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [funds, q, filter, cat.stamp]
   );
+  const openFund = (() => {
+    const row = funds.find((x) => x.id === open);
+    return row ? row.whole ?? row : null;
+  })();
   const sort = useSort(rows, { name: (r) => r.f.fundName, cat: (r) => cat.key(r.f.id), nav: (r) => r.m.nav, invested: (r) => r.m.invested, current: (r) => r.m.current, pl: (r) => r.m.pl }, "current");
 
   if (loading) return <SkeletonBlock className="h-48" />;
-  if (!funds.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="No funds yet">Add a fund with its scheme code to track its NAV automatically.</EmptyState>;
+  if (!funds.length) return <EmptyOrFiltered noun="funds"><EmptyState icon={<LineChart className="h-5 w-5" />} title="No funds yet">Add a fund with its scheme code to track its NAV automatically.</EmptyState></EmptyOrFiltered>;
 
   return (
     <Panel padded={false} className="overflow-hidden">
@@ -539,7 +550,7 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
             <tr key={f.id} className="border-b border-border/60 last:border-0 transition-colors hover:bg-muted/40">
               <td className="max-w-[280px] py-2.5 pr-3 pl-4">
                 <button onClick={() => setOpen(f.id)} className="block w-full cursor-pointer truncate text-left font-medium hover:underline" title={f.fundName}>{f.fundName}</button>
-                <p className="truncate text-xs text-muted-foreground">{Number(m.units.toFixed(3))} units · NAV {formatMoney(m.nav, f.currency)}{(f.lots?.length ?? 0) > 1 && ` · ${f.lots!.length} buys`}</p>
+                <p className="truncate text-xs text-muted-foreground">{Number(m.units.toFixed(3))}{f.partOf ? ` of ${Number(f.partOf.toFixed(3))}` : ""} units · NAV {formatMoney(m.nav, f.currency)}{(f.lots?.length ?? 0) > 1 && ` · ${f.lots!.length} buys`}</p>
                 {cat.show && <CategoryChips kind="MUTUAL_FUND" id={f.id} name={f.fundName} className="mt-1 md:hidden" />}
               </td>
               {cat.show && <td className="hidden px-3 py-2.5 md:table-cell"><CategoryChips kind="MUTUAL_FUND" id={f.id} name={f.fundName} /></td>}
@@ -566,18 +577,20 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
                     size="icon-sm"
                     title="Redeem"
                     aria-label={`Redeem ${f.fundName}`}
-                    onClick={() =>
+                    onClick={() => {
+                      // Units come out oldest first across the whole fund, whatever the row shows.
+                      const whole = f.whole ?? f;
                       sell?.({
                         kind: "MUTUAL_FUND",
                         holdingId: f.id,
                         name: f.fundName,
                         currency: f.currency,
                         price: f.lastNav != null ? Number(f.lastNav) : null,
-                        lots: f.lots?.length
-                          ? f.lots.map((l) => ({ id: l.id, quantity: Number(l.units), price: Number(l.nav), purchaseDate: l.purchaseDate }))
-                          : [{ id: "", quantity: Number(f.units), price: Number(f.avgNav), purchaseDate: f.purchaseDate }],
-                      })
-                    }
+                        lots: whole.lots?.length
+                          ? whole.lots.map((l) => ({ id: l.id, quantity: Number(l.units), price: Number(l.nav), purchaseDate: l.purchaseDate }))
+                          : [{ id: "", quantity: Number(whole.units), price: Number(whole.avgNav), purchaseDate: whole.purchaseDate }],
+                      });
+                    }}
                   >
                     <Banknote className="h-4 w-4" />
                   </Button>
@@ -592,7 +605,7 @@ export function FundTable({ funds, loading, series, onDelete, onChanged }: { fun
       {rows.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted-foreground">Nothing matches. Try another search or filter.</p>}
       <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
-          {open && funds.find((x) => x.id === open) && <FundBreakdown f={funds.find((x) => x.id === open)!} onChanged={() => onChanged?.()} />}
+          {openFund && <FundBreakdown f={openFund} onChanged={() => onChanged?.()} />}
         </DialogContent>
       </Dialog>
       <ConfirmAction
@@ -789,7 +802,7 @@ export function DepositTable({ deposits, loading, onDelete }: { deposits: Deposi
   const sort = useSort(rows, { bank: (r) => r.d.bank, cat: (r) => cat.key(r.d.id), rate: (r) => r.m.rate, principal: (r) => r.m.principal, value: (r) => r.m.value, maturity: (r) => r.d.maturityDate }, "maturity", "asc");
 
   if (loading) return <SkeletonBlock className="h-40" />;
-  if (!deposits.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="No fixed deposits yet">Add one to watch the interest build up until it matures.</EmptyState>;
+  if (!deposits.length) return <EmptyOrFiltered noun="fixed deposits"><EmptyState icon={<LineChart className="h-5 w-5" />} title="No fixed deposits yet">Add one to watch the interest build up until it matures.</EmptyState></EmptyOrFiltered>;
   const detail = open ? deposits.find((x) => x.id === open) : null;
   const dm = detail ? depositMetrics(detail, now) : null;
 
@@ -939,7 +952,7 @@ export function AssetTable({ assets, loading, typeLabel, onDelete, onChanged }: 
   const sort = useSort(rows, { name: (r) => r.a.name, cat: (r) => cat.key(r.a.id), cost: (r) => r.cost, cur: (r) => r.cur, pl: (r) => r.pl }, "cur");
 
   if (loading) return <SkeletonBlock className="h-40" />;
-  if (!assets.length) return <EmptyState icon={<LineChart className="h-5 w-5" />} title="Nothing here yet">Gold, property, crypto, collectibles: anything with a value you want counted.</EmptyState>;
+  if (!assets.length) return <EmptyOrFiltered noun="other assets"><EmptyState icon={<LineChart className="h-5 w-5" />} title="Nothing here yet">Gold, property, crypto, collectibles: anything with a value you want counted.</EmptyState></EmptyOrFiltered>;
   const detail = open ? assets.find((x) => x.id === open) : null;
 
   async function saveValue() {

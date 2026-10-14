@@ -8,6 +8,7 @@ import { formatCompactMoney, formatMoney } from "@/lib/currencies";
 import { formatDate } from "@/lib/format";
 import { tooltipStyle } from "@/lib/chart-colors";
 import { categoryCounts, categoryGrowth, categoryRows, linkKey, membersOf, uncategorised, type CategoryCount, type CategoryLite, type CategoryRow, type InvestmentKind, type Position, type SaleLite } from "@/lib/category-metrics";
+import { UNCATEGORISED } from "@/lib/investment-filters";
 import { EmptyState, Panel, SkeletonBlock } from "@/components/app/PageHeader";
 import { ConfirmAction } from "@/components/ConfirmAction";
 import { Button } from "@/components/ui/button";
@@ -34,7 +35,7 @@ export type LinkTarget = InvestmentKind | "STOCK_LOT";
 export const linkCount = (c: Category) => c.links.length + (c.lotLinks?.length ?? 0);
 
 /** Filter value: a category id, "__none__" (in no category) or "" (all). */
-export const UNCATEGORISED = "__none__";
+export { UNCATEGORISED };
 
 interface Ctx {
   categories: Category[];
