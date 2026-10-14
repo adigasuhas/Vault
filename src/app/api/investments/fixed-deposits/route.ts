@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fundPurchase } from "@/lib/investment-funding";
+import { fundPurchase, fundingFrom } from "@/lib/investment-funding";
+import { claimRequest, lostRace, requestSeen, settleRequest } from "@/lib/request-keys";
 import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
@@ -31,6 +32,8 @@ export async function POST(req: NextRequest) {
     const { body: errBody, status } = toErrorResponse(err);
     return NextResponse.json(errBody, { status });
   }
+  const replay = await requestSeen(session.userId, input.idempotencyKey);
+  if (replay) return NextResponse.json({ duplicate: true, id: replay.resultId }, { status: 200 });
 
   if (input.maturityDate <= input.startDate) {
     return NextResponse.json({ error: "Maturity date must be after the start date." }, { status: 422 });
@@ -43,6 +46,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const deposit = await db.$transaction(async (tx: Tx) => {
+      await claimRequest(tx, session.userId, input.idempotencyKey, "DEPOSIT_PURCHASE");
       const d = await tx.fixedDeposit.create({
         data: {
           userId: session.userId,
@@ -60,12 +64,15 @@ export async function POST(req: NextRequest) {
         session.userId,
         `DEPOSIT:${d.id}`,
         { cost: input.principal, currency: input.currency, date: input.startDate, label: `${input.bank} fixed deposit` },
-        { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount }
+        fundingFrom(input)
       );
+      await settleRequest(tx, session.userId, input.idempotencyKey, d.id);
       return d;
     });
     return NextResponse.json({ deposit }, { status: 201 });
   } catch (err) {
+    const won = await lostRace(err, session.userId, input.idempotencyKey);
+    if (won) return NextResponse.json({ duplicate: true, id: won.resultId }, { status: 200 });
     const { body: errBody, status } = toErrorResponse(err);
     return NextResponse.json(errBody, { status });
   }

@@ -243,14 +243,19 @@ export const unallocatedSchema = z.object({
 const fundingFields = {
   paidFromAccountId: zId.optional(),
   budgetCategoryId: zId.optional(),
-  fromSaleId: zId.optional(),
   paidAmount: zMoney.optional(),
+  /** Part of the total paid from investment cash, in the investment's currency. */
+  fromCash: zMoney.optional(),
+  /** One per add form session, so a double submit or retry records it once. */
+  idempotencyKey: z.string().trim().min(8).max(80).optional(),
 };
 export const createStockSchema = z.object({
   ticker: z.string().trim().min(1).max(30),
   exchange: z.string().trim().max(10).optional(),
   quantity: zPositive,
   price: zPositive,
+  /** Brokerage, taxes and fees on the purchase: part of what it cost. */
+  charges: zMoneyNonNegative.optional(),
   currency: CURRENCY,
   purchaseDate: zIsoDate,
   ...fundingFields,
@@ -294,6 +299,8 @@ export const createFundSchema = z.object({
   schemeCode: z.string().trim().max(20).optional(),
   units: zPositive,
   avgNav: zPositive,
+  /** Stamp duty or other charges on the purchase: part of what it cost. */
+  charges: zMoneyNonNegative.optional(),
   currency: CURRENCY,
   purchaseDate: zIsoDate,
   ...fundingFields,
@@ -369,8 +376,13 @@ const saleCommon = {
   holdingId: zId,
   charges: zMoneyNonNegative.default(0),
   soldOn: zIsoDate,
-  // Omitted: the proceeds are kept for reinvestment rather than credited.
+  /** Where the net proceeds go: investment cash (default), an account, or
+   * nowhere (tracking only). Without it, an accountId means ACCOUNT. */
+  proceeds: z.enum(["INVESTMENT_CASH", "ACCOUNT", "TRACKING"]).optional(),
+  // The account credited, when proceeds is ACCOUNT.
   accountId: zId.optional(),
+  /** One per sell form session, so a double submit records the sale once. */
+  idempotencyKey: z.string().trim().min(8).max(80).optional(),
   // Only when the account's currency differs from the holding's: what arrived.
   creditedAmount: zMoney.optional(),
   note: z.string().trim().max(500).optional(),
@@ -385,8 +397,21 @@ export const createSaleSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("OTHER"), amount: zMoney, ...saleCommon }),
 ]);
 export type CreateSaleInput = z.infer<typeof createSaleSchema>;
-export const reinvestSchema = z.object({ amount: zMoney, into: z.string().trim().min(1, "Say what it went into.").max(160), date: zIsoDate, note: z.string().trim().max(300).optional() });
-export const creditProceedsSchema = z.object({ accountId: zId, date: zIsoDate, creditedAmount: zMoney.optional() });
+
+// ---- Investment cash ----
+/** Moving money between an account and investment cash. `amount` leaves the
+ * source; `arrivedAmount` is what reaches the other side when currencies differ. */
+export const cashMoveSchema = z.object({
+  direction: z.enum(["IN", "OUT"]),
+  accountId: zId,
+  /** Investment cash currency (defaults to the account's when adding). */
+  currency: CURRENCY.optional(),
+  amount: zMoney,
+  arrivedAmount: zMoney.optional(),
+  date: zIsoDate,
+  note: z.string().trim().max(200).optional(),
+  idempotencyKey: z.string().trim().min(8).max(80).optional(),
+});
 
 // ---- Settings / FX ----
 export const patchSettingsSchema = z.object({

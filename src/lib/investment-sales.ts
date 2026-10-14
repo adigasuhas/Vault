@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { Prisma, type InvestmentKind } from "@prisma/client";
 import { ValidationError, roundMoney } from "@/lib/validate";
 import { audit, postInvestmentSale, reverseInvestmentSale, type Tx } from "@/lib/ledger";
+import { postCash, reverseCash } from "@/lib/investment-cash";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
 import { recomputeFundFromLots } from "@/lib/funds";
 import { dateOnly } from "@/lib/dates";
@@ -11,14 +12,22 @@ import type { CreateSaleInput } from "@/lib/schemas";
 /**
  * Selling investments.
  *
- * A sale shrinks a holding (or removes it when nothing is left), records an
- * InvestmentSale with the purchases it used up, and credits the net proceeds
- * to an account through an INVESTMENT_SALE ledger entry. Shares and fund
- * units are matched first in, first out: the oldest purchases are sold first.
- * Deposits and other assets are sold whole.
+ * A sale shrinks a holding (or removes it when nothing is left) and records
+ * an InvestmentSale with the purchases it used up. Its net proceeds (gross
+ * minus charges) go where the user says:
  *
- * Undoing a sale reverses the ledger entry and puts the purchases back, so the
- * history keeps both the sale and its undo.
+ *  - INVESTMENT_CASH (the default): into investment cash, ready to reinvest
+ *    or withdraw (lib/investment-cash);
+ *  - ACCOUNT: credited to an account through an INVESTMENT_SALE ledger entry;
+ *  - TRACKING: nowhere. The portfolio and realised profit update, but no
+ *    money appears in VAULT, because none changed hands that VAULT tracks.
+ *
+ * Realised profit is net proceeds minus the cost of the purchases sold, the
+ * same whichever way the money went. Shares and fund units are matched first
+ * in, first out. Deposits and other assets are sold whole.
+ *
+ * Undoing a sale takes its proceeds back from wherever they went and puts
+ * the purchases back, so the history keeps both the sale and its undo.
  */
 
 export type { SoldLot } from "@/lib/fifo";
@@ -178,18 +187,48 @@ async function prepare(tx: Tx, userId: string, input: CreateSaleInput): Promise<
   }
 }
 
-export async function recordSale(userId: string, input: CreateSaleInput) {
+export type ProceedsChoice = "INVESTMENT_CASH" | "ACCOUNT" | "TRACKING";
+
+/** Where the proceeds go when the request doesn't say: an account if one is
+ * named (older clients), otherwise investment cash. */
+export function proceedsChoice(input: Pick<CreateSaleInput, "proceeds" | "accountId">): ProceedsChoice {
+  return input.proceeds ?? (input.accountId ? "ACCOUNT" : "INVESTMENT_CASH");
+}
+
+/**
+ * Records a sale. A repeated request with the same idempotency key returns
+ * the sale already recorded instead of a second one.
+ */
+export async function recordSale(userId: string, input: CreateSaleInput): Promise<{ sale: Awaited<ReturnType<typeof db.investmentSale.create>>; replay: boolean }> {
+  if (input.idempotencyKey) {
+    const seen = await db.investmentSale.findFirst({ where: { userId, idempotencyKey: input.idempotencyKey } });
+    if (seen) return { sale: seen, replay: true };
+  }
+  try {
+    return { sale: await recordSaleOnce(userId, input), replay: false };
+  } catch (e) {
+    // Two copies of the same request racing: the other one won.
+    if (input.idempotencyKey && e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      const seen = await db.investmentSale.findFirst({ where: { userId, idempotencyKey: input.idempotencyKey } });
+      if (seen) return { sale: seen, replay: true };
+    }
+    throw e;
+  }
+}
+
+async function recordSaleOnce(userId: string, input: CreateSaleInput) {
   return db.$transaction(async (tx: Tx) => {
     assertNotFuture(input.soldOn);
+    const proceeds = proceedsChoice(input);
+    if (proceeds === "ACCOUNT" && !input.accountId) throw new ValidationError("Choose the account the money goes to.");
     const p = await prepare(tx, userId, input);
 
     const charges = input.charges ?? 0;
     const net = roundMoney(p.gross - charges);
     if (!(net > 0)) throw new ValidationError("Charges can't be as much as the sale amount.");
 
-    // No account: the proceeds are kept for reinvestment (see proceedsLeft).
-    const account = input.accountId ? await tx.account.findFirst({ where: { id: input.accountId, userId } }) : null;
-    if (input.accountId && !account) throw new ValidationError("Choose the account the money went to.");
+    const account = proceeds === "ACCOUNT" ? await tx.account.findFirst({ where: { id: input.accountId!, userId } }) : null;
+    if (proceeds === "ACCOUNT" && !account) throw new ValidationError("Choose the account the money went to.");
     if (account?.status === "CLOSED") throw new ValidationError(`${account.name} is closed. Pick an open account.`);
     let credited = net;
     if (account && account.currency !== p.currency) {
@@ -217,12 +256,14 @@ export async function recordSale(userId: string, input: CreateSaleInput) {
         firstBoughtOn: p.firstBoughtOn,
         soldOn: input.soldOn,
         closedPosition: p.closedPosition,
+        proceeds,
         accountId: account?.id ?? null,
         creditedAmount: account ? credited : null,
         creditedNet: account ? net : null,
         lots: p.lots as unknown as Prisma.InputJsonValue,
         snapshot: p.snapshot,
         note: input.note || null,
+        idempotencyKey: input.idempotencyKey ?? null,
       },
     });
     await p.apply(tx);
@@ -236,30 +277,45 @@ export async function recordSale(userId: string, input: CreateSaleInput) {
         description: p.label,
       });
     }
+    if (proceeds === "INVESTMENT_CASH") {
+      await postCash(tx, userId, { currency: p.currency, type: "SALE_PROCEEDS", amount: net, date: input.soldOn, description: p.label, saleId: sale.id });
+    }
     await audit(
       tx,
       userId,
       "InvestmentSale",
       sale.id,
       "SELL",
-      account ? `${p.label}; ${credited} ${account.currency} to ${account.name}` : `${p.label}; ${net} ${p.currency} kept for reinvestment`
+      account
+        ? `${p.label}; ${credited} ${account.currency} to ${account.name}`
+        : proceeds === "INVESTMENT_CASH"
+          ? `${p.label}; ${net} ${p.currency} to investment cash`
+          : `${p.label}; tracking only, no money moved`
     );
     return sale;
   });
 }
 
-/** Undoes a sale: takes the money back out of the account and restores the
- * purchases it used, recreating the holding if the sale had closed it. */
+/** Undoes a sale: takes the proceeds back from the account or investment
+ * cash they went to (refused if they've since been spent and the balance
+ * can't cover them) and restores the purchases it used, recreating the
+ * holding if the sale had closed it. A tracking-only sale has no money to
+ * take back. */
 export async function undoSale(userId: string, saleId: string) {
   return db.$transaction(async (tx: Tx) => {
     const sale = await tx.investmentSale.findFirst({ where: { id: saleId, userId } });
     if (!sale) throw new ValidationError("Sale not found.");
     if (sale.reversedAt) throw new ValidationError("This sale was already undone.");
-    if (reinvestedTotal(sale) > 0) {
-      throw new ValidationError("Some of this sale's proceeds are marked as reinvested. Remove those first, then undo the sale.");
-    }
-    // Proceeds kept for reinvestment never reached an account: nothing to take back.
+    // Claimed first, so two undo requests at once can't both run.
+    const claimed = await tx.investmentSale.updateMany({ where: { id: sale.id, reversedAt: null }, data: { reversedAt: new Date() } });
+    if (!claimed.count) throw new ValidationError("This sale was already undone.");
     if (sale.accountId) await reverseInvestmentSale(tx, userId, sale.id, `Undo: ${sale.name} sale`);
+    const cash = await tx.investmentCashEntry.findMany({ where: { userId, saleId: sale.id, type: "SALE_PROCEEDS", reversedAt: null } });
+    for (const c of cash) {
+      await reverseCash(tx, userId, c.id, `Undo: ${sale.name} sale`, (b, n) =>
+        `This sale put ${n.toFixed(2)} ${c.currency} into investment cash, and only ${b.toFixed(2)} is left there now. Add money to investment cash, or undo what it paid for, then undo the sale.`
+      );
+    }
 
     const lots = sale.lots as unknown as SoldLot[];
     const snap = sale.snapshot as Record<string, string | boolean | null>;
@@ -361,7 +417,7 @@ export async function undoSale(userId: string, saleId: string) {
         break;
       }
     }
-    const undone = await tx.investmentSale.update({ where: { id: sale.id }, data: { reversedAt: new Date() } });
+    const undone = await tx.investmentSale.findUniqueOrThrow({ where: { id: sale.id } });
     await audit(tx, userId, "InvestmentSale", sale.id, "UNDO_SELL", `Undid sale of ${sale.name}`);
     return undone;
   });
@@ -375,82 +431,14 @@ export async function listSales(userId: string) {
   });
 }
 
-// ---------------------------------------------------------------- reinvestment
+// ------------------------------------------------------------ legacy helpers
 
+/** Reinvestments recorded before investment cash existed (sale JSON). Kept
+ * for reading old exports; investment cash entries are the record now. */
 export interface Reinvestment {
   amount: number;
   into: string;
   date: string;
   note?: string | null;
-}
-
-export function reinvestedTotal(sale: { reinvestments: unknown }) {
-  return roundMoney(((sale.reinvestments as Reinvestment[] | null) ?? []).reduce((t, r) => t + Number(r.amount), 0));
-}
-
-/** Proceeds of a sale still waiting to be reinvested (sale currency): kept
- * with the investments, never credited to an account and not yet used. */
-export function proceedsLeft(sale: { netProceeds: unknown; creditedNet: unknown; reinvestments: unknown; reversedAt: Date | null }) {
-  if (sale.reversedAt) return 0;
-  return Math.max(0, roundMoney(Number(sale.netProceeds) - Number(sale.creditedNet ?? 0) - reinvestedTotal(sale)));
-}
-
-/** Records that some kept proceeds went into another investment (added on
- * the Investments page as usual). No money moves: it was never in an account. */
-export async function markReinvested(userId: string, saleId: string, input: { amount: number; into: string; date: Date; note?: string }) {
-  return db.$transaction(async (tx: Tx) => {
-    const sale = await tx.investmentSale.findFirst({ where: { id: saleId, userId } });
-    if (!sale) throw new ValidationError("Sale not found.");
-    const left = proceedsLeft(sale);
-    if (input.amount > left + 0.004) throw new ValidationError(`Only ${left.toFixed(2)} ${sale.currency} of this sale is waiting to be reinvested.`);
-    const list = [...((sale.reinvestments as unknown as Reinvestment[]) ?? []), { amount: roundMoney(input.amount), into: input.into, date: dateOnly(input.date).toISOString(), note: input.note ?? null }];
-    const updated = await tx.investmentSale.update({ where: { id: sale.id }, data: { reinvestments: list as unknown as Prisma.InputJsonValue } });
-    await audit(tx, userId, "InvestmentSale", sale.id, "REINVEST", `${input.amount} ${sale.currency} of the ${sale.name} sale reinvested in ${input.into}`);
-    return updated;
-  });
-}
-
-/** Removes a reinvestment record (e.g. entered by mistake); the amount is
- * waiting to be reinvested again. */
-export async function removeReinvestment(userId: string, saleId: string, index: number) {
-  return db.$transaction(async (tx: Tx) => {
-    const sale = await tx.investmentSale.findFirst({ where: { id: saleId, userId } });
-    if (!sale) throw new ValidationError("Sale not found.");
-    const list = [...((sale.reinvestments as unknown as Reinvestment[]) ?? [])];
-    if (!list[index]) throw new ValidationError("That reinvestment isn't on record.");
-    const [gone] = list.splice(index, 1);
-    const updated = await tx.investmentSale.update({ where: { id: sale.id }, data: { reinvestments: list as unknown as Prisma.InputJsonValue } });
-    await audit(tx, userId, "InvestmentSale", sale.id, "REINVEST_REMOVE", `Removed ${gone.amount} ${sale.currency} reinvested in ${gone.into}`);
-    return updated;
-  });
-}
-
-/** Moves what's left of kept proceeds into an account (they weren't
- * reinvested after all): booked to the ledger like a sale's credit. */
-export async function creditProceeds(userId: string, saleId: string, input: { accountId: string; date: Date; creditedAmount?: number }) {
-  return db.$transaction(async (tx: Tx) => {
-    const sale = await tx.investmentSale.findFirst({ where: { id: saleId, userId } });
-    if (!sale) throw new ValidationError("Sale not found.");
-    if (sale.accountId) throw new ValidationError("This sale's proceeds already went to an account.");
-    const left = proceedsLeft(sale);
-    if (!(left > 0)) throw new ValidationError("Nothing is left to move: it's all been reinvested.");
-    const account = await tx.account.findFirst({ where: { id: input.accountId, userId } });
-    if (!account) throw new ValidationError("Account not found.");
-    let credited = left;
-    if (account.currency !== sale.currency) {
-      if (!input.creditedAmount) throw new ValidationError(`${account.name} is in ${account.currency}. Enter the ${account.currency} amount that arrived.`);
-      credited = input.creditedAmount;
-    }
-    const updated = await tx.investmentSale.update({ where: { id: sale.id }, data: { accountId: account.id, creditedAmount: credited, creditedNet: left } });
-    await postInvestmentSale(tx, userId, {
-      saleId: sale.id,
-      accountId: account.id,
-      amount: credited,
-      currency: account.currency,
-      date: dateOnly(input.date),
-      description: `Proceeds from the ${sale.name} sale`,
-    });
-    await audit(tx, userId, "InvestmentSale", sale.id, "CREDIT_PROCEEDS", `${credited} ${account.currency} of the ${sale.name} sale moved to ${account.name}`);
-    return updated;
-  });
+  ref?: string;
 }

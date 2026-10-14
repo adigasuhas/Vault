@@ -11,6 +11,8 @@ const ADD_TO_EDIT: Record<string, string[]> = {
   currency: ["currency"],
   quantity: ["lots.quantity"],
   price: ["lots.price"],
+  // Purchase charges are folded into the price per share, so they're edited there.
+  charges: ["lots.price"],
   purchaseDate: ["lots.purchaseDate"],
   categoryIds: ["categoryIds", "lots.categoryIds"],
   newNames: ["newNames", "lots.newNames"],
@@ -19,7 +21,7 @@ const ADD_TO_EDIT: Record<string, string[]> = {
   targetPrice: ["alerts"],
   stopLossPrice: ["alerts"],
 };
-const FUNDING = ["paidFromAccountId", "budgetCategoryId", "fromSaleId", "paidAmount"];
+const FUNDING = ["paidFromAccountId", "budgetCategoryId", "paidAmount", "fromCash", "idempotencyKey"];
 
 describe("stock edit schema", () => {
   it("covers every field of the add form", () => {

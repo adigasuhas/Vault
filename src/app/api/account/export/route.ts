@@ -40,6 +40,7 @@ export async function GET() {
     notebookEntries,
     investmentSales,
     investmentCategories,
+    investmentCash,
   ] = await Promise.all([
     db.user.findUnique({ where: { id: userId } }),
     db.account.findMany({ where: { userId } }),
@@ -65,6 +66,7 @@ export async function GET() {
     db.notebookEntry.findMany({ where: { userId }, orderBy: { date: "asc" } }),
     db.investmentSale.findMany({ where: { userId }, orderBy: { soldOn: "asc" } }),
     db.investmentCategory.findMany({ where: { userId }, include: { links: { select: { kind: true, holdingId: true } }, lotLinks: { select: { lotId: true } } }, orderBy: { name: "asc" } }),
+    db.investmentCashEntry.findMany({ where: { userId }, orderBy: [{ date: "asc" }, { createdAt: "asc" }] }),
   ]);
 
   const profile = user
@@ -103,6 +105,7 @@ export async function GET() {
     otherAssets,
     investmentSales,
     investmentCategories,
+    investmentCash,
     exchangeRates,
     loans,
     monthlyPlans,

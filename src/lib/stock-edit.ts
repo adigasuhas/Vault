@@ -52,7 +52,7 @@ export async function editStock(tx: Tx, userId: string, id: string, input: Stock
     const refs = existing.lots.map((l) => `STOCK_LOT:${l.id}`);
     const [paid, reinvested, sold] = await Promise.all([
       tx.ledgerEntry.count({ where: { userId, investmentRef: { in: refs }, type: "INVESTMENT_PURCHASE", reversedAt: null } }),
-      refs.length ? tx.investmentSale.count({ where: { userId, OR: refs.map((ref) => ({ reinvestments: { array_contains: [{ ref }] } })) } }) : 0,
+      tx.investmentCashEntry.count({ where: { userId, investmentRef: { in: refs }, type: "PURCHASE", reversedAt: null } }),
       tx.investmentSale.count({ where: { userId, kind: "STOCK", holdingId: id, reversedAt: null } }),
     ]);
     if (paid + reinvested > 0) {

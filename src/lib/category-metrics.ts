@@ -258,3 +258,25 @@ export function categoryGrowth(
   });
   return { points, charted, skipped, historyFrom };
 }
+
+export interface CategoryCount {
+  /** Distinct holdings with shares in the category (a stock split between
+   * clients counts once for each client it has shares for). */
+  holdings: number;
+  byKind: Partial<Record<InvestmentKind, number>>;
+  /** Stock shares in the category. */
+  shares: number;
+}
+
+/** How many current holdings each category has, from the holdings
+ * themselves: sold, closed or deleted ones don't count. */
+export function categoryCounts(categories: Pick<CategoryLite, "id" | "links" | "lotLinks">[], positions: Position[]) {
+  const count = (members: Position[]): CategoryCount => ({
+    holdings: members.length,
+    byKind: members.reduce<Partial<Record<InvestmentKind, number>>>((m, p) => ({ ...m, [p.kind]: (m[p.kind] ?? 0) + 1 }), {}),
+    shares: members.filter((p) => p.kind === "STOCK").reduce((t, p) => t + (p.part?.qty ?? p.lots?.reduce((x, l) => x + l.qty, 0) ?? 0), 0),
+  });
+  const out = new Map<string, CategoryCount>();
+  for (const c of categories) out.set(c.id, count(membersOf(c, positions)));
+  return { byCategory: out, uncategorised: count(uncategorised(categories as CategoryLite[], positions)) };
+}

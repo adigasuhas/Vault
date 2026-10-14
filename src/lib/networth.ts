@@ -3,6 +3,7 @@ import { createFxConverter, type FxConverter } from "@/lib/fx";
 import { computePortfolioValue } from "@/lib/portfolio";
 import { fdCurrentValue } from "@/lib/investments";
 import { signedAmount } from "@/lib/ledger";
+import { cashSigned } from "@/lib/investment-cash";
 import { loanLiabilities } from "@/lib/loan-balance";
 import type { SoldLot } from "@/lib/investment-sales";
 
@@ -88,15 +89,17 @@ export interface NetWorthPoint {
 
 /** Cost-basis value of every holding that existed on or before `asOf`. */
 async function reconstructInvestmentsAt(userId: string, asOf: Date, fx: FxConverter): Promise<number> {
-  const [stocks, funds, deposits, other, sales] = await Promise.all([
+  const [stocks, funds, deposits, other, sales, cash] = await Promise.all([
     db.stockHolding.findMany({ where: { userId }, include: { lots: true } }),
     db.mutualFundHolding.findMany({ where: { userId }, include: { lots: true } }),
     db.fixedDeposit.findMany({ where: { userId } }),
     db.otherAsset.findMany({ where: { userId } }),
     db.investmentSale.findMany({ where: { userId, reversedAt: null } }),
+    db.investmentCashEntry.findMany({ where: { userId, date: { lte: asOf } }, select: { type: true, amount: true, currency: true } }),
   ]);
 
-  let total = 0;
+  // Investment cash held on `asOf` (what had arrived and not yet left).
+  let total = cash.reduce((sum, e) => sum + fx.convert(cashSigned(e.type, Number(e.amount)), e.currency), 0);
   for (const s of stocks) {
     const held = s.lots.filter((l) => l.purchaseDate <= asOf);
     const value = held.reduce((sum, l) => sum + Number(l.quantity) * Number(l.price), 0);

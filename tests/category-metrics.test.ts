@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { categoryGrowth, categoryRows, uncategorised, type CategoryLite, type Position, type SaleLite } from "@/lib/category-metrics";
+import { categoryCounts, categoryGrowth, categoryRows, uncategorised, type CategoryLite, type Position, type SaleLite } from "@/lib/category-metrics";
 import { fdCurrentValue } from "@/lib/investments";
 
 const toBase = (n: number, c: string) => (c === "USD" ? n * 80 : n);
@@ -195,5 +195,25 @@ describe("purchase-level categories (clients)", () => {
     const g = categoryGrowth(b.positions, series, toBase, {}, "2026-10-05");
     expect(g.points[0].d).toBe("2026-10-01");
     expect(g.points.at(-1)).toEqual({ d: "2026-10-05", value: 1500, invested: 1000 });
+  });
+});
+
+describe("categoryCounts", () => {
+  const stock: Position = { kind: "STOCK", id: "s", name: "A", currency: "INR", invested: 0, value: 0, lots: [{ id: "l1", qty: 100, cost: 0, date: "2026-01-01" }, { id: "l2", qty: 50, cost: 0, date: "2026-02-01" }] };
+  const fund: Position = { kind: "MUTUAL_FUND", id: "f", name: "F", currency: "INR", invested: 0, value: 0 };
+  const fd: Position = { kind: "FIXED_DEPOSIT", id: "d", name: "D", currency: "INR", invested: 0, value: 0 };
+  const cats = [
+    { id: "a", links: [{ kind: "MUTUAL_FUND" as const, holdingId: "f" }, { kind: "STOCK" as const, holdingId: "gone" }], lotLinks: [{ lotId: "l1" }, { lotId: "sold-lot" }] },
+    { id: "b", links: [], lotLinks: [{ lotId: "l2" }] },
+    { id: "empty", links: [], lotLinks: [] },
+  ];
+  const r = categoryCounts(cats, [stock, fund, fd]);
+  it("counts current holdings, not links to sold or deleted ones", () => {
+    expect(r.byCategory.get("a")).toEqual({ holdings: 2, byKind: { STOCK: 1, MUTUAL_FUND: 1 }, shares: 100 });
+    expect(r.byCategory.get("b")).toEqual({ holdings: 1, byKind: { STOCK: 1 }, shares: 50 });
+  });
+  it("handles empty categories and the rest", () => {
+    expect(r.byCategory.get("empty")).toEqual({ holdings: 0, byKind: {}, shares: 0 });
+    expect(r.uncategorised).toEqual({ holdings: 1, byKind: { FIXED_DEPOSIT: 1 }, shares: 0 });
   });
 });

@@ -36,15 +36,20 @@ export interface SaleRow {
   soldOn: string;
   closedPosition: boolean;
   creditedAmount: string | null;
-  /** Kept-for-reinvestment proceeds still unused (sale currency). */
-  proceedsLeft: number;
-  reinvestments: { amount: number; into: string; date: string; note?: string | null }[];
+  /** Where the net proceeds went. */
+  proceeds: "ACCOUNT" | "INVESTMENT_CASH" | "TRACKING";
   lots: SoldLot[];
   snapshot: Record<string, unknown>;
   note: string | null;
   reversedAt: string | null;
-  /** Null: the proceeds were kept for reinvestment. */
+  /** Set when the proceeds were credited to an account. */
   account: { id: string; name: string; currency: string; status: string } | null;
+}
+
+/** Where a sale's proceeds went, in a few words. */
+export function proceedsLabel(s: Pick<SaleRow, "proceeds" | "account">) {
+  if (s.account) return s.account.name;
+  return s.proceeds === "TRACKING" ? "Tracking only" : "Investment cash";
 }
 
 const KINDS = [
@@ -101,13 +106,19 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
       toast.error(data.error || "Couldn't undo the sale.");
       return;
     }
-    toast.success(s.account ? `Undone. ${s.name} is back in your portfolio and the money left ${s.account.name}.` : `Undone. ${s.name} is back in your portfolio.`);
+    toast.success(
+      s.account
+        ? `Undone. ${s.name} is back in your portfolio and the money left ${s.account.name}.`
+        : s.proceeds === "INVESTMENT_CASH"
+          ? `Undone. ${s.name} is back in your portfolio and its proceeds left investment cash.`
+          : `Undone. ${s.name} is back in your portfolio.`
+    );
     setOpen(null);
     onChanged();
   }
 
   function exportCsv() {
-    const head = ["Date", "Type", "Investment", "Detail", "Quantity", "Price", "Sale value", "Charges", "Received", "Cost", "Profit/loss", "Return %", "Currency", "First bought", "Held", "Credited to", "Credited amount", "Account currency", "Status", "Note"];
+    const head = ["Date", "Type", "Investment", "Detail", "Quantity", "Price", "Sale value", "Charges", "Received", "Cost", "Profit/loss", "Return %", "Currency", "First bought", "Held", "Proceeds to", "Credited amount", "Account currency", "Status", "Note"];
     const esc = (v: unknown) => {
       const t = v == null ? "" : String(v);
       return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
@@ -117,7 +128,7 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
         s.soldOn.slice(0, 10), KIND_LABEL[s.kind], s.name, s.detail, s.quantity ? Number(s.quantity) : "", s.price ? Number(s.price) : "",
         Number(s.grossProceeds), Number(s.charges), Number(s.netProceeds), Number(s.costBasis), Number(s.realizedPnl),
         Number(s.costBasis) > 0 ? ((Number(s.realizedPnl) / Number(s.costBasis)) * 100).toFixed(2) : "", s.currency,
-        s.firstBoughtOn.slice(0, 10), heldFor(s.firstBoughtOn, s.soldOn), s.account?.name ?? (s.proceedsLeft > 0 ? "Kept to reinvest" : "Reinvested"), s.creditedAmount != null ? Number(s.creditedAmount) : "", s.account?.currency ?? "",
+        s.firstBoughtOn.slice(0, 10), heldFor(s.firstBoughtOn, s.soldOn), proceedsLabel(s), s.creditedAmount != null ? Number(s.creditedAmount) : "", s.account?.currency ?? "",
         s.reversedAt ? "Undone" : "Done", s.note,
       ].map(esc).join(",")
     );
@@ -133,35 +144,19 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
   if (!sales.length)
     return (
       <EmptyState icon={<History className="h-5 w-5" />} title="Nothing sold or closed yet">
-        Sell shares, redeem fund units, close a deposit or sell an asset from its row in the other tabs. The money goes to an account you choose, or stays here to be reinvested, and the trade shows up with its profit or loss.
+        Sell shares, redeem fund units, close a deposit or sell an asset from its row in the other tabs. Keep the money for reinvesting, send it to an account, or record the sale for tracking only. Each trade shows up here with its profit or loss.
       </EmptyState>
     );
 
-  const waiting = sales.filter((s) => !s.reversedAt && s.proceedsLeft > 0.004);
-  const waitingTotal = waiting.reduce((sum, s) => sum + toPrimary(s.proceedsLeft, s.currency), 0);
-
   return (
     <div className="space-y-4">
-      {waiting.length > 0 && (
-        <Panel className="flex flex-wrap items-center justify-between gap-3 border-brass/30 bg-brass-soft/40">
-          <div>
-            <p className="text-sm font-medium">{formatMoney(Math.round(waitingTotal), primary)} from sales is waiting to be reinvested</p>
-            <p className="text-xs text-muted-foreground">It counts in your net worth until you mark it reinvested or move it to an account. Open a sale below to do either.</p>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {waiting.map((s) => (
-              <Button key={s.id} size="sm" variant="outline" onClick={() => setOpen(s)}>{s.name} · {formatMoney(s.proceedsLeft, s.currency)}</Button>
-            ))}
-          </div>
-        </Panel>
-      )}
       <Panel className="overflow-hidden p-0">
         <div className="grid grid-cols-2 gap-px bg-border lg:grid-cols-4">
           <div className="bg-card p-5">
             <Stat label="Realised profit / loss" value={<span className={tone(pnl)}>{signed(Math.round(pnl), primary)}</span>} hint={<><Equivalent both signed value={pnl} currency={primary} className="block text-xs" />{cost > 0 && <span className="block">{pct(pnl, cost)} on what was sold</span>}</>} />
           </div>
           <div className="bg-card p-5"><Stat label="Gains · losses" value={<span className="text-base"><span className="text-positive">+{formatMoney(Math.round(gains), primary)}</span> <span className="text-muted-foreground">·</span> <span className={tone(losses)}>{signed(Math.round(losses), primary)}</span></span>} hint={<><Equivalent both value={gains} currency={primary} /> <span className="text-muted-foreground">·</span> <Equivalent both value={losses} currency={primary} /></>} /></div>
-          <div className="bg-card p-5"><Stat label="Received" value={formatMoney(Math.round(total((s) => s.netProceeds)), primary)} hint={<><Equivalent both value={total((s) => s.netProceeds)} currency={primary} className="block text-xs" /><span className="block">After {formatMoney(Math.round(total((s) => s.charges)), primary)} in charges</span></>} /></div>
+          <div className="bg-card p-5"><Stat label="Net proceeds" value={formatMoney(Math.round(total((s) => s.netProceeds)), primary)} hint={<><Equivalent both value={total((s) => s.netProceeds)} currency={primary} className="block text-xs" /><span className="block">After {formatMoney(Math.round(total((s) => s.charges)), primary)} in charges</span></>} /></div>
           <div className="bg-card p-5"><Stat label="Trades and closures" value={live.length} hint={<><span className="block">Cost of what was sold {formatMoney(Math.round(cost), primary)}</span><Equivalent both value={cost} currency={primary} className="block text-xs" /></>} /></div>
         </div>
       </Panel>
@@ -230,7 +225,7 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
                     </td>
                     <td className="hidden px-3 py-2.5 text-xs whitespace-nowrap text-muted-foreground lg:table-cell">{heldFor(s.firstBoughtOn, s.soldOn)}</td>
                     <td className="hidden max-w-[160px] truncate px-3 py-2.5 text-xs text-muted-foreground sm:table-cell">
-                      {s.account ? s.account.name : s.proceedsLeft > 0.004 ? <StatusBadge tone="brass" dot={false}>To reinvest · {formatMoney(s.proceedsLeft, s.currency)}</StatusBadge> : "Reinvested"}
+                      {s.account ? s.account.name : s.proceeds === "INVESTMENT_CASH" ? <StatusBadge tone="brass" dot={false}>Investment cash</StatusBadge> : <StatusBadge tone="neutral" dot={false}>Tracking only</StatusBadge>}
                     </td>
                   </tr>
                 );
@@ -243,7 +238,7 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
 
       <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
         <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
-          {open && <SaleDetail s={open} onUndo={() => setUndoing(open)} onChanged={() => { setOpen(null); onChanged(); }} />}
+          {open && <SaleDetail s={open} onUndo={() => setUndoing(open)} />}
         </DialogContent>
       </Dialog>
       <ConfirmAction
@@ -254,7 +249,9 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
           <p>
             {undoing && (undoing.account && undoing.creditedAmount != null
               ? `${formatMoney(Number(undoing.creditedAmount), undoing.account.currency)} is taken back out of ${undoing.account.name} and ${undoing.name} returns to your portfolio. `
-              : `${undoing.name} returns to your portfolio, and the proceeds kept for reinvestment go with it. `)}
+              : undoing.proceeds === "INVESTMENT_CASH"
+                ? `${formatMoney(Number(undoing.netProceeds), undoing.currency)} is taken back out of investment cash and ${undoing.name} returns to your portfolio. If some of it has been reinvested or withdrawn, the undo is refused until investment cash can cover it. `
+                : `${undoing.name} returns to your portfolio. This was tracking only, so no money moves. `)}
             The sale stays here marked as undone, and both entries stay in the ledger.
           </p>
         }
@@ -265,7 +262,7 @@ export function SalesHistory({ sales, loading, onChanged }: { sales: SaleRow[]; 
   );
 }
 
-function SaleDetail({ s, onUndo, onChanged }: { s: SaleRow; onUndo: () => void; onChanged: () => void }) {
+function SaleDetail({ s, onUndo }: { s: SaleRow; onUndo: () => void }) {
   const c = s.currency;
   const p = Number(s.realizedPnl);
   const qty = s.quantity ? Number(s.quantity) : null;
@@ -297,7 +294,9 @@ function SaleDetail({ s, onUndo, onChanged }: { s: SaleRow; onUndo: () => void; 
             {formatMoney(Number(s.creditedAmount), s.account.currency)}
           </span>,
         ]
-      : ["Proceeds", <span key="kept">Kept to reinvest{s.proceedsLeft > 0.004 ? ` · ${formatMoney(s.proceedsLeft, c)} left` : " · all used"}</span>],
+      : s.proceeds === "INVESTMENT_CASH"
+        ? ["Proceeds to", <span key="cash">Investment cash · {formatMoney(net, c)}</span>]
+        : ["Proceeds", <span key="track">Tracking only, no money recorded</span>],
   ];
 
   return (
@@ -361,11 +360,9 @@ function SaleDetail({ s, onUndo, onChanged }: { s: SaleRow; onUndo: () => void; 
         </div>
       )}
 
-      {!s.reversedAt && <ProceedsPanel s={s} onChanged={onChanged} />}
-
       {!s.reversedAt && (
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-          <p className="text-xs text-muted-foreground">Recorded by mistake? Undoing {s.account ? "takes the money back out and returns" : "returns"} the holding.</p>
+          <p className="text-xs text-muted-foreground">Recorded by mistake? Undoing {s.account ? `takes the money back out of ${s.account.name} and returns` : s.proceeds === "INVESTMENT_CASH" ? "takes the proceeds back out of investment cash and returns" : "returns"} the holding.</p>
           <Button variant="outline" size="sm" onClick={onUndo}><Undo2 className="h-4 w-4" /> Undo…</Button>
         </div>
       )}
@@ -381,119 +378,5 @@ function M({ v, c }: { v: number; c: string }) {
       {formatMoney(Math.abs(v), c)}
       <Equivalent both stack value={Math.abs(v)} currency={c} />
     </span>
-  );
-}
-
-/** Where kept-for-reinvestment proceeds went: reinvestments made so far, and
- * actions to record another or move what's left to an account. */
-function ProceedsPanel({ s, onChanged }: { s: SaleRow; onChanged: () => void }) {
-  const c = s.currency;
-  const [mode, setMode] = useState<"NONE" | "REINVEST" | "CREDIT">("NONE");
-  const [amount, setAmount] = useState(String(s.proceedsLeft));
-  const [into, setInto] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [accounts, setAccounts] = useState<{ id: string; name: string; currency: string; status: string }[]>([]);
-  const [accountId, setAccountId] = useState("");
-  const [credited, setCredited] = useState("");
-  const [busy, setBusy] = useState(false);
-  const reinvested = s.reinvestments ?? [];
-  if (s.account && reinvested.length === 0) return null;
-  const account = accounts.find((a) => a.id === accountId);
-
-  async function call(url: string, init: RequestInit, done: string) {
-    setBusy(true);
-    const res = await fetch(url, { ...init, headers: { "Content-Type": "application/json" } });
-    const data = await res.json().catch(() => ({}));
-    setBusy(false);
-    if (!res.ok) {
-      toast.error(data.error || "Something went wrong.");
-      return;
-    }
-    toast.success(done);
-    onChanged();
-  }
-  function openCredit() {
-    setMode("CREDIT");
-    if (!accounts.length) {
-      fetch("/api/accounts").then((r) => r.json()).then((d) => {
-        const open = (d.accounts ?? []).filter((a: { status: string }) => a.status !== "CLOSED");
-        setAccounts(open);
-        setAccountId((open.find((a: { currency: string }) => a.currency === c) ?? open[0])?.id ?? "");
-      });
-    }
-  }
-
-  return (
-    <div className="space-y-3 rounded-xl border border-border p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-medium">Proceeds kept to reinvest</p>
-        <p className="text-sm tabular-nums">{formatMoney(s.proceedsLeft, c)} <span className="text-muted-foreground">of {formatMoney(Number(s.netProceeds), c)} left</span></p>
-      </div>
-      {reinvested.length > 0 && (
-        <ul className="divide-y divide-border/60 text-sm">
-          {reinvested.map((r, i) => (
-            <li key={i} className="flex items-center gap-3 py-1.5">
-              <span className="w-24 font-mono text-xs text-muted-foreground">{formatDate(r.date)}</span>
-              <span className="min-w-0 flex-1 truncate">Into {r.into}{r.note ? <span className="text-muted-foreground"> · {r.note}</span> : null}</span>
-              <span className="tabular-nums">{formatMoney(Number(r.amount), c)}</span>
-              <button className="cursor-pointer text-xs text-muted-foreground hover:text-foreground hover:underline" disabled={busy} onClick={() => call(`/api/investments/sales/${s.id}/reinvest/${i}`, { method: "DELETE" }, "Removed. That amount is waiting to be reinvested again.")}>
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {!s.account && s.proceedsLeft > 0.004 && mode === "NONE" && (
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => setMode("REINVEST")}>Mark reinvested…</Button>
-          <Button size="sm" variant="outline" onClick={openCredit}>Move to an account…</Button>
-        </div>
-      )}
-      {mode === "REINVEST" && (
-        <form
-          className="grid gap-2 sm:grid-cols-[1fr_120px_140px]"
-          onSubmit={(e) => {
-            e.preventDefault();
-            call(`/api/investments/sales/${s.id}/reinvest`, { method: "POST", body: JSON.stringify({ amount: Number(amount), into, date }) }, `Marked ${formatMoney(Number(amount), c)} as reinvested in ${into}.`);
-          }}
-        >
-          <Input value={into} onChange={(e) => setInto(e.target.value)} placeholder="What it went into, e.g. NIFTYBEES" aria-label="Reinvested into" required />
-          <Input type="number" step="0.01" min="0" max={s.proceedsLeft} value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Amount" required />
-          <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Date" required />
-          <p className="text-xs text-muted-foreground sm:col-span-2">Add the new investment on its tab as usual; this just records that these proceeds paid for it. No account changes.</p>
-          <div className="flex justify-end gap-2">
-            <Button type="button" size="sm" variant="ghost" onClick={() => setMode("NONE")}>Cancel</Button>
-            <Button type="submit" size="sm" disabled={busy || !into.trim() || !(Number(amount) > 0)}>Save</Button>
-          </div>
-        </form>
-      )}
-      {mode === "CREDIT" && (
-        <form
-          className="grid gap-2 sm:grid-cols-[1fr_140px]"
-          onSubmit={(e) => {
-            e.preventDefault();
-            call(
-              `/api/investments/sales/${s.id}/credit`,
-              { method: "POST", body: JSON.stringify({ accountId, date, ...(account && account.currency !== c ? { creditedAmount: Number(credited) } : {}) }) },
-              `${account ? `Moved to ${account.name}.` : "Moved."}`
-            );
-          }}
-        >
-          <Select value={accountId} onValueChange={setAccountId}>
-            <SelectTrigger className="w-full" aria-label="Account"><SelectValue placeholder="Choose account" /></SelectTrigger>
-            <SelectContent>{accounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} · {a.currency}</SelectItem>)}</SelectContent>
-          </Select>
-          <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="Date" required />
-          {account && account.currency !== c && (
-            <Input type="number" step="0.01" min="0" value={credited} onChange={(e) => setCredited(e.target.value)} placeholder={`Amount that arrived in ${account.currency}`} aria-label={`Amount in ${account.currency}`} required className="sm:col-span-2" />
-          )}
-          <p className="text-xs text-muted-foreground">All {formatMoney(s.proceedsLeft, c)} left goes to the account, booked in the ledger as sale proceeds.</p>
-          <div className="flex justify-end gap-2">
-            <Button type="button" size="sm" variant="ghost" onClick={() => setMode("NONE")}>Cancel</Button>
-            <Button type="submit" size="sm" disabled={busy || !accountId}>Move</Button>
-          </div>
-        </form>
-      )}
-    </div>
   );
 }

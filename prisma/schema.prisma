@@ -45,6 +45,32 @@ enum LedgerEntryType {
   // Money paid out of an account to buy an investment. Not spending: it moved
   // into your portfolio. Counts toward a budget line when it has a category.
   INVESTMENT_PURCHASE
+  // Money moved from an account into investment cash (debit), and back out of
+  // investment cash into an account (credit). Neither is income or spending:
+  // the money stays yours, it only changes where it waits.
+  TO_INVESTMENT_CASH
+  FROM_INVESTMENT_CASH
+}
+
+/// Where a sale's net proceeds went.
+enum SaleProceeds {
+  // Credited to a bank account (INVESTMENT_SALE ledger entry).
+  ACCOUNT
+  // Kept in investment cash, ready to reinvest or withdraw.
+  INVESTMENT_CASH
+  // Recorded for the portfolio only: no money moved anywhere in VAULT.
+  TRACKING
+}
+
+/// Movements of investment cash. Signs follow the cash balance: SALE_PROCEEDS
+/// and FROM_ACCOUNT add, PURCHASE and TO_ACCOUNT take away, REVERSAL carries
+/// the exact opposite of the entry it cancels.
+enum InvestmentCashEntryType {
+  SALE_PROCEEDS
+  PURCHASE
+  FROM_ACCOUNT
+  TO_ACCOUNT
+  REVERSAL
 }
 
 enum InvestmentKind {
@@ -157,6 +183,7 @@ model User {
   fixedDeposits        FixedDeposit[]
   otherAssets          OtherAsset[]
   investmentSales      InvestmentSale[]
+  investmentCash       InvestmentCashEntry[]
   exchangeRates        ExchangeRate[]
   loans                Loan[]
   monthlyPlans         MonthlyPlan[]
@@ -272,6 +299,8 @@ model LedgerEntry {
   // "FUND_LOT:<id>", "DEPOSIT:<id>" or "ASSET:<id>".
   investmentRef     String?
   investmentSale    InvestmentSale?  @relation(fields: [investmentSaleId], references: [id])
+  // The investment-cash side of a TO_/FROM_INVESTMENT_CASH entry.
+  investmentCash    InvestmentCashEntry?
   // Spending category for EXPENSE entries (expenses, scheduled payments, EMIs)
   // so budgets and analytics read straight from the ledger.
   categoryId        String?
@@ -741,14 +770,16 @@ model InvestmentSale {
   firstBoughtOn  DateTime
   soldOn         DateTime
   closedPosition Boolean // nothing of the holding was left afterwards
-  // Where the proceeds went. Null account: kept for reinvestment — they stay
-  // with the investments (and in net worth) until marked reinvested or moved
-  // to an account later.
+  // Where the net proceeds went: an account (accountId set), investment cash
+  // (an InvestmentCashEntry with this saleId), or nowhere (tracking only).
+  proceeds       SaleProceeds   @default(ACCOUNT)
+  // The account credited, when proceeds is ACCOUNT.
   accountId      String?
   account        Account?       @relation(fields: [accountId], references: [id], onDelete: Restrict)
   creditedAmount Decimal? // in the account's currency
   creditedNet    Decimal? // the part of netProceeds that went to the account (sale currency)
-  // [{ amount, into, date, note }] — proceeds used for other investments (sale currency)
+  // Historical only: [{ amount, into, date, note, ref }] recorded before
+  // investment cash existed. Migrated to InvestmentCashEntry rows; not written.
   reinvestments  Json           @default("[]")
   // Purchases consumed, oldest first: [{ lotId, purchaseDate, quantity, price, cost }]
   lots           Json
@@ -759,8 +790,59 @@ model InvestmentSale {
   createdAt      DateTime       @default(now())
 
   ledgerEntry LedgerEntry?
+  cashEntries InvestmentCashEntry[]
 
+  // One per sell form session: a double submit or a retry records the sale once.
+  idempotencyKey String?
+
+  @@unique([userId, idempotencyKey])
   @@index([userId, soldOn])
+}
+
+// Investment cash: money realised from sales or added from an account, waiting
+// to be reinvested or withdrawn. One balance per currency, defined as the sum
+// of these entries (append-only, like the account ledger: undo = REVERSAL).
+// It is not an account; moves to and from accounts are paired with a
+// TO_/FROM_INVESTMENT_CASH ledger entry (ledgerEntryId).
+model InvestmentCashEntry {
+  id            String                  @id @default(uuid())
+  userId        String
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currency      String
+  type          InvestmentCashEntryType
+  // Magnitude; signed for REVERSAL.
+  amount        Decimal
+  date          DateTime
+  description   String?
+  // SALE_PROCEEDS: the sale they came from.
+  saleId        String?
+  sale          InvestmentSale?         @relation(fields: [saleId], references: [id])
+  // PURCHASE: the purchase paid for ("STOCK_LOT:<id>", "FUND_LOT:<id>", ...).
+  investmentRef String?
+  // FROM_ACCOUNT / TO_ACCOUNT: the matching account entry.
+  ledgerEntryId String?                 @unique
+  ledgerEntry   LedgerEntry?            @relation(fields: [ledgerEntryId], references: [id])
+  reversalOfId  String?                 @unique
+  reversalOf    InvestmentCashEntry?    @relation("CashReversal", fields: [reversalOfId], references: [id])
+  reversedBy    InvestmentCashEntry?    @relation("CashReversal")
+  reversedAt    DateTime?
+  createdAt     DateTime                @default(now())
+
+  @@index([userId, currency])
+  @@index([investmentRef])
+  @@index([saleId])
+}
+
+// One row per create request that carries an idempotency key, so a double
+// submit or a retry of a purchase or cash move happens once.
+model RequestKey {
+  userId    String
+  key       String
+  scope     String
+  resultId  String?
+  createdAt DateTime @default(now())
+
+  @@id([userId, key])
 }
 
 // ---------- Currency & FX ----------
@@ -890,6 +972,15 @@ model AuditEvent {
 }
 
 /// Cached 1-year price series for the investments sparklines.
+// Company research from the market-data provider (lib/research), cached
+// so pages don't call the provider on every view: "summary:AAPL",
+// "chart:INFY.NS:1Y", "financials:AAPL"… Never user data.
+model ResearchCache {
+  key       String   @id
+  data      Json
+  fetchedAt DateTime @default(now())
+}
+
 model PriceHistoryCache {
   key       String   @id // "stock:RELIANCE.NS" | "mf:119551"
   points    Json // [{ d: "YYYY-MM-DD", v: number }]

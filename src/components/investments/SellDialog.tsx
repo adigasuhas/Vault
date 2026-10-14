@@ -14,7 +14,9 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { Equivalent } from "@/components/app/Money";
+import { newKey } from "@/lib/client";
+import { ChevronDown } from "lucide-react";
+import { useInvestmentCash } from "@/components/investments/InvestmentCash";
 
 interface UnitsTarget {
   holdingId: string;
@@ -46,6 +48,14 @@ export type SellTarget =
   | { kind: "OTHER"; holdingId: string; name: string; currency: string; cost: number; value: number; purchaseDate: string };
 
 interface Account { id: string; name: string; currency: string; status: string; currentBalance: string }
+
+type Proceeds = "INVESTMENT_CASH" | "ACCOUNT" | "TRACKING";
+/** The three ways a sale's money can go, in the order offered. */
+const PROCEEDS: { value: Proceeds; label: string; hint: string }[] = [
+  { value: "INVESTMENT_CASH", label: "Keep for reinvestment", hint: "Net proceeds go to investment cash, ready for your next purchase or to withdraw later." },
+  { value: "ACCOUNT", label: "Transfer to bank", hint: "Net proceeds are credited to the account you pick." },
+  { value: "TRACKING", label: "Tracking only", hint: "Updates your portfolio and profit only. No money is added anywhere in VAULT." },
+];
 
 const COPY = {
   STOCK: { title: "Sell", unit: "Shares", price: "Sale price per share", charges: "Charges", chargesHint: "Brokerage, taxes and fees", verb: "Sell" },
@@ -79,6 +89,10 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
   const [charges, setCharges] = useState("");
   const [soldOn, setSoldOn] = useState(today);
   const [picked, setPicked] = useState("");
+  // Default: real proceeds kept for reinvestment. Never remembered, so a
+  // tracking-only choice can't silently carry over to a real sale.
+  const [proceeds, setProceeds] = useState<Proceeds>("INVESTMENT_CASH");
+  const cash = useInvestmentCash();
   const [credited, setCredited] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -104,22 +118,29 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
     if (target.kind === "FIXED_DEPOSIT" && v) setAmount(String(depositValue(target, v)));
   }
 
-  // The deposit's linked account, else one in the holding's currency, else the first.
+  // Your last choice for this currency, else the deposit's linked account,
+  // else one in the holding's currency, else the first.
   const suggested = useMemo(() => {
+    let remembered: string | null = null;
+    try {
+      remembered = localStorage.getItem(`vault.sell.account.${target.currency}`);
+    } catch {}
     const linked = target.kind === "FIXED_DEPOSIT" ? accounts.find((a) => a.id === target.linkedAccountId) : undefined;
-    return (linked ?? accounts.find((a) => a.currency === target.currency) ?? accounts[0])?.id ?? "";
+    return (accounts.find((a) => a.id === remembered) ?? linked ?? accounts.find((a) => a.currency === target.currency) ?? accounts[0])?.id ?? "";
   }, [accounts, target]);
-  // Proceeds go to an account, or stay with the investments to be reinvested.
-  const [destination, setDestination] = useState<"ACCOUNT" | "REINVEST">("ACCOUNT");
   // Which purchases to sell from: all of them, or one group's (oldest first either way).
   const [fromGroup, setFromGroup] = useState("");
+  const [more, setMore] = useState(false);
+  // One per form: a double submit or a retry records the sale once.
+  const [idempotencyKey] = useState(() => newKey());
   const units = target.kind === "STOCK" || target.kind === "MUTUAL_FUND" ? target : null;
   const group = units?.groups?.find((g) => g.id === fromGroup) ?? null;
   const sellLots = useMemo(() => (units ? (group ? units.lots.filter((l) => group.lotIds.includes(l.id)) : units.lots) : []), [units, group]);
   const restricted = !!(units?.onlyLots || group);
-  const accountId = destination === "ACCOUNT" ? picked || suggested : "";
+  const accountId = picked || suggested;
   const account = accounts.find((a) => a.id === accountId);
-  const crossCurrency = !!(account && account.currency !== target.currency);
+  const toAccount = proceeds === "ACCOUNT";
+  const crossCurrency = toAccount && !!(account && account.currency !== target.currency);
 
   const preview = useMemo(() => {
     if (!soldOn) return null;
@@ -152,16 +173,20 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
   const c = target.currency;
   const pnl = preview && "net" in preview && preview.net != null && preview.cost != null ? roundMoney(preview.net - preview.cost) : null;
   const premature = target.kind === "FIXED_DEPOSIT" && soldOn < target.maturityDate.slice(0, 10);
+  const invalid = !!(preview && "error" in preview && preview.error) || !!(preview && "net" in preview && preview.net != null && preview.net <= 0);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (saving) return;
     setSaving(true);
     const body: Record<string, unknown> = {
       kind: target.kind,
       holdingId: target.holdingId,
       charges: charges || 0,
       soldOn,
-      ...(destination === "ACCOUNT" ? { accountId } : {}),
+      proceeds,
+      ...(toAccount ? { accountId } : {}),
+      idempotencyKey,
       note: note || undefined,
       ...(crossCurrency ? { creditedAmount: credited } : {}),
       ...(target.kind === "STOCK" || target.kind === "MUTUAL_FUND" ? { quantity, price } : { amount }),
@@ -174,168 +199,176 @@ function SellForm({ target, onClose, onSold }: { target: SellTarget; onClose: ()
       toast.error(data.error || "Couldn't record the sale.");
       return;
     }
+    if (toAccount) {
+      try {
+        localStorage.setItem(`vault.sell.account.${target.currency}`, accountId);
+      } catch {}
+    }
+    const net = Number(data.sale?.netProceeds ?? 0);
     toast.success(
-      destination === "REINVEST"
-        ? "Sold. The proceeds are kept for reinvestment under Sold & closed, and still count in your net worth."
-        : `${account ? `Credited to ${account.name}. ` : ""}It's under Sold & closed.`
+      data.duplicate
+        ? "Already recorded: this sale was saved once."
+        : toAccount
+          ? `${formatMoney(Number(data.sale?.creditedAmount ?? 0), account?.currency ?? c)} credited to ${account?.name ?? "the account"}.`
+          : proceeds === "INVESTMENT_CASH"
+            ? `${formatMoney(net, c)} added to investment cash.`
+            : "Sale recorded for tracking. No money moved."
     );
     onClose();
     onSold();
+    cash?.reload();
   }
 
+  const lastPrice = units?.price;
   return (
     <>
         <DialogHeader>
           <DialogTitle>{copy.title} {target.name}</DialogTitle>
           <DialogDescription>
-            {units?.onlyLots
-              ? `From ${units.onlyLots.label} only, oldest first: ${preview?.owned ?? 0} ${copy.unit.toLowerCase()}. Its other purchases aren't touched.`
-              : target.kind === "STOCK" || target.kind === "MUTUAL_FUND"
-              ? `The oldest purchases are sold first. You hold ${preview?.owned ?? 0} ${copy.unit.toLowerCase()}${group ? ` in ${group.label}` : ""}.`
+            {units
+              ? `${preview?.owned ?? 0} ${copy.unit.toLowerCase()} available${units.onlyLots ? ` in ${units.onlyLots.label}` : group ? ` in ${group.label}` : ""}${lastPrice != null ? ` · last ${formatMoney(lastPrice, c)}` : ""}`
               : target.kind === "FIXED_DEPOSIT"
-                ? `${formatMoney(target.principal, c)} at ${target.rate}% a year, maturing ${formatDate(target.maturityDate)}.`
-                : `Bought for ${formatMoney(target.cost, c)} on ${formatDate(target.purchaseDate)}.`}
+                ? `${formatMoney(target.principal, c)} at ${target.rate}% · matures ${formatDate(target.maturityDate)}`
+                : target.kind === "OTHER"
+                  ? `Bought for ${formatMoney(target.cost, c)} · valued ${formatMoney(target.value, c)}`
+                  : ""}
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={submit} className="space-y-4">
-          {units?.groups && units.groups.length > 0 && !units.onlyLots && (
-            <div className="space-y-2">
-              <Label>Sell from</Label>
-              <Select value={fromGroup || "__all__"} onValueChange={(v) => setFromGroup(v === "__all__" ? "" : v)}>
-                <SelectTrigger className="w-full" aria-label="Sell from"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__all__">Any purchase, oldest first</SelectItem>
-                  {units.groups.map((g) => {
-                    const qty = r6(units.lots.filter((l) => g.lotIds.includes(l.id)).reduce((t, l) => t + l.quantity, 0));
-                    return <SelectItem key={g.id} value={g.id}>{g.label} · {qty} {copy.unit.toLowerCase()}</SelectItem>;
-                  })}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {(target.kind === "STOCK" || target.kind === "MUTUAL_FUND") && (
+          {units ? (
             <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <Label htmlFor="sell-qty">{copy.unit}</Label>
                   <button type="button" className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline" onClick={() => setQuantity(String(preview?.owned ?? ""))}>
                     All
                   </button>
                 </div>
-                <Input id="sell-qty" type="number" step="any" min="0" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
+                <Input id="sell-qty" type="number" step="any" min="0" max={preview?.owned ?? undefined} value={quantity} onChange={(e) => setQuantity(e.target.value)} required aria-invalid={!!(preview && "error" in preview && preview.error)} />
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="sell-price">{copy.price}</Label>
+              <div className="space-y-1.5">
+                <Label htmlFor="sell-price">{target.kind === "MUTUAL_FUND" ? "NAV" : "Price per share"}</Label>
                 <Input id="sell-price" type="number" step="any" min="0" value={price} onChange={(e) => setPrice(e.target.value)} required />
               </div>
             </div>
-          )}
-          {(target.kind === "FIXED_DEPOSIT" || target.kind === "OTHER") && (
-            <div className="space-y-2">
-              <Label htmlFor="sell-amount">{target.kind === "FIXED_DEPOSIT" ? "Amount paid out, before deductions" : "Sale price"}</Label>
+          ) : (
+            <div className="space-y-1.5">
+              <Label htmlFor="sell-amount">{target.kind === "FIXED_DEPOSIT" ? "Amount paid out" : "Sale price"}</Label>
               <Input id="sell-amount" type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} required />
-              <p className="text-xs text-muted-foreground">
-                {target.kind === "FIXED_DEPOSIT"
-                  ? "Suggested from the interest earned up to the closing date. Use what the bank actually paid."
-                  : `Last valued at ${formatMoney(target.value, c)}.`}
-              </p>
+              {target.kind === "FIXED_DEPOSIT" && <p className="text-xs text-muted-foreground">Suggested from interest to the closing date. Use what the bank paid.</p>}
             </div>
           )}
 
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="sell-date">{target.kind === "FIXED_DEPOSIT" ? "Closed on" : "Sold on"}</Label>
+            <div className="space-y-1.5">
+              <Label htmlFor="sell-date">{target.kind === "FIXED_DEPOSIT" ? "Closed on" : "Date"}</Label>
               <Input id="sell-date" type="date" value={soldOn} max={today} onChange={(e) => changeDate(e.target.value)} required />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="sell-charges">{copy.charges} <span className="font-normal text-muted-foreground">(optional)</span></Label>
-              <Input id="sell-charges" type="number" step="0.01" min="0" value={charges} onChange={(e) => setCharges(e.target.value)} placeholder="0" title={copy.chargesHint} />
+            <div className="space-y-1.5">
+              <Label htmlFor="sell-charges" title={copy.chargesHint}>{target.kind === "FIXED_DEPOSIT" ? "Deductions" : "Charges"}</Label>
+              <Input id="sell-charges" type="number" step="0.01" min="0" value={charges} onChange={(e) => setCharges(e.target.value)} placeholder="0" aria-describedby="sell-charges-hint" />
+              <span id="sell-charges-hint" className="sr-only">{copy.chargesHint}</span>
             </div>
           </div>
-          {premature && <p className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">This is before the maturity date, so it&apos;s recorded as an early closure. Enter any penalty under deductions.</p>}
+          {premature && <p className="text-xs text-muted-foreground">Before maturity: recorded as an early closure. Put any penalty under deductions.</p>}
 
-          <div className="space-y-2">
-            <Label>The proceeds</Label>
-            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="What happens to the proceeds">
-              {([["ACCOUNT", "Go to an account", "Credited now, like any income."], ["REINVEST", "Keep to reinvest", "Stay with your investments until you use them."]] as const).map(([v, t, d]) => (
+          <fieldset className="space-y-2">
+            <legend className="mb-1.5 text-sm font-medium">What happens to the money</legend>
+            <div role="radiogroup" aria-label="What happens to the money" className="grid grid-cols-3 gap-0.5 rounded-lg bg-muted p-0.5 text-xs">
+              {PROCEEDS.map((o) => (
                 <button
-                  key={v}
+                  key={o.value}
                   type="button"
                   role="radio"
-                  aria-checked={destination === v}
-                  onClick={() => setDestination(v)}
-                  className={cn("cursor-pointer rounded-lg border p-2.5 text-left transition-colors", destination === v ? "border-foreground/50 bg-muted" : "border-border hover:border-foreground/25")}
+                  aria-checked={proceeds === o.value}
+                  onClick={() => setProceeds(o.value)}
+                  className={cn("min-h-8 cursor-pointer rounded-md px-1.5 py-1 leading-tight transition-colors", proceeds === o.value ? "bg-card font-medium shadow-card" : "text-muted-foreground hover:text-foreground")}
                 >
-                  <span className="block text-sm font-medium">{t}</span>
-                  <span className="block text-[11px] text-muted-foreground">{d}</span>
+                  {o.label}
                 </button>
               ))}
             </div>
-          </div>
-          {destination === "REINVEST" && (
-            <p className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">
-              Nothing is credited to a bank account. The money shows under Sold &amp; closed as waiting to be reinvested, and still counts in your net worth. When you&apos;ve bought something with it, mark it reinvested there; if you don&apos;t, move it to an account.
-            </p>
-          )}
-          {destination === "ACCOUNT" && <div className="space-y-2">
-            <Label>Credit the money to</Label>
-            <Select value={accountId} onValueChange={(v) => v && setPicked(v)}>
-              <SelectTrigger className="w-full"><SelectValue placeholder={accounts.length ? "Choose account" : "Add an account first"} /></SelectTrigger>
-              <SelectContent>
-                {accounts.map((a) => (
-                  <SelectItem key={a.id} value={a.id}>
-                    {a.name} <span className="text-muted-foreground">· {formatMoney(a.currentBalance, a.currency)}</span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>}
-          {crossCurrency && account && (
-            <div className="space-y-2">
-              <Label htmlFor="sell-credited">Amount that arrived in {account.currency}</Label>
-              <Input id="sell-credited" type="number" step="0.01" min="0" value={credited} onChange={(e) => setCredited(e.target.value)} required />
-              <p className="text-xs text-muted-foreground">The sale is in {c}, the account in {account.currency}. Profit and loss stay in {c}.</p>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <Label htmlFor="sell-note">Note <span className="font-normal text-muted-foreground">(optional)</span></Label>
-            <Input id="sell-note" value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} placeholder="Like Rebalancing, or Contract note number" />
-          </div>
+            <p className="text-xs text-muted-foreground">{PROCEEDS.find((o) => o.value === proceeds)!.hint}</p>
+            {toAccount && (
+              <>
+                <Select value={accountId} onValueChange={(v) => v && setPicked(v)}>
+                  <SelectTrigger className="w-full" aria-label="Account"><SelectValue placeholder={accounts.length ? "Choose account" : "Add an account first"} /></SelectTrigger>
+                  <SelectContent>
+                    {accounts.map((a) => (
+                      <SelectItem key={a.id} value={a.id}>
+                        {a.name} <span className="text-muted-foreground">· {formatMoney(a.currentBalance, a.currency)}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {crossCurrency && account && (
+                  <Input id="sell-credited" type="number" step="0.01" min="0" value={credited} onChange={(e) => setCredited(e.target.value)} required placeholder={`Amount that arrived in ${account.currency}`} aria-label={`Amount that arrived in ${account.currency}`} />
+                )}
+              </>
+            )}
+          </fieldset>
 
           {preview && "error" in preview && preview.error && <p className="text-sm text-negative">{preview.error}</p>}
           {preview && "net" in preview && preview.net != null && (
-            <div className="rounded-xl border border-border bg-muted/40 p-3 text-sm">
-              <dl className="grid grid-cols-2 gap-y-1.5">
-                <dt className="text-muted-foreground">{target.kind === "FIXED_DEPOSIT" ? "Paid out" : "Sale value"}</dt>
-                <dd className="text-right tabular-nums">{formatMoney(preview.gross!, c)}</dd>
-                {Number(charges) > 0 && (<><dt className="text-muted-foreground">Deductions</dt><dd className="text-right tabular-nums">−{formatMoney(Number(charges), c)}</dd></>)}
-                <dt className="text-muted-foreground">You receive</dt>
-                <dd className="text-right font-medium tabular-nums">{formatMoney(preview.net, c)}<Equivalent both stack value={preview.net} currency={c} /></dd>
-                <dt className="text-muted-foreground">{target.kind === "FIXED_DEPOSIT" ? "Principal" : "Cost of what's sold"}</dt>
-                <dd className="text-right tabular-nums">{formatMoney(preview.cost!, c)}<Equivalent both stack value={preview.cost!} currency={c} /></dd>
-                <dt className="font-medium">{target.kind === "FIXED_DEPOSIT" ? "Interest earned" : "Profit / loss"}</dt>
-                <dd className={cn("text-right font-medium tabular-nums", pnl! > 0 ? "text-positive" : pnl! < 0 ? "text-negative" : "")}>
-                  {signed(pnl!, c)}
-                  {preview.cost! > 0 && <span className="ml-1 text-xs">({((pnl! / preview.cost!) * 100).toFixed(2)}%)</span>}
-                  <Equivalent both stack signed value={pnl!} currency={c} />
-                </dd>
-              </dl>
-              {preview.used && preview.used.length > 0 && (
-                <p className="mt-2 border-t border-border pt-2 text-xs text-muted-foreground">
-                  {preview.used.length === 1
-                    ? `Held for ${heldFor(preview.used[0].purchaseDate, soldOn)}.`
-                    : `Uses ${preview.used.length} purchases, held between ${heldFor(preview.used[preview.used.length - 1].purchaseDate, soldOn)} and ${heldFor(preview.used[0].purchaseDate, soldOn)}.`}
-                  {preview.closes ? " Nothing is left afterwards, so it moves to Sold & closed." : ""}
-                </p>
+            <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 rounded-lg bg-muted/50 px-3 py-2.5 text-sm">
+              <dt className="text-muted-foreground">Gross</dt>
+              <dd className="text-right tabular-nums">{formatMoney(preview.gross!, c)}</dd>
+              {Number(charges) > 0 && (<><dt className="text-muted-foreground">{target.kind === "FIXED_DEPOSIT" ? "Deductions" : "Charges"}</dt><dd className="text-right tabular-nums">−{formatMoney(Number(charges), c)}</dd></>)}
+              <dt className="font-medium">{toAccount ? `Net to ${account?.name ?? "account"}` : proceeds === "INVESTMENT_CASH" ? "Net to investment cash" : "Net proceeds, not added anywhere"}</dt>
+              <dd className="text-right font-semibold tabular-nums">{formatMoney(preview.net, c)}</dd>
+              {proceeds === "INVESTMENT_CASH" && cash && (
+                <>
+                  <dt className="text-xs text-muted-foreground">Investment cash afterwards</dt>
+                  <dd className="text-right text-xs tabular-nums text-muted-foreground">{formatMoney(roundMoney(cash.balanceOf(c) + preview.net), c)}</dd>
+                </>
               )}
-            </div>
+              <dt className="text-xs text-muted-foreground">{target.kind === "FIXED_DEPOSIT" ? "Interest earned" : "Profit / loss"} on cost {formatMoney(preview.cost!, c)}</dt>
+              <dd className={cn("text-right text-xs tabular-nums", pnl! > 0 ? "text-positive" : pnl! < 0 ? "text-negative" : "text-muted-foreground")}>
+                {signed(pnl!, c)}{preview.cost! > 0 && ` (${((pnl! / preview.cost!) * 100).toFixed(1)}%)`}
+              </dd>
+              {preview.closes && <dd className="col-span-2 text-xs text-muted-foreground">Nothing is left afterwards; it moves to Sold &amp; closed.</dd>}
+            </dl>
           )}
+
+          <div>
+            <button type="button" onClick={() => setMore(!more)} aria-expanded={more} className="inline-flex cursor-pointer items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+              <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", more && "rotate-180")} />
+              More options
+            </button>
+            {more && (
+              <div className="mt-3 space-y-3">
+                {units?.groups && units.groups.length > 0 && !units.onlyLots && (
+                  <div className="space-y-1.5">
+                    <Label>Sell from</Label>
+                    <Select value={fromGroup || "__all__"} onValueChange={(v) => setFromGroup(v === "__all__" ? "" : v)}>
+                      <SelectTrigger className="w-full" aria-label="Sell from"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__all__">Any purchase, oldest first</SelectItem>
+                        {units.groups.map((g) => {
+                          const qty = r6(units.lots.filter((l) => g.lotIds.includes(l.id)).reduce((t, l) => t + l.quantity, 0));
+                          return <SelectItem key={g.id} value={g.id}>{g.label} · {qty} {copy.unit.toLowerCase()}</SelectItem>;
+                        })}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label htmlFor="sell-note">Note</Label>
+                  <Input id="sell-note" value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} placeholder="Like a contract note number" />
+                </div>
+                {preview && "used" in preview && preview.used && preview.used.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {preview.used.length === 1 ? `Held for ${heldFor(preview.used[0].purchaseDate, soldOn)}.` : `Uses ${preview.used.length} purchases, oldest first.`}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="submit" disabled={saving || (destination === "ACCOUNT" && !accountId) || !!(preview && "error" in preview && preview.error)}>
+            <Button type="submit" disabled={saving || (toAccount && !accountId) || invalid}>
               {saving ? "Saving…" : copy.verb}
             </Button>
           </DialogFooter>

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fundPurchase } from "@/lib/investment-funding";
+import { fundPurchase, fundingFrom } from "@/lib/investment-funding";
+import { claimRequest, lostRace, requestSeen, settleRequest } from "@/lib/request-keys";
 import type { Tx } from "@/lib/ledger";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
@@ -30,10 +31,13 @@ export async function POST(req: NextRequest) {
     const { body: errBody, status } = toErrorResponse(err);
     return NextResponse.json(errBody, { status });
   }
+  const replay = await requestSeen(session.userId, input.idempotencyKey);
+  if (replay) return NextResponse.json({ duplicate: true, id: replay.resultId }, { status: 200 });
 
   let asset;
   try {
     asset = await db.$transaction(async (tx: Tx) => {
+      await claimRequest(tx, session.userId, input.idempotencyKey, "ASSET_PURCHASE");
       const a = await tx.otherAsset.create({
         data: {
           userId: session.userId,
@@ -53,11 +57,14 @@ export async function POST(req: NextRequest) {
         session.userId,
         `ASSET:${a.id}`,
         { cost: input.purchasePrice, currency: input.currency, date: input.purchaseDate, label: input.name },
-        { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount }
+        fundingFrom(input)
       );
+      await settleRequest(tx, session.userId, input.idempotencyKey, a.id);
       return a;
     });
   } catch (err) {
+    const won = await lostRace(err, session.userId, input.idempotencyKey);
+    if (won) return NextResponse.json({ duplicate: true, id: won.resultId }, { status: 200 });
     const { body: errBody, status } = toErrorResponse(err);
     return NextResponse.json(errBody, { status });
   }

@@ -51,7 +51,7 @@ export const GET = authed(async (req, { userId }) => {
       { name: "Mutual funds", value: p.funds },
       { name: "Fixed deposits", value: p.deposits },
       { name: "Other assets", value: p.other },
-      { name: "Awaiting reinvestment", value: p.proceeds },
+      { name: "Investment cash", value: p.proceeds },
     ].filter((a) => a.value > 0),
     upcoming: {
       actionable: o.next.actionable,

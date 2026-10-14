@@ -74,6 +74,8 @@ const TYPE_LABEL: Record<string, string> = {
   REVERSAL: "Reversal",
   INVESTMENT_SALE: "Investment sale",
   INVESTMENT_PURCHASE: "Investment purchase",
+  TO_INVESTMENT_CASH: "To investment cash",
+  FROM_INVESTMENT_CASH: "From investment cash",
 };
 
 export async function buildReport(userId: string, type: ReportType, p: ReportParams): Promise<Report> {
@@ -385,7 +387,8 @@ export async function buildReport(userId: string, type: ReportType, p: ReportPar
         }
         const b = byMonth.get(isoDate(e.date).slice(0, 7));
         if (!b) continue;
-        if (e.transferId) b.internal += v; // moves between own accounts (≈0, FX aside)
+        // Moves between own accounts, and to or from investment cash: not income or spending.
+        if (e.transferId || e.type === "TO_INVESTMENT_CASH" || e.type === "FROM_INVESTMENT_CASH") b.internal += v;
         else if (v >= 0) b.inflow += v;
         else b.outflow -= v;
       }

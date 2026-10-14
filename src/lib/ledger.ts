@@ -25,7 +25,7 @@ export type Tx = Prisma.TransactionClient;
 /** Balance effect of an entry. */
 export function signedAmount(type: LedgerEntryType | string, amount: number): number {
   if (type === "ADJUSTMENT" || type === "OPENING" || type === "REVERSAL") return amount;
-  return type === "EXPENSE" || type === "TRANSFER_OUT" || type === "INVESTMENT_PURCHASE" ? -amount : amount;
+  return type === "EXPENSE" || type === "TRANSFER_OUT" || type === "INVESTMENT_PURCHASE" || type === "TO_INVESTMENT_CASH" ? -amount : amount;
 }
 
 /** Account types that hold the user's own money and can't go below zero.
@@ -779,6 +779,43 @@ export async function reverseInvestmentPurchase(tx: Tx, userId: string, ref: str
   const entries = await tx.ledgerEntry.findMany({ where: { userId, investmentRef: ref, type: "INVESTMENT_PURCHASE", reversedAt: null } });
   for (const e of entries) await reverseEntry(tx, e.id, reason);
   return entries;
+}
+
+/** One side of a move between an account and investment cash: money leaving
+ * the account for investment cash (TO_INVESTMENT_CASH, funds-checked) or
+ * arriving from it (FROM_INVESTMENT_CASH). The investment-cash side is
+ * written by lib/investment-cash in the same transaction. */
+export async function postInvestmentCashMove(
+  tx: Tx,
+  userId: string,
+  input: { accountId: string; type: "TO_INVESTMENT_CASH" | "FROM_INVESTMENT_CASH"; amount: number; date: Date; description: string }
+) {
+  const account = await tx.account.findFirst({ where: { id: input.accountId, userId } });
+  if (!account) throw new ValidationError("Account not found.");
+  assertOpen(account);
+  assertPostable(input.amount, account.currency, account.currency);
+  if (input.type === "TO_INVESTMENT_CASH") assertSufficientFunds(account, input.amount);
+  return post(tx, {
+    userId,
+    accountId: account.id,
+    type: input.type,
+    amount: input.amount,
+    currency: account.currency,
+    date: input.date,
+    description: input.description,
+  });
+}
+
+/** Cancels the account side of an investment-cash move. Taking back money
+ * that arrived in the account must not overdraw it. */
+export async function reverseInvestmentCashMove(tx: Tx, userId: string, entryId: string, reason: string) {
+  const entry = await tx.ledgerEntry.findFirst({ where: { id: entryId, userId }, include: { account: true } });
+  if (!entry) throw new ValidationError("That account entry wasn't found.");
+  if (entry.account) {
+    assertOpen(entry.account);
+    if (entry.type === "FROM_INVESTMENT_CASH") assertSufficientFunds(entry.account, Number(entry.amount));
+  }
+  return reverseEntry(tx, entry.id, reason);
 }
 
 export async function reverseInvestmentSale(tx: Tx, userId: string, saleId: string, reason: string) {

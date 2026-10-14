@@ -1,5 +1,7 @@
 import { db } from "@/lib/db";
-import { fundPurchase } from "@/lib/investment-funding";
+import { fundPurchase, fundingFrom, priceWithCharges } from "@/lib/investment-funding";
+import { claimRequest, lostRace, requestSeen, settleRequest } from "@/lib/request-keys";
+import { roundMoney } from "@/lib/validate";
 import type { Tx } from "@/lib/ledger";
 import { authed } from "@/lib/api";
 import { fetchMutualFundNav } from "@/lib/market-data";
@@ -23,6 +25,11 @@ export const GET = authed(async (_req, { userId }) => {
  * that holding instead of creating a duplicate row. */
 export const POST = authed(async (req, { userId }) => {
   const input = await parseJson(req, createFundSchema);
+  const replay = await requestSeen(userId, input.idempotencyKey);
+  if (replay) return Response.json({ duplicate: true, lotId: replay.resultId }, { status: 200 });
+  // Charges become part of each unit's cost.
+  const nav = priceWithCharges(input.units, input.avgNav, input.charges);
+  const total = roundMoney(input.units * input.avgNav + (input.charges ?? 0));
   const existing = await db.mutualFundHolding.findFirst({
     where: {
       userId,
@@ -32,8 +39,11 @@ export const POST = authed(async (req, { userId }) => {
   });
   // Best effort: an unreachable NAV feed shouldn't block adding the holding.
   const initialNav = !existing && input.schemeCode ? await fetchMutualFundNav(input.schemeCode) : null;
-  const funding = { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount };
-  const holding = await db.$transaction(async (tx: Tx) => {
+  const funding = fundingFrom(input);
+  let holding;
+  try {
+  holding = await db.$transaction(async (tx: Tx) => {
+    await claimRequest(tx, userId, input.idempotencyKey, "FUND_PURCHASE");
     const holdingId =
       existing?.id ??
       (
@@ -43,7 +53,7 @@ export const POST = authed(async (req, { userId }) => {
             fundName: input.fundName,
             schemeCode: input.schemeCode,
             units: input.units,
-            avgNav: input.avgNav,
+            avgNav: nav,
             currency: input.currency,
             purchaseDate: input.purchaseDate,
             lastNav: initialNav,
@@ -51,10 +61,16 @@ export const POST = authed(async (req, { userId }) => {
           },
         })
       ).id;
-    const lot = await tx.mutualFundLot.create({ data: { holdingId, units: input.units, nav: input.avgNav, purchaseDate: input.purchaseDate } });
-    await fundPurchase(tx, userId, `FUND_LOT:${lot.id}`, { cost: input.units * input.avgNav, currency: input.currency, date: input.purchaseDate, label: input.fundName }, funding);
+    const lot = await tx.mutualFundLot.create({ data: { holdingId, units: input.units, nav, purchaseDate: input.purchaseDate } });
+    await fundPurchase(tx, userId, `FUND_LOT:${lot.id}`, { cost: total, currency: input.currency, date: input.purchaseDate, label: input.fundName }, funding);
+    await settleRequest(tx, userId, input.idempotencyKey, lot.id);
     await recomputeFundFromLots(holdingId, tx);
     return tx.mutualFundHolding.findUnique({ where: { id: holdingId }, include: { lots: true } });
   });
+  } catch (err) {
+    const won = await lostRace(err, userId, input.idempotencyKey);
+    if (won) return Response.json({ duplicate: true, lotId: won.resultId }, { status: 200 });
+    throw err;
+  }
   return Response.json({ holding, merged: !!existing }, { status: 201 });
 });

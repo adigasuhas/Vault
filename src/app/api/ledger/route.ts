@@ -10,7 +10,7 @@ import { queryDate } from "@/lib/validate";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
-const TYPES = ["EXPENSE", "INCOME", "TRANSFER_IN", "TRANSFER_OUT", "ADJUSTMENT", "OPENING", "REVERSAL", "INVESTMENT_SALE", "INVESTMENT_PURCHASE"] as const;
+const TYPES = ["EXPENSE", "INCOME", "TRANSFER_IN", "TRANSFER_OUT", "ADJUSTMENT", "OPENING", "REVERSAL", "INVESTMENT_SALE", "INVESTMENT_PURCHASE", "TO_INVESTMENT_CASH", "FROM_INVESTMENT_CASH"] as const;
 export const TYPE_LABEL: Record<string, string> = {
   EXPENSE: "Expense",
   INCOME: "Income",
@@ -21,6 +21,8 @@ export const TYPE_LABEL: Record<string, string> = {
   REVERSAL: "Reversal",
   INVESTMENT_SALE: "Investment sale",
   INVESTMENT_PURCHASE: "Investment purchase",
+  TO_INVESTMENT_CASH: "To investment cash",
+  FROM_INVESTMENT_CASH: "From investment cash",
 };
 const PAGE = 60;
 const NO_ACCOUNT = "No account";

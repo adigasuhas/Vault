@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { type SparkPoint } from "@/components/app/Sparkline";
 import { PageHeader, Panel, Stat } from "@/components/app/PageHeader";
 import { Equivalent } from "@/components/app/Money";
@@ -9,7 +9,8 @@ import { useCurrency } from "@/context/CurrencyContext";
 import { StockTable, FundTable, StockBreakdown, DepositTable, AssetTable } from "@/components/investments/Holdings";
 import { SellContext, SellDialog, type SellTarget } from "@/components/investments/SellDialog";
 import { SalesHistory, type SaleRow } from "@/components/investments/SalesHistory";
-import { FundingFields, emptyFunding, fundingBody, type FundingValue } from "@/components/investments/FundingFields";
+import { FundingFields, emptyFunding, fundingBody, fundingProblem, type FundingValue } from "@/components/investments/FundingFields";
+import { InvestmentCashProvider, InvestmentCashStrip, useInvestmentCash } from "@/components/investments/InvestmentCash";
 import { CategoryBar, CategoryField, CategoryManager, CategoryPerformance, CategoryPicker, CategoryProvider, Dot, UNCATEGORISED, assignCategories, emptyPicker, pickerEmpty, useCategories, type PickerValue } from "@/components/investments/Categories";
 import { categoryRows, linkKey, type InvestmentKind, type Position } from "@/lib/category-metrics";
 import { PriceAlertsEditor, alertRowsFrom, alertsBody, alertsChanged, type AlertRow, type SavedAlert } from "@/components/investments/PriceAlerts";
@@ -29,8 +30,10 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Download, Plus, RefreshCw } from "lucide-react";
+import { ChevronDown, Download, Plus, RefreshCw, ScanSearch } from "lucide-react";
+import { ResearchDrawer } from "@/components/research/ResearchDrawer";
 import { ExportDialog } from "@/components/investments/ExportDialog";
+import { newKey } from "@/lib/client";
 import { toast } from "sonner";
 import { fdCurrentValue } from "@/lib/investments";
 import { priceStatus } from "@/lib/price-freshness";
@@ -282,7 +285,9 @@ export default function InvestmentsPage() {
   const [catFilter, setCatFilter] = useState("");
   return (
     <CategoryProvider onFilter={setCatFilter}>
-      <InvestmentsView catFilter={catFilter} setCatFilter={setCatFilter} />
+      <InvestmentCashProvider>
+        <InvestmentsView catFilter={catFilter} setCatFilter={setCatFilter} />
+      </InvestmentCashProvider>
     </CategoryProvider>
   );
 }
@@ -296,6 +301,31 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
   const [tab, setTab] = useState("stocks");
   const priceSeries = usePriceSeries();
   const currency = useCurrency().primary || user?.baseCurrency || "INR";
+  const cash = useInvestmentCash()!;
+  const reloadCash = cash.reload;
+  // Research opens over the page: ?research= (search) or ?research=SYMBOL.
+  const router = useRouter();
+  const params = useSearchParams();
+  const researchSymbol = params.has("research") ? params.get("research") ?? "" : null;
+  const setResearch = useCallback(
+    (symbol: string | null) => {
+      const next = new URLSearchParams(params.toString());
+      if (symbol == null) next.delete("research");
+      else next.set("research", symbol);
+      const url = `/investments${next.size ? `?${next.toString()}` : ""}`;
+      // Opening adds a history step, so Back closes it; moving within it doesn't.
+      if (researchSymbol == null) router.push(url, { scroll: false });
+      else router.replace(url, { scroll: false });
+    },
+    [params, researchSymbol, router]
+  );
+  // Links to a stock or its add form (from research, alerts) need the stocks tab.
+  const stockLink = params.get("add") ?? params.get("stock");
+  const [seenStockLink, setSeenStockLink] = useState<string | null>(null);
+  if (stockLink && stockLink !== seenStockLink) {
+    setSeenStockLink(stockLink);
+    setTab("stocks");
+  }
 
   const [stocks, setStocks] = useState<StockHolding[]>([]);
   const [funds, setFunds] = useState<MutualFundHolding[]>([]);
@@ -324,9 +354,10 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
     setOtherAssets((await oRes.json()).assets || []);
     setSales(salesRes.ok ? (await salesRes.json()).sales || [] : []);
     setLoading(false);
-    // Deleting a holding also drops its categories.
+    // Deleting a holding also drops its categories; sales and purchases move investment cash.
     reloadCategories();
-  }, [reloadCategories]);
+    reloadCash();
+  }, [reloadCategories, reloadCash]);
 
   useEffect(() => {
     load();
@@ -410,8 +441,8 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
   );
 
   const liveSales = sales.filter((x) => !x.reversedAt).length;
-  // Sale proceeds kept for reinvestment are still part of the portfolio (as in net worth).
-  const keptProceeds = useMemo(() => sales.reduce((t, x) => t + (x.reversedAt || x.account ? 0 : toBase(x.proceedsLeft ?? 0, x.currency)), 0), [sales, toBase]);
+  // Investment cash is part of the portfolio (as in net worth).
+  const keptProceeds = useMemo(() => cash.balances.reduce((t, b) => t + toBase(b.balance, b.currency), 0), [cash.balances, toBase]);
   const totalValue = stockValue + fundValue + depositValue + otherValue + keptProceeds;
   const totalInvested = stockCost + fundCost + depositCost + otherCost;
   const totalGain = stockValue - stockCost + (fundValue - fundCost) + (depositValue - depositCost) + (otherValue - otherCost);
@@ -595,6 +626,10 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
         description="Stocks, funds, deposits and anything else you're growing: what you paid, what it's worth now, and how it's doing."
         actions={
           <>
+            <Button onClick={() => setResearch("")}>
+              <ScanSearch className="h-4 w-4" />
+              Search &amp; research
+            </Button>
             <Button variant="outline" onClick={() => setExporting(true)}>
               <Download className="h-4 w-4" />
               Export
@@ -610,7 +645,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
 
       <div className="space-y-3">
         <RangeBar range={range} onChange={setRange} />
-        <CategoryBar filter={catFilter} onFilter={setCatFilter} onManage={() => setManaging(true)} />
+        <CategoryBar filter={catFilter} onFilter={setCatFilter} onManage={() => setManaging(true)} positions={positions} />
       </div>
       <CategoryManager open={managing} onOpenChange={setManaging} positions={positions} />
 
@@ -661,7 +696,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
             <Stat
               label="Current value"
               value={formatMoney(Math.round(totalValue), currency)}
-              hint={<><Equivalent both value={totalValue} currency={currency} className="block text-xs" /><span className="block">Stocks and funds {formatMoney(Math.round(stockValue + fundValue), currency)} · deposits and other {formatMoney(Math.round(depositValue + otherValue), currency)}{keptProceeds > 0.5 ? ` · ${formatMoney(Math.round(keptProceeds), currency)} waiting to be reinvested` : ""}</span></>}
+              hint={<><Equivalent both value={totalValue} currency={currency} className="block text-xs" /><span className="block">Stocks and funds {formatMoney(Math.round(stockValue + fundValue), currency)} · deposits and other {formatMoney(Math.round(depositValue + otherValue), currency)}{keptProceeds > 0.5 ? ` · investment cash ${formatMoney(Math.round(keptProceeds), currency)}` : ""}</span></>}
             />
           </div>
           <div className="bg-card p-5">
@@ -682,6 +717,7 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
       </Panel>
       )}
       <PriceFreshness stocks={stocks} funds={funds} />
+      <InvestmentCashStrip />
       {ranged && (
         <p className="-mt-2 text-xs text-muted-foreground">
           The tabs show holdings with a purchase in this period (each row still shows the whole holding, so editing stays safe) and sales made in it.
@@ -705,10 +741,10 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
       <SellContext.Provider value={setSellTarget}>
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="max-w-full justify-start overflow-x-auto">
-          <TabsTrigger value="stocks" className="cursor-pointer">Stocks{narrowed ? ` (${view.stocks.length})` : ""}</TabsTrigger>
-          <TabsTrigger value="funds" className="cursor-pointer">Mutual funds{narrowed ? ` (${view.funds.length})` : ""}</TabsTrigger>
-          <TabsTrigger value="fds" className="cursor-pointer">Fixed deposits{narrowed ? ` (${view.deposits.length})` : ""}</TabsTrigger>
-          <TabsTrigger value="other" className="cursor-pointer">Other assets{narrowed ? ` (${view.otherAssets.length})` : ""}</TabsTrigger>
+          <TabsTrigger value="stocks" className="cursor-pointer">Stocks ({view.stocks.length})</TabsTrigger>
+          <TabsTrigger value="funds" className="cursor-pointer">Mutual funds ({view.funds.length})</TabsTrigger>
+          <TabsTrigger value="fds" className="cursor-pointer">Fixed deposits ({view.deposits.length})</TabsTrigger>
+          <TabsTrigger value="other" className="cursor-pointer">Other assets ({view.otherAssets.length})</TabsTrigger>
           <TabsTrigger value="categories" className="cursor-pointer">By category</TabsTrigger>
           <TabsTrigger value="sold" className="cursor-pointer">Sold &amp; closed{narrowed ? ` (${view.sales.filter((x) => !x.reversedAt).length})` : liveSales ? ` (${liveSales})` : ""}</TabsTrigger>
         </TabsList>
@@ -745,6 +781,13 @@ function InvestmentsView({ catFilter, setCatFilter }: { catFilter: string; setCa
       </Tabs>
       </SellContext.Provider>
       <SellDialog target={sellTarget} onOpenChange={(o) => !o && setSellTarget(null)} onSold={load} />
+      <ResearchDrawer
+        symbol={researchSymbol}
+        onSymbol={setResearch}
+        held={stocks.map((h) => ({ id: h.id, ticker: h.ticker, quantity: String(h.quantity) }))}
+        onAdd={(q) => router.replace(`/investments?add=${encodeURIComponent(q.symbol)}${q.exchange ? `&exchange=${encodeURIComponent(q.exchange)}` : ""}&currency=${encodeURIComponent(q.currency)}&n=${Date.now()}`, { scroll: false })}
+        onOpenHolding={(id) => router.replace(`/investments?stock=${encodeURIComponent(id)}&n=${Date.now()}`, { scroll: false })}
+      />
     </div>
   );
 }
@@ -773,8 +816,15 @@ function StockTab({
   const [exchange, setExchange] = useState("");
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
+  const [charges, setCharges] = useState("");
   const [currency, setCurrency] = useState(defaultCurrency);
   const [purchaseDate, setPurchaseDate] = useState(() => new Date().toISOString().slice(0, 10));
+  // One per add form: a double submit or a retry records the purchase once.
+  const [requestKey, setRequestKey] = useState(() => newKey());
+  const cash = useInvestmentCash();
+  const available = cash?.balanceOf(currency) ?? 0;
+  const total = Math.round(((Number(quantity) || 0) * (Number(price) || 0) + (Number(charges) || 0)) * 100) / 100;
+  const fundingIssue = fundingProblem(funding, total, available, currency);
   // Defaults to NSE for INR users — the exchange most likely to be searched
   // for by this app's primary (Indian) audience.
   const [searchExchange, setSearchExchange] = useState(defaultCurrency === "INR" ? "NSI" : ALL_EXCHANGES);
@@ -783,6 +833,8 @@ function StockTab({
   // Optional target / stop-loss per share, for this purchase (a client's) or the whole stock.
   const [targetPrice, setTargetPrice] = useState("");
   const [stopLossPrice, setStopLossPrice] = useState("");
+  const [moreOpen, setMoreOpen] = useState(false);
+  const alertsInvalid = !!(targetPrice.trim() && stopLossPrice.trim() && Number(stopLossPrice) >= Number(targetPrice));
 
   // One edit form for every way in: the row's Edit, and Edit / a purchase's
   // pencil in its details. focusLot puts the cursor on that purchase.
@@ -792,11 +844,27 @@ function StockTab({
   // A notification links to /investments?stock=<id>: open that stock.
   const search = useSearchParams();
   const linked = search.get("stock");
+  const linkRequest = linked ? `${linked}:${search.get("n") ?? ""}` : null;
   const [openedLink, setOpenedLink] = useState<string | null>(null);
-  if (linked && linked !== openedLink && allStocks.some((x) => x.id === linked)) {
-    setOpenedLink(linked);
+  if (linked && linkRequest !== openedLink && allStocks.some((x) => x.id === linked)) {
+    setOpenedLink(linkRequest);
     setDetailsId(linked);
   }
+  // From Research: /investments?add=SYMBOL opens this form with the ticker filled in.
+  // Research passes the exchange and trading currency too; `n` makes each request distinct.
+  const toAdd = search.get("add");
+  const addRequest = toAdd ? `${toAdd}:${search.get("n") ?? ""}` : null;
+  const [openedAdd, setOpenedAdd] = useState<string | null>(null);
+  if (toAdd && addRequest !== openedAdd) {
+    setOpenedAdd(addRequest);
+    setTicker(toAdd.toUpperCase());
+    const ex = search.get("exchange");
+    if (ex) setExchange(ex);
+    const cur = search.get("currency");
+    if (cur && SUPPORTED_CURRENCIES.some((c) => c.code === cur)) setCurrency(cur);
+    setOpen(true);
+  }
+  const heldAlready = ticker.trim() ? allStocks.find((h) => h.ticker === ticker.trim().toUpperCase() && (h.exchange ?? "") === (exchange.trim() || (h.exchange ?? ""))) : undefined;
   const detailsHolding = allStocks.find((s) => s.id === detailsId) || null;
 
   async function handleCreate(e: React.FormEvent) {
@@ -810,9 +878,11 @@ function StockTab({
         exchange,
         quantity,
         price,
+        ...(Number(charges) > 0 ? { charges: Number(charges) } : {}),
         currency,
         purchaseDate,
-        ...fundingBody(funding),
+        idempotencyKey: requestKey,
+        ...fundingBody(funding, total, available),
         ...(pickerEmpty(cats) ? {} : { categoryIds: cats.ids, newNames: cats.newNames, categoryScope: catScope }),
         ...(targetPrice.trim() ? { targetPrice: Number(targetPrice) } : {}),
         ...(stopLossPrice.trim() ? { stopLossPrice: Number(stopLossPrice) } : {}),
@@ -829,10 +899,14 @@ function StockTab({
     setTicker("");
     setQuantity("");
     setPrice("");
+    setCharges("");
+    setRequestKey(newKey());
     toast.success(
-      data.merged
-        ? "Added as a new purchase of a stock you already hold."
-        : "Stock added."
+      data.duplicate
+        ? "Already added: this purchase was saved once."
+        : data.merged
+          ? "Added as a new purchase of a stock you already hold."
+          : "Stock added."
     );
     onChange();
   }
@@ -863,100 +937,105 @@ function StockTab({
           <DialogTrigger asChild>
             <Button size="sm" className="cursor-pointer"><Plus className="h-4 w-4" />Add stock</Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-md">
+          <DialogContent className="sm:max-w-lg">
             <DialogHeader><DialogTitle>Add a stock</DialogTitle></DialogHeader>
             <form onSubmit={handleCreate} className="space-y-4">
-              <div className="space-y-2">
-                <Label>Search in</Label>
-                <Select value={searchExchange} onValueChange={setSearchExchange}>
-                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {EXCHANGE_FILTERS.map((e) => (
-                      <SelectItem key={e.code} value={e.code}>{e.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label>Ticker</Label>
-                  <TickerAutocomplete
-                    value={ticker}
-                    onChange={setTicker}
-                    onSelect={(s) => {
-                      setTicker(s.symbol);
-                      if (!exchange) setExchange(s.exchange);
-                    }}
-                    exchangeFilter={searchExchange}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Exchange</Label>
-                  <Input value={exchange} onChange={(e) => setExchange(e.target.value)} placeholder="Optional" />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label>Quantity</Label>
-                  <Input type="number" step="0.0001" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
-                </div>
-                <div className="space-y-2">
-                  <Label>Price paid</Label>
-                  <Input type="number" step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} required />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label>Currency</Label>
-                  <Select value={currency} onValueChange={setCurrency}>
-                    <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <Label>Stock</Label>
+                  <Select value={searchExchange} onValueChange={setSearchExchange}>
+                    <SelectTrigger className="h-7 w-auto gap-1 border-0 bg-transparent px-1 text-xs text-muted-foreground shadow-none" aria-label="Search in"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}
+                      {EXCHANGE_FILTERS.map((e) => (
+                        <SelectItem key={e.code} value={e.code}>{e.label}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label>Bought on</Label>
-                  <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
+                <TickerAutocomplete
+                  value={ticker}
+                  onChange={setTicker}
+                  onSelect={(s) => {
+                    setTicker(s.symbol);
+                    setExchange(s.exchange);
+                  }}
+                  exchangeFilter={searchExchange}
+                />
+                {heldAlready && <p className="text-xs text-muted-foreground">You hold {Number(Number(heldAlready.quantity).toFixed(4))} already; this adds a purchase to it.</p>}
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-qty">Quantity</Label>
+                  <Input id="add-qty" type="number" inputMode="decimal" step="any" min="0" value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-price">Price paid</Label>
+                  <Input id="add-price" type="number" inputMode="decimal" step="any" min="0" value={price} onChange={(e) => setPrice(e.target.value)} required />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-charges" title="Brokerage, taxes and fees">Charges</Label>
+                  <Input id="add-charges" type="number" inputMode="decimal" step="0.01" min="0" value={charges} onChange={(e) => setCharges(e.target.value)} placeholder="0" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-date">Bought on</Label>
+                  <Input id="add-date" type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
                 </div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Already own this stock? Adding it again with the same ticker, exchange, and currency combines it into
-                your existing holding and averages the price. No duplicate row.
-              </p>
-              <div className="space-y-2">
-                <CategoryField value={cats} onChange={setCats} />
-                {!pickerEmpty(cats) && (
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span className="text-muted-foreground">Applies to</span>
-                    <div role="radiogroup" aria-label="Categories apply to" className="inline-flex rounded-md bg-muted p-0.5">
-                      {([["PURCHASE", "This purchase"], ["STOCK", "Every share of it"]] as const).map(([v, l]) => (
-                        <button key={v} type="button" role="radio" aria-checked={catScope === v} onClick={() => setCatScope(v)} className={`h-7 cursor-pointer rounded px-2.5 transition-colors ${catScope === v ? "bg-card font-medium shadow-card" : "text-muted-foreground hover:text-foreground"}`}>
-                          {l}
-                        </button>
-                      ))}
+              {Number(quantity) > 0 && Number(price) > 0 && (
+                <p className="-mt-2 text-xs text-muted-foreground tabular-nums">
+                  Total {formatMoney(total, currency)}
+                  {Number(charges) > 0 && ` incl. ${formatMoney(Number(charges), currency)} charges, so each share cost ${formatMoney(total / Number(quantity), currency)}`}
+                </p>
+              )}
+              <FundingFields value={funding} onChange={setFunding} currency={currency} total={total} />
+              <CategoryField value={cats} onChange={setCats} />
+              <div>
+                <button type="button" onClick={() => setMoreOpen(!moreOpen)} aria-expanded={moreOpen} className="inline-flex cursor-pointer items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+                  <ChevronDown className={`h-3.5 w-3.5 transition-transform ${moreOpen ? "rotate-180" : ""}`} />
+                  More options{targetPrice || stopLossPrice ? " · alerts set" : ""}
+                </button>
+                {moreOpen && (
+                  <div className="mt-3 space-y-4">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="add-exchange">Exchange</Label>
+                        <Input id="add-exchange" value={exchange} onChange={(e) => setExchange(e.target.value)} placeholder="Optional" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Currency</Label>
+                        <Select value={currency} onValueChange={setCurrency}>
+                          <SelectTrigger className="w-full" aria-label="Currency"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
-                    <span className="basis-full text-muted-foreground">
-                      {catScope === "PURCHASE" ? "Just these shares, e.g. the client they're for. Other purchases of it keep their own." : "Every share, now and later, e.g. an industry."}
-                    </span>
+                    {!pickerEmpty(cats) && (
+                      <div className="space-y-1.5">
+                        <Label>Categories apply to</Label>
+                        <div role="radiogroup" aria-label="Categories apply to" className="inline-flex rounded-md bg-muted p-0.5 text-xs">
+                          {([["PURCHASE", "This purchase"], ["STOCK", "Every share of it"]] as const).map(([v, l]) => (
+                            <button key={v} type="button" role="radio" aria-checked={catScope === v} onClick={() => setCatScope(v)} className={`h-7 cursor-pointer rounded px-2.5 transition-colors ${catScope === v ? "bg-card font-medium shadow-card" : "text-muted-foreground hover:text-foreground"}`}>
+                              {l}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="space-y-1.5">
+                      <Label>Price alerts, per share</Label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Input type="number" inputMode="decimal" step="any" min="0" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} placeholder="Target" aria-label="Target price per share" />
+                        <Input type="number" inputMode="decimal" step="any" min="0" value={stopLossPrice} onChange={(e) => setStopLossPrice(e.target.value)} placeholder="Stop-loss" aria-label="Stop-loss price per share" aria-invalid={alertsInvalid} />
+                      </div>
+                      {alertsInvalid && <p className="text-xs text-negative">The stop-loss has to be below the target.</p>}
+                    </div>
                   </div>
                 )}
               </div>
-              <div className="space-y-1.5">
-                <Label>Price alerts <span className="font-normal text-muted-foreground">(optional)</span></Label>
-                <div className="grid grid-cols-2 gap-3">
-                  <Input type="number" inputMode="decimal" step="any" min="0" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} placeholder="Target price" aria-label="Target price per share" />
-                  <Input type="number" inputMode="decimal" step="any" min="0" value={stopLossPrice} onChange={(e) => setStopLossPrice(e.target.value)} placeholder="Stop-loss price" aria-label="Stop-loss price per share" aria-invalid={!!(targetPrice.trim() && stopLossPrice.trim() && Number(stopLossPrice) >= Number(targetPrice))} />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {targetPrice.trim() && stopLossPrice.trim() && Number(stopLossPrice) >= Number(targetPrice)
-                    ? <span className="text-negative">The stop-loss has to be below the target.</span>
-                    : <>Per share, in {currency}. {!pickerEmpty(cats) && catScope === "PURCHASE" ? "For this purchase only, so another client's shares can have their own." : "For the whole stock."} You&apos;re notified when it&apos;s reached; nothing is sold for you.</>}
-                </p>
-              </div>
-              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(quantity) * Number(price)} />
               <DialogFooter>
-                <Button type="submit" disabled={saving || !!(targetPrice.trim() && stopLossPrice.trim() && Number(stopLossPrice) >= Number(targetPrice))} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
+                <Button type="submit" disabled={saving || alertsInvalid || !!fundingIssue} className="w-full cursor-pointer">{saving ? "Adding…" : "Add stock"}</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -1191,8 +1270,14 @@ function FundTab({
   const [schemeCode, setSchemeCode] = useState("");
   const [units, setUnits] = useState("");
   const [avgNav, setAvgNav] = useState("");
+  const [charges, setCharges] = useState("");
   const [currency, setCurrency] = useState(defaultCurrency);
   const [purchaseDate, setPurchaseDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [requestKey, setRequestKey] = useState(() => newKey());
+  const cash = useInvestmentCash();
+  const available = cash?.balanceOf(currency) ?? 0;
+  const total = Math.round(((Number(units) || 0) * (Number(avgNav) || 0) + (Number(charges) || 0)) * 100) / 100;
+  const fundingIssue = fundingProblem(funding, total, available, currency);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -1200,7 +1285,7 @@ function FundTab({
     const res = await fetch("/api/investments/mutual-funds", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fundName, schemeCode, units, avgNav, currency, purchaseDate, ...fundingBody(funding) }),
+      body: JSON.stringify({ fundName, schemeCode, units, avgNav, ...(Number(charges) > 0 ? { charges: Number(charges) } : {}), currency, purchaseDate, idempotencyKey: requestKey, ...fundingBody(funding, total, available) }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
@@ -1212,7 +1297,9 @@ function FundTab({
     setFundName("");
     setUnits("");
     setAvgNav("");
-    toast.success(data.merged ? "Added as a new purchase of a fund you already hold." : "Fund added.");
+    setCharges("");
+    setRequestKey(newKey());
+    toast.success(data.duplicate ? "Already added: this purchase was saved once." : data.merged ? "Added as a new purchase of a fund you already hold." : "Fund added.");
     onChange();
   }
 
@@ -1238,39 +1325,34 @@ function FundTab({
                 <Label>Fund name</Label>
                 <Input value={fundName} onChange={(e) => setFundName(e.target.value)} required placeholder="Parag Parikh Flexi Cap" />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label>AMFI Scheme Code</Label>
-                  <Input value={schemeCode} onChange={(e) => setSchemeCode(e.target.value)} placeholder="Optional. Turns on automatic NAV updates." />
-                </div>
-                <div className="space-y-2">
-                  <Label>Currency</Label>
-                  <Select value={currency} onValueChange={setCurrency}>
-                    <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div className="space-y-2">
+                <Label>AMFI scheme code <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                <Input value={schemeCode} onChange={(e) => setSchemeCode(e.target.value)} placeholder="Turns on automatic NAV updates" />
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <div className="space-y-2">
                   <Label>Units</Label>
-                  <Input type="number" step="0.001" value={units} onChange={(e) => setUnits(e.target.value)} required />
+                  <Input type="number" inputMode="decimal" step="any" min="0" value={units} onChange={(e) => setUnits(e.target.value)} required />
                 </div>
                 <div className="space-y-2">
                   <Label>Average NAV</Label>
-                  <Input type="number" step="0.01" value={avgNav} onChange={(e) => setAvgNav(e.target.value)} required />
+                  <Input type="number" inputMode="decimal" step="any" min="0" value={avgNav} onChange={(e) => setAvgNav(e.target.value)} required />
+                </div>
+                <div className="space-y-2">
+                  <Label title="Stamp duty or other charges">Charges</Label>
+                  <Input type="number" inputMode="decimal" step="0.01" min="0" value={charges} onChange={(e) => setCharges(e.target.value)} placeholder="0" aria-label="Charges" />
+                </div>
+                <div className="col-span-2 space-y-2 sm:col-span-3">
+                  <Label>Bought on</Label>
+                  <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
                 </div>
               </div>
-              <div className="space-y-2">
-                <Label>Bought on</Label>
-                <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
-              </div>
+              {total > 0 && <p className="-mt-2 text-xs text-muted-foreground tabular-nums">Total {formatMoney(total, currency)}{Number(charges) > 0 && ` incl. ${formatMoney(Number(charges), currency)} charges`}</p>}
+              <CurrencyChoice value={currency} onChange={setCurrency} />
+              <FundingFields value={funding} onChange={setFunding} currency={currency} total={total} />
               <CategoryField value={cats} onChange={setCats} />
-              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(units) * Number(avgNav)} />
               <DialogFooter>
-                <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
+                <Button type="submit" disabled={saving || !!fundingIssue} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -1303,6 +1385,11 @@ function FixedDepositTab({
   const [currency, setCurrency] = useState(defaultCurrency);
   const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [maturityDate, setMaturityDate] = useState("");
+  const [requestKey, setRequestKey] = useState(() => newKey());
+  const cash = useInvestmentCash();
+  const available = cash?.balanceOf(currency) ?? 0;
+  const total = Number(principal) || 0;
+  const fundingIssue = fundingProblem(funding, total, available, currency);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -1310,7 +1397,7 @@ function FixedDepositTab({
     const res = await fetch("/api/investments/fixed-deposits", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bank, principal, interestRate, currency, startDate, maturityDate, ...fundingBody(funding) }),
+      body: JSON.stringify({ bank, principal, interestRate, currency, startDate, maturityDate, idempotencyKey: requestKey, ...fundingBody(funding, total, available) }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
@@ -1323,7 +1410,8 @@ function FixedDepositTab({
     setPrincipal("");
     setInterestRate("");
     setMaturityDate("");
-    toast.success("Fixed deposit added.");
+    setRequestKey(newKey());
+    toast.success(data.duplicate ? "Already added: this deposit was saved once." : "Fixed deposit added.");
     onChange();
   }
 
@@ -1355,7 +1443,7 @@ function FixedDepositTab({
                   <Input type="number" step="0.01" value={principal} onChange={(e) => setPrincipal(e.target.value)} required />
                 </div>
                 <div className="space-y-2">
-                  <Label>Interest Rate (%)</Label>
+                  <Label>Interest rate (% a year)</Label>
                   <Input type="number" step="0.01" value={interestRate} onChange={(e) => setInterestRate(e.target.value)} required />
                 </div>
               </div>
@@ -1369,19 +1457,11 @@ function FixedDepositTab({
                   <Input type="date" value={maturityDate} onChange={(e) => setMaturityDate(e.target.value)} required />
                 </div>
               </div>
-              <div className="space-y-2">
-                <Label>Currency</Label>
-                <Select value={currency} onValueChange={setCurrency}>
-                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
+              <CurrencyChoice value={currency} onChange={setCurrency} />
+              <FundingFields value={funding} onChange={setFunding} currency={currency} total={total} />
               <CategoryField value={cats} onChange={setCats} />
-              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(principal)} />
               <DialogFooter>
-                <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
+                <Button type="submit" disabled={saving || !!fundingIssue} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -1414,6 +1494,11 @@ function OtherAssetTab({
   const [currentValue, setCurrentValue] = useState("");
   const [currency, setCurrency] = useState(defaultCurrency);
   const [purchaseDate, setPurchaseDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [requestKey, setRequestKey] = useState(() => newKey());
+  const cash = useInvestmentCash();
+  const available = cash?.balanceOf(currency) ?? 0;
+  const total = Number(purchasePrice) || 0;
+  const fundingIssue = fundingProblem(funding, total, available, currency);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -1421,7 +1506,7 @@ function OtherAssetTab({
     const res = await fetch("/api/investments/other", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ assetType, name, purchasePrice, currentValue, currency, purchaseDate, ...fundingBody(funding) }),
+      body: JSON.stringify({ assetType, name, purchasePrice, currentValue, currency, purchaseDate, idempotencyKey: requestKey, ...fundingBody(funding, total, available) }),
     });
     setSaving(false);
     const data = await res.json().catch(() => ({}));
@@ -1433,7 +1518,8 @@ function OtherAssetTab({
     setName("");
     setPurchasePrice("");
     setCurrentValue("");
-    toast.success("Asset added.");
+    setRequestKey(newKey());
+    toast.success(data.duplicate ? "Already added: this asset was saved once." : "Asset added.");
     onChange();
   }
 
@@ -1480,25 +1566,15 @@ function OtherAssetTab({
                   <Input type="number" step="0.01" value={currentValue} onChange={(e) => setCurrentValue(e.target.value)} required />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label>Currency</Label>
-                  <Select value={currency} onValueChange={setCurrency}>
-                    <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Bought on</Label>
-                  <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
-                </div>
+              <div className="space-y-2">
+                <Label>Bought on</Label>
+                <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required />
               </div>
+              <CurrencyChoice value={currency} onChange={setCurrency} />
+              <FundingFields value={funding} onChange={setFunding} currency={currency} total={total} />
               <CategoryField value={cats} onChange={setCats} />
-              <FundingFields value={funding} onChange={setFunding} currency={currency} cost={Number(purchasePrice)} />
               <DialogFooter>
-                <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
+                <Button type="submit" disabled={saving || !!fundingIssue} className="w-full cursor-pointer">{saving ? "Adding…" : "Add"}</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -1506,6 +1582,28 @@ function OtherAssetTab({
       </div>
 
       <AssetTable assets={assets} loading={loading} typeLabel={(t) => OTHER_ASSET_TYPES.find((x) => x.value === t)?.label ?? t} onDelete={handleDelete} onChanged={onChange} />
+    </div>
+  );
+}
+
+/** "In INR · Change": the currency, as a dropdown only when you want another. */
+function CurrencyChoice({ value, onChange }: { value: string; onChange: (c: string) => void }) {
+  const [open, setOpen] = useState(false);
+  if (!open) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Amounts in {value} ·{" "}
+        <button type="button" onClick={() => setOpen(true)} className="cursor-pointer underline underline-offset-2 hover:text-foreground">Change</button>
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <Label>Currency</Label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="w-full" aria-label="Currency"><SelectValue /></SelectTrigger>
+        <SelectContent>{SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}</SelectContent>
+      </Select>
     </div>
   );
 }

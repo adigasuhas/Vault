@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { formatCompactMoney, formatMoney } from "@/lib/currencies";
 import { formatDate } from "@/lib/format";
 import { tooltipStyle } from "@/lib/chart-colors";
-import { categoryGrowth, categoryRows, linkKey, membersOf, uncategorised, type CategoryLite, type CategoryRow, type InvestmentKind, type Position, type SaleLite } from "@/lib/category-metrics";
+import { categoryCounts, categoryGrowth, categoryRows, linkKey, membersOf, uncategorised, type CategoryCount, type CategoryLite, type CategoryRow, type InvestmentKind, type Position, type SaleLite } from "@/lib/category-metrics";
 import { EmptyState, Panel, SkeletonBlock } from "@/components/app/PageHeader";
 import { ConfirmAction } from "@/components/ConfirmAction";
 import { Button } from "@/components/ui/button";
@@ -318,10 +318,20 @@ function AssignDialog({ target, onClose }: { target: { kind: LinkTarget; id: str
 
 /** One row of the filter: all, each category, or none. Sits with the date
  * range, so both narrow the tabs together. */
-export function CategoryBar({ filter, onFilter, onManage }: { filter: string; onFilter: (id: string) => void; onManage: () => void }) {
+const KIND_PLURAL: Record<InvestmentKind, [string, string]> = { STOCK: ["stock", "stocks"], MUTUAL_FUND: ["fund", "funds"], FIXED_DEPOSIT: ["deposit", "deposits"], OTHER: ["other asset", "other assets"] };
+/** "3 holdings: 2 stocks, 1 deposit · 150 shares" */
+function describeCount(c: CategoryCount) {
+  if (!c.holdings) return "No current holdings";
+  const parts = (Object.entries(c.byKind) as [InvestmentKind, number][]).map(([k, n]) => `${n} ${KIND_PLURAL[k][n === 1 ? 0 : 1]}`);
+  return `${c.holdings} ${c.holdings === 1 ? "holding" : "holdings"}: ${parts.join(", ")}${c.shares ? ` · ${Number(c.shares.toFixed(4)).toLocaleString()} shares` : ""}`;
+}
+
+export function CategoryBar({ filter, onFilter, onManage, positions }: { filter: string; onFilter: (id: string) => void; onManage: () => void; positions: Position[] }) {
   const ctx = useCategories();
+  const cats = useMemo(() => ctx?.categories ?? [], [ctx]);
+  // Counted from what's held now, so they follow every buy, sale, delete and reassignment.
+  const counts = useMemo(() => categoryCounts(cats, positions), [cats, positions]);
   if (!ctx?.loaded) return null;
-  const cats = ctx.categories;
   const pill = (active: boolean) =>
     cn("inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors", active ? "border-foreground/40 bg-foreground/[0.06] font-medium text-foreground" : "border-border text-muted-foreground hover:border-foreground/25 hover:text-foreground");
   return (
@@ -333,12 +343,13 @@ export function CategoryBar({ filter, onFilter, onManage }: { filter: string; on
           <button key={c.id} role="radio" aria-checked={filter === c.id} onClick={() => onFilter(filter === c.id ? "" : c.id)} className={pill(filter === c.id)}>
             <Dot color={c.color} />
             {c.name}
-            <span className="tabular-nums text-muted-foreground">{linkCount(c)}</span>
+            <span className="tabular-nums text-muted-foreground" title={describeCount(counts.byCategory.get(c.id)!)} aria-label={describeCount(counts.byCategory.get(c.id)!)}>({counts.byCategory.get(c.id)!.holdings})</span>
           </button>
         ))}
         {cats.length > 0 && (
           <button role="radio" aria-checked={filter === UNCATEGORISED} onClick={() => onFilter(filter === UNCATEGORISED ? "" : UNCATEGORISED)} className={pill(filter === UNCATEGORISED)}>
             Not in a category
+            <span className="tabular-nums text-muted-foreground" title={describeCount(counts.uncategorised)} aria-label={describeCount(counts.uncategorised)}>({counts.uncategorised.holdings})</span>
           </button>
         )}
       </div>

@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { cashSigned } from "@/lib/investment-cash";
 import { createFxConverter, type FxConverter } from "@/lib/fx";
 import { fdCurrentValue } from "@/lib/investments";
 import { linkKey, partOf, type InvestmentKind, type Position } from "@/lib/category-metrics";
@@ -45,14 +46,13 @@ const day = (d: Date | string) => (typeof d === "string" ? d : d.toISOString()).
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 interface SoldLotJson { lotId: string | null; purchaseDate: string; quantity: number | null; price: number | null; cost: number }
-interface ReinvestmentJson { amount: number; into: string; date: string; ref?: string }
 
 // ------------------------------------------------------------------ loading
 
 async function load(userId: string) {
   const user = await db.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true, name: true, email: true } });
   const fx = await createFxConverter(userId, user.baseCurrency);
-  const [stocks, funds, deposits, assets, sales, categories, ledger] = await Promise.all([
+  const [stocks, funds, deposits, assets, sales, categories, ledger, cash] = await Promise.all([
     db.stockHolding.findMany({ where: { userId }, include: { lots: true }, orderBy: { ticker: "asc" } }),
     db.mutualFundHolding.findMany({ where: { userId }, include: { lots: true }, orderBy: { fundName: "asc" } }),
     db.fixedDeposit.findMany({ where: { userId }, orderBy: { startDate: "asc" } }),
@@ -64,8 +64,16 @@ async function load(userId: string) {
       include: { account: { select: { name: true } }, reversalOf: { select: { type: true, investmentRef: true, investmentSaleId: true } } },
       orderBy: { date: "asc" },
     }),
+    db.investmentCashEntry.findMany({
+      where: { userId },
+      include: {
+        ledgerEntry: { select: { amount: true, currency: true, account: { select: { name: true } } } },
+        reversalOf: { select: { type: true, saleId: true, investmentRef: true, ledgerEntry: { select: { account: { select: { name: true } } } } } },
+      },
+      orderBy: [{ date: "asc" }, { createdAt: "asc" }],
+    }),
   ]);
-  return { user, base: user.baseCurrency, fx, stocks, funds, deposits, assets, sales, categories, ledger };
+  return { user, base: user.baseCurrency, fx, stocks, funds, deposits, assets, sales, categories, ledger, cash };
 }
 type Data = Awaited<ReturnType<typeof load>>;
 
@@ -360,7 +368,7 @@ export async function buildInvestmentReport(userId: string, p: InvestmentReportP
           unrealisedBase: noPrice ? null : conv(h.value - h.invested, h.currency),
         };
       });
-      const kept = d.sales.filter((s) => !s.reversedAt && !s.accountId).reduce((t, s) => t + (conv(Number(s.netProceeds) - Number(s.creditedNet ?? 0) - (s.reinvestments as unknown as ReinvestmentJson[]).reduce((x, r) => x + Number(r.amount), 0), s.currency) ?? 0), 0);
+      const kept = d.cash.reduce((t, e) => t + (conv(cashSigned(e.type, Number(e.amount)), e.currency) ?? 0), 0);
       return {
         type: p.type,
         fileName: fileStem,
@@ -383,7 +391,7 @@ export async function buildInvestmentReport(userId: string, p: InvestmentReportP
           "Holdings without a market price are valued at what was paid and their gain is shown as unknown (blank), not zero. Stale = the last quote is over 4 days old.",
           ...(m.active ? ["With a category filter, a stock split between clients shows only the shares bought for the chosen categories (\"of\" = shares held in total)."] : []),
           ...overlapNote,
-          ...(kept > 0.5 && !m.active && kinds.size === ASSET_TYPES.length ? [`Not in this table: ${r2(kept)} ${base} of sale proceeds waiting to be reinvested.`] : []),
+          ...(kept > 0.5 && !m.active && kinds.size === ASSET_TYPES.length ? [`Not in this table: ${r2(kept)} ${base} in investment cash, waiting to be reinvested or withdrawn.`] : []),
           ...fxNote(),
         ],
       };
@@ -444,15 +452,6 @@ export async function buildInvestmentReport(userId: string, p: InvestmentReportP
       }));
       // Undoing a sale is its own event, on the day it was undone.
       for (const t of all) if (t.undoneOn && t.undoneOn >= from && t.undoneOn <= to) rows.push({ date: t.undoneOn, kind: "Sale undone", name: t.name, assetType: KIND_LABEL[t.kind], categories: m.names(t.kind, t.holdingId, t.lotIds), quantity: t.quantity, amount: -t.net, currency: t.currency, account: t.account, status: "Done", details: `sale of ${t.date} reversed` });
-      // Reinvestments of kept proceeds.
-      for (const s of d.sales) {
-        if (!kinds.has(s.kind) || !m.includes(s.kind, s.holdingId, null) && !(s.lots as unknown as SoldLotJson[]).some((l) => m.includes(s.kind, s.holdingId, l.lotId))) continue;
-        for (const r of (s.reinvestments as unknown as ReinvestmentJson[]) ?? []) {
-          const dt = day(r.date);
-          if (dt < from || dt > to) continue;
-          rows.push({ date: dt, kind: "Proceeds reinvested", name: s.name, assetType: KIND_LABEL[s.kind], categories: m.names(s.kind, s.holdingId), quantity: null, amount: -Number(r.amount), currency: s.currency, account: "", status: s.reversedAt ? "Sale undone" : "Done", details: `into ${r.into}` });
-        }
-      }
       // Account movements: payments for purchases and sale proceeds, with any reversals.
       const lotOwner = new Map<string, { kind: InvestmentKind; holdingId: string }>();
       for (const h of d.stocks) for (const l of h.lots) lotOwner.set(l.id, { kind: "STOCK", holdingId: h.id });
@@ -483,6 +482,30 @@ export async function buildInvestmentReport(userId: string, p: InvestmentReportP
           currency: e.currency, account: e.account?.name ?? "", status: e.reversedAt ? "Reversed" : "Done", details: "Account ledger",
         });
       }
+      // Investment cash: proceeds kept, purchases it paid for, and moves to
+      // and from accounts (one row each; the account side is the same money).
+      const CASH_LABEL: Record<string, [string, string]> = {
+        SALE_PROCEEDS: ["Proceeds to investment cash", "Proceeds taken back from investment cash"],
+        PURCHASE: ["Paid from investment cash", "Investment cash payment returned"],
+        FROM_ACCOUNT: ["Added to investment cash", "Money added to investment cash undone"],
+        TO_ACCOUNT: ["Withdrawn from investment cash", "Withdrawal undone"],
+      };
+      for (const e of d.cash) {
+        const dt = day(e.date);
+        if (dt < from || dt > to) continue;
+        const base_ = e.type === "REVERSAL" ? e.reversalOf : e;
+        if (!base_) continue;
+        const saleId = base_.saleId;
+        const owner = saleId && saleById.has(saleId) ? { kind: saleById.get(saleId)!.kind, holdingId: saleById.get(saleId)!.holdingId, lotId: null } : refOwner(base_.investmentRef);
+        if (owner && (!kinds.has(owner.kind) || !m.includes(owner.kind, owner.holdingId, owner.lotId))) continue;
+        if (!owner && (m.active || kinds.size !== ASSET_TYPES.length)) continue;
+        const [done, undone] = CASH_LABEL[base_.type] ?? ["Investment cash", "Investment cash undo"];
+        const accountName = (e.type === "REVERSAL" ? e.reversalOf?.ledgerEntry?.account?.name : e.ledgerEntry?.account?.name) ?? "";
+        rows.push({
+          date: dt, kind: e.type === "REVERSAL" ? undone : done, name: e.description ?? "", assetType: owner ? KIND_LABEL[owner.kind] : "", categories: owner ? m.names(owner.kind, owner.holdingId, [owner.lotId]) : "", quantity: null,
+          amount: cashSigned(e.type, Number(e.amount)), currency: e.currency, account: accountName, status: e.reversedAt ? "Undone" : "Done", details: "Investment cash",
+        });
+      }
       rows.sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
       return {
         type: p.type,
@@ -507,7 +530,7 @@ export async function buildInvestmentReport(userId: string, p: InvestmentReportP
         rows,
         summary: [{ label: "Transactions", value: rows.length, kind: "number" }],
         notes: [
-          "Amount: money out of your investments is negative (purchases, reinvestments), money in is positive (sales). Account rows are the matching movements in your accounts; reversals appear as their own rows, nothing is deleted.",
+          "Amount: money out of your investments is negative (purchases), money in is positive (sales). Account rows are the matching movements in your accounts; investment cash rows are money kept for reinvesting (for those, the amount is the change in investment cash). Reversals appear as their own rows, nothing is deleted.",
           ...fxNote(),
         ],
       };

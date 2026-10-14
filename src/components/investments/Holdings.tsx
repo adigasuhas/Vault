@@ -13,7 +13,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { toast } from "sonner";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useSort, SortTh } from "@/components/investments/table-kit";
-import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Banknote, Eye, LineChart, MoreHorizontal, Pencil, Plus, ScanSearch, Search, Trash2 } from "lucide-react";
+import Link from "next/link";
 import { useSell } from "@/components/investments/SellDialog";
 import { cn } from "@/lib/utils";
 import { priceStatus } from "@/lib/price-freshness";
@@ -233,6 +234,7 @@ export function StockTable({
                 <DropdownMenuTrigger asChild><Button variant="outline" size="icon-sm" aria-label={`More for ${s.ticker}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onClick={() => onEdit(s)}><Pencil className="h-4 w-4" /> Edit, alerts…</DropdownMenuItem>
+                  <DropdownMenuItem asChild><Link href={`/investments?research=${encodeURIComponent(s.ticker)}`} scroll={false}><ScanSearch className="h-4 w-4" /> Research</Link></DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem variant="destructive" onClick={() => setDeleting(s)}><Trash2 className="h-4 w-4" /> Delete holding…</DropdownMenuItem>
                 </DropdownMenuContent>
@@ -296,6 +298,7 @@ export function StockTable({
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem onClick={() => sellStock(s)}><Banknote className="h-4 w-4" /> Sell…</DropdownMenuItem>
                       <DropdownMenuItem onClick={() => onEdit(s)}><Pencil className="h-4 w-4" /> Edit, alerts…</DropdownMenuItem>
+                      <DropdownMenuItem asChild><Link href={`/investments?research=${encodeURIComponent(s.ticker)}`} scroll={false}><ScanSearch className="h-4 w-4" /> Research</Link></DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem variant="destructive" onClick={() => setDeleting(s)}><Trash2 className="h-4 w-4" /> Delete holding…</DropdownMenuItem>
                     </DropdownMenuContent>

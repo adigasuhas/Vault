@@ -11,6 +11,9 @@ import type { Tx } from "@/lib/ledger";
  */
 export async function deleteUserData(userId: string) {
   await db.$transaction(async (tx: Tx) => {
+    await tx.investmentCashEntry.updateMany({ where: { userId, reversalOfId: { not: null } }, data: { reversalOfId: null } });
+    await tx.investmentCashEntry.deleteMany({ where: { userId } });
+    await tx.requestKey.deleteMany({ where: { userId } });
     await tx.ledgerEntry.updateMany({ where: { userId, reversalOfId: { not: null } }, data: { reversalOfId: null } });
     await tx.ledgerEntry.deleteMany({ where: { userId } });
     await tx.loanPayment.deleteMany({ where: { loan: { userId } } });

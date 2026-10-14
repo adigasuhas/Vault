@@ -5,7 +5,9 @@ import { fetchStockQuote } from "@/lib/market-data";
 import { recomputeHoldingFromLots } from "@/lib/stocks";
 import { parseJson, toErrorResponse } from "@/lib/validate";
 import { createStockSchema } from "@/lib/schemas";
-import { fundPurchase } from "@/lib/investment-funding";
+import { fundPurchase, fundingFrom, priceWithCharges } from "@/lib/investment-funding";
+import { claimRequest, lostRace, requestSeen, settleRequest } from "@/lib/request-keys";
+import { roundMoney } from "@/lib/validate";
 import { applyHoldingCategories, applyLotCategories } from "@/lib/investment-categories";
 import { checkPriceAlerts, setStockAlerts } from "@/lib/price-alerts";
 import type { Tx } from "@/lib/ledger";
@@ -27,18 +29,25 @@ export async function GET() {
   // How each purchase was paid, and whether a stock has sales: the edit form
   // shows the first and uses both to say what can safely change.
   const refs = holdings.flatMap((h) => h.lots.map((l) => `STOCK_LOT:${l.id}`));
-  const [paid, reinvesting, sold] = await Promise.all([
+  const [paid, fromCash, sold] = await Promise.all([
     db.ledgerEntry.findMany({
       where: { userId: session.userId, investmentRef: { in: refs }, type: "INVESTMENT_PURCHASE", reversedAt: null },
       select: { investmentRef: true, amount: true, currency: true, account: { select: { name: true } } },
     }),
-    db.investmentSale.findMany({ where: { userId: session.userId, NOT: { reinvestments: { equals: [] } } }, select: { name: true, reinvestments: true } }),
+    db.investmentCashEntry.findMany({
+      where: { userId: session.userId, investmentRef: { in: refs }, type: "PURCHASE", reversedAt: null },
+      select: { investmentRef: true, amount: true, currency: true },
+    }),
     db.investmentSale.groupBy({ by: ["holdingId"], where: { userId: session.userId, kind: "STOCK", reversedAt: null }, _count: true }),
   ]);
-  const paidFrom = new Map<string, { kind: "ACCOUNT" | "SALE"; name: string; amount?: string; currency?: string }>();
+  // Each funded purchase: the account part, the investment cash part, or both.
+  type PaidFrom = { kind: "ACCOUNT" | "CASH" | "MIXED"; name: string; amount?: string; currency?: string; cash?: string };
+  const paidFrom = new Map<string, PaidFrom>();
   for (const e of paid) if (e.investmentRef) paidFrom.set(e.investmentRef, { kind: "ACCOUNT", name: e.account?.name ?? "an account", amount: e.amount.toString(), currency: e.currency });
-  for (const sale of reinvesting) {
-    for (const r of (sale.reinvestments as { ref?: string }[] | null) ?? []) if (r.ref) paidFrom.set(r.ref, { kind: "SALE", name: sale.name });
+  for (const c of fromCash) {
+    if (!c.investmentRef) continue;
+    const prev = paidFrom.get(c.investmentRef);
+    paidFrom.set(c.investmentRef, prev ? { ...prev, kind: "MIXED", cash: c.amount.toString() } : { kind: "CASH", name: "Investment cash", cash: c.amount.toString(), currency: c.currency });
   }
   const sales = new Map(sold.map((g) => [g.holdingId, g._count]));
   return NextResponse.json({
@@ -61,7 +70,12 @@ export async function POST(req: NextRequest) {
     const { body: errBody, status } = toErrorResponse(err);
     return NextResponse.json(errBody, { status });
   }
-  const { quantity: quantityNum, price: priceNum, currency } = input;
+  const replay = await requestSeen(session.userId, input.idempotencyKey);
+  if (replay) return NextResponse.json({ duplicate: true, lotId: replay.resultId }, { status: 200 });
+  const { quantity: quantityNum, currency } = input;
+  // Charges become part of each share's cost, so profit and averages include them.
+  const priceNum = priceWithCharges(quantityNum, input.price, input.charges);
+  const total = roundMoney(quantityNum * input.price + (input.charges ?? 0));
   const tickerUpper = input.ticker.toUpperCase();
   const exchangeNormalized = input.exchange || null;
   const purchaseDateVal = input.purchaseDate;
@@ -71,10 +85,11 @@ export async function POST(req: NextRequest) {
   });
   // Best-effort — an unreachable price feed shouldn't block adding the holding.
   const quote = existing ? null : await fetchStockQuote(tickerUpper);
-  const funding = { paidFromAccountId: input.paidFromAccountId, budgetCategoryId: input.budgetCategoryId, fromSaleId: input.fromSaleId, paidAmount: input.paidAmount };
+  const funding = fundingFrom(input);
 
   try {
     const result = await db.$transaction(async (tx: Tx) => {
+      await claimRequest(tx, session.userId, input.idempotencyKey, "STOCK_PURCHASE");
       // Buying the same stock again (same ticker/exchange/currency) merges into
       // the existing position as a new lot instead of creating a duplicate row —
       // quantity sums and avgBuyPrice becomes the quantity-weighted average.
@@ -99,7 +114,8 @@ export async function POST(req: NextRequest) {
       const lot = await tx.stockPurchaseLot.create({
         data: { stockHoldingId: holdingId, quantity: quantityNum, price: priceNum, purchaseDate: purchaseDateVal },
       });
-      await fundPurchase(tx, session.userId, `STOCK_LOT:${lot.id}`, { cost: quantityNum * priceNum, currency, date: purchaseDateVal, label: `${quantityNum} ${tickerUpper}` }, funding);
+      await fundPurchase(tx, session.userId, `STOCK_LOT:${lot.id}`, { cost: total, currency, date: purchaseDateVal, label: `${quantityNum} ${tickerUpper}` }, funding);
+      await settleRequest(tx, session.userId, input.idempotencyKey, lot.id);
       await recomputeHoldingFromLots(holdingId, tx);
       const cats = { categoryIds: input.categoryIds, newNames: input.newNames, mode: "add" as const };
       if (input.categoryIds?.length || input.newNames?.length) {
@@ -123,6 +139,8 @@ export async function POST(req: NextRequest) {
     if (input.targetPrice != null || input.stopLossPrice != null) await checkPriceAlerts({ stockHoldingIds: [result.holding!.id] }).catch(() => {});
     return NextResponse.json({ holding: result.holding, lotId: result.lotId, merged: !!existing }, { status: existing ? 200 : 201 });
   } catch (err) {
+    const won = await lostRace(err, session.userId, input.idempotencyKey);
+    if (won) return NextResponse.json({ duplicate: true, lotId: won.resultId }, { status: 200 });
     const { body: errBody, status } = toErrorResponse(err);
     return NextResponse.json(errBody, { status });
   }
