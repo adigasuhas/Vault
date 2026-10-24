@@ -23,7 +23,11 @@ export const GET = authed<{ id: string }>(async (_req, { userId, params }) => {
   const occurrences = projectSchedule(s, addMonthsUTC(today, -12), addMonthsUTC(today, 18));
   const audit = await db.auditEvent.findMany({ where: { userId, entityId: s.id }, orderBy: { createdAt: "desc" }, take: 30 });
   const schedule = { ...s, amount: Number(s.amount), overrides: undefined, executions: undefined };
-  return { schedule, occurrences, audit, today };
+  // The saved per-date changes and stored occurrences, so the editor starts
+  // from exactly what's saved instead of recomputing it.
+  const overrides = s.overrides.map((o) => ({ occurrenceDate: o.occurrenceDate, date: o.date, amount: o.amount == null ? null : Number(o.amount) }));
+  const executions = s.executions.map((x) => ({ id: x.id, occurrenceDate: x.occurrenceDate, executedDate: x.executedDate, amount: Number(x.amount), status: x.status }));
+  return { schedule, occurrences, overrides, executions, audit, today };
 });
 
 export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {

@@ -22,6 +22,9 @@ export interface Reminder {
  * confirmation, budget lines past the warning threshold, cards close to their
  * limit, and deposits maturing within a month.
  */
+/** How far ahead upcoming income and bills are flagged. */
+export const UPCOMING_REMINDER_DAYS = 7;
+
 const nice = (d: string | Date) =>
   new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
 
@@ -30,7 +33,10 @@ export async function remindersFor(userId: string): Promise<Reminder[]> {
   const today = await userToday(userId);
   const out: Reminder[] = [];
 
-  const occ = await loadOccurrences(userId, addDaysUTC(today, -400), addDaysUTC(today, 7));
+  // Read from the saved schedules on every call — never from a stored queue —
+  // so a moved, paused, edited or deleted schedule can't leave a stale
+  // reminder behind. Only active schedules project upcoming dates.
+  const occ = await loadOccurrences(userId, addDaysUTC(today, -400), addDaysUTC(today, UPCOMING_REMINDER_DAYS));
   for (const o of occ) {
     const amt = formatMoney(o.amount, o.currency);
     if (o.status === "PENDING" || o.status === "FAILED") {
@@ -43,12 +49,15 @@ export async function remindersFor(userId: string): Promise<Reminder[]> {
         href: o.direction === "INCOME" ? "/receivables" : "/payments",
         date: o.date,
       });
-    } else if (o.status === "SCHEDULED" && o.date > isoDate(today)) {
+    } else if (o.status === "SCHEDULED" && o.date >= isoDate(today)) {
+      // Due today but not yet picked up by the daily run still counts as
+      // upcoming. The id carries the expected date: moving the payment makes
+      // it a new reminder, so a dismissal of the old date doesn't hide it.
       if (o.direction === "INCOME" && setting.notifyUpcomingCredits) {
-        out.push({ id: `income:${o.scheduleId}:${o.occurrenceDate}`, kind: "income", tone: "positive", title: `${o.scheduleName} is on its way`, body: `${amt} expected on ${nice(o.date)}.`, href: "/receivables", date: o.date });
+        out.push({ id: `income:${o.scheduleId}:${o.occurrenceDate}:${o.date}`, kind: "income", tone: "positive", title: `${o.scheduleName} is on its way`, body: o.date === isoDate(today) ? `${amt} expected today.` : `${amt} expected on ${nice(o.date)}.`, href: "/receivables", date: o.date });
       }
       if (o.direction === "PAYMENT" && setting.notifyUpcomingBills) {
-        out.push({ id: `bill:${o.scheduleId}:${o.occurrenceDate}`, kind: "bill", tone: "info", title: `${o.scheduleName} due soon`, body: `${amt} on ${nice(o.date)}.`, href: "/payments", date: o.date });
+        out.push({ id: `bill:${o.scheduleId}:${o.occurrenceDate}:${o.date}`, kind: "bill", tone: "info", title: `${o.scheduleName} due soon`, body: o.date === isoDate(today) ? `${amt} due today.` : `${amt} on ${nice(o.date)}.`, href: "/payments", date: o.date });
       }
     }
   }

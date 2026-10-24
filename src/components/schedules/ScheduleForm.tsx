@@ -4,13 +4,18 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { api, localToday } from "@/lib/client";
 import { formatMoney } from "@/lib/currencies";
+import { formatDate } from "@/lib/format";
 import { useCurrency } from "@/context/CurrencyContext";
-import { defaultStartDate, isoDate, neighbours, nthOccurrence, type Frequency } from "@/lib/dates";
+import { defaultStartDate, isoDate, type Frequency } from "@/lib/dates";
+import { nominalsFrom, overrideDateProblem, overridesKeptOnReanchor, isNominalOf } from "@/lib/recurrence";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FxTicker } from "@/components/app/FxTicker";
+import { ErrorState, SkeletonBlock } from "@/components/app/PageHeader";
+import { StatusBadge, occurrenceStatus } from "@/components/app/StatusBadge";
+import { RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export const KINDS = {
@@ -74,17 +79,61 @@ export interface ScheduleFormValue {
   notes: string | null;
 }
 
+/** What's saved for a schedule being edited, loaded fresh from the server so
+ * the editor never starts from a stale list or a recalculated guess. */
+interface SavedSchedule {
+  /** The rule's real anchor (its day of the month survives short months). */
+  anchor: string;
+  next: string;
+  overrides: { occurrenceDate: string; date: string | null; amount: number | null }[];
+  executions: { occurrenceDate: string | null; executedDate: string; amount: number; status: string }[];
+}
+
+interface ScheduleDetail {
+  schedule: {
+    id: string; kind: string; name: string; amount: number; currency: string; receivingAccountId: string | null; categoryId: string | null;
+    frequency: Frequency; customIntervalDays: number | null; startDate: string; nextExecutionDate: string; endDate: string | null;
+    requiresConfirmation: boolean; notes: string | null;
+  };
+  overrides: { occurrenceDate: string; date: string | null; amount: number | null }[];
+  executions: { occurrenceDate: string | null; executedDate: string; amount: number; status: string }[];
+}
+
+const day = (s: string) => s.slice(0, 10);
+const asDate = (s: string) => new Date(`${day(s)}T00:00:00.000Z`);
+const nice = (s: string) => formatDate(s, { day: "numeric", month: "short", year: "numeric" });
+
+/** The API's schedule detail as the form's starting values plus what's saved. */
+function toDetail(d: ScheduleDetail): { initial: ScheduleFormValue; saved: SavedSchedule } {
+  const s = d.schedule;
+  return {
+    initial: {
+      id: s.id,
+      kind: s.kind,
+      name: s.name,
+      amount: s.amount,
+      currency: s.currency,
+      accountId: s.receivingAccountId,
+      categoryId: s.categoryId,
+      frequency: s.frequency,
+      customIntervalDays: s.customIntervalDays,
+      startDate: day(s.nextExecutionDate),
+      endDate: s.endDate ? day(s.endDate) : null,
+      requiresConfirmation: s.requiresConfirmation,
+      notes: s.notes,
+    },
+    saved: {
+      anchor: day(s.startDate),
+      next: day(s.nextExecutionDate),
+      overrides: d.overrides.map((o) => ({ occurrenceDate: day(o.occurrenceDate), date: o.date ? day(o.date) : null, amount: o.amount })),
+      executions: d.executions.map((x) => ({ ...x, occurrenceDate: x.occurrenceDate ? day(x.occurrenceDate) : null, executedDate: day(x.executedDate) })),
+    },
+  };
+}
+
 const PREVIEW_COUNT: Record<Frequency, number> = { ONE_TIME: 1, WEEKLY: 4, MONTHLY: 6, QUARTERLY: 4, HALF_YEARLY: 4, YEARLY: 3, CUSTOM: 4 };
 
-export function ScheduleForm({
-  direction,
-  accounts,
-  categories,
-  initial,
-  onSaved,
-  onCancel,
-  onCategoryCreated,
-}: {
+type FormProps = {
   direction: "INCOME" | "PAYMENT";
   accounts: Account[];
   categories: Category[];
@@ -92,8 +141,61 @@ export function ScheduleForm({
   onSaved: () => void;
   onCancel: () => void;
   onCategoryCreated?: (c: Category) => void;
-}) {
-  const editing = !!initial?.id;
+};
+
+/** Create or edit a schedule. Editing loads the saved schedule first. */
+export function ScheduleForm(props: FormProps) {
+  const id = props.initial?.id;
+  const [detail, setDetail] = useState<{ initial: ScheduleFormValue; saved: SavedSchedule } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Bumped by "Try again" to refetch.
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!id) return;
+    let live = true;
+    api<ScheduleDetail>(`/api/schedules/${id}`)
+      .then((d) => live && setDetail(toDetail(d)))
+      .catch((e) => live && setError((e as Error).message));
+    return () => {
+      live = false;
+    };
+  }, [id, attempt]);
+  const retry = () => {
+    setError(null);
+    setAttempt((a) => a + 1);
+  };
+
+  if (!id) return <ScheduleFormFields {...props} initial={props.initial ?? null} saved={null} />;
+  if (error) return <ErrorState message={`We couldn't load this schedule. ${error}`} onRetry={retry} />;
+  if (!detail) {
+    return (
+      <div className="space-y-4" aria-busy="true" aria-label="Loading schedule">
+        <SkeletonBlock className="h-8 w-2/3" />
+        <SkeletonBlock className="h-10" />
+        <SkeletonBlock className="h-10" />
+        <SkeletonBlock className="h-40" />
+      </div>
+    );
+  }
+  return <ScheduleFormFields {...props} initial={detail.initial} saved={detail.saved} />;
+}
+
+/** One hand edit in the Upcoming dates list. A key present means the user
+ * touched it: `date` is the date they expect it on, `amount` "" resets it. */
+type Draft = { date?: string; amount?: string };
+
+function ScheduleFormFields({
+  direction,
+  accounts,
+  categories,
+  initial,
+  saved,
+  onSaved,
+  onCancel,
+  onCategoryCreated,
+}: Omit<FormProps, "initial"> & { initial: ScheduleFormValue | null; saved: SavedSchedule | null }) {
+  const editing = !!initial?.id && !!saved;
   const today = localToday();
   const [kind, setKind] = useState(initial?.kind ?? KINDS[direction][0].v);
   const [name, setName] = useState(initial?.name ?? "");
@@ -117,7 +219,10 @@ export function ScheduleForm({
   const [endDate, setEndDate] = useState(initial?.endDate ?? "");
   const [confirmEach, setConfirmEach] = useState(initial?.requiresConfirmation ?? true);
   const [notes, setNotes] = useState(initial?.notes ?? "");
-  const [overrides, setOverrides] = useState<Record<string, { date?: string; amount?: string }>>({});
+  // Hand edits, keyed by nominal date. Kept across pattern changes: an edit
+  // the new pattern doesn't have is set aside (and listed), not thrown away,
+  // so switching back brings it back.
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [newCat, setNewCat] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -134,7 +239,6 @@ export function ScheduleForm({
     const match = re && categories.find((c) => re.test(c.name));
     if (match) setCategoryId(match.id);
   }, [kind, direction, categories, categoryId]);
-  useEffect(() => setOverrides({}), [frequency, startDate, customDays]);
 
   const account = accounts.find((a) => a.id === accountId);
   const amt = Number(amount);
@@ -144,45 +248,90 @@ export function ScheduleForm({
   const crossRate = account && cur !== account.currency && fx.toPrimary[cur] != null && (account.currency === fx.primary || fx.toPrimary[account.currency])
     ? (fx.toPrimary[cur] as number) / (account.currency === fx.primary ? 1 : (fx.toPrimary[account.currency] as number))
     : null;
+  const days = Number(customDays) || 30;
+
+  // Editing re-anchors the pattern only when its shape changes; otherwise the
+  // saved anchor (and its moved dates) stay exactly as they are.
+  const patternChanged =
+    editing &&
+    (startDate !== initial!.startDate || frequency !== initial!.frequency || (frequency === "CUSTOM" && days !== initial!.customIntervalDays));
+  const keepsSavedPattern = editing && !patternChanged;
+
   const rule = useMemo(
-    () => ({ startDate: new Date(startDate || today), frequency, customIntervalDays: Number(customDays) || 30 }),
-    [startDate, frequency, customDays, today]
+    () =>
+      keepsSavedPattern
+        ? { startDate: asDate(saved!.anchor), frequency: initial!.frequency, customIntervalDays: initial!.customIntervalDays, endDate: endDate ? asDate(endDate) : null }
+        : { startDate: asDate(startDate || today), frequency, customIntervalDays: days, endDate: endDate ? asDate(endDate) : null },
+    [keepsSavedPattern, saved, initial, startDate, today, frequency, days, endDate]
   );
-  // Every date up to the end (capped), or the next few when open-ended.
-  const preview = useMemo(() => {
-    if (!startDate) return [];
-    const out: Date[] = [];
-    const end = endDate ? new Date(endDate) : null;
-    const count = end ? 120 : PREVIEW_COUNT[frequency];
-    for (let n = 0; n < count; n++) {
-      const d = nthOccurrence(rule.startDate, frequency, n, rule.customIntervalDays);
-      if (end && d > end) break;
-      out.push(d);
-      if (frequency === "ONE_TIME") break;
+
+  // What's saved for each nominal date once this form is saved, before any
+  // hand edits here: the saved overrides that survive a pattern change.
+  const { baseline, droppedSaved } = useMemo(() => {
+    const out = new Map<string, { date: string | null; amount: number | null }>();
+    if (!saved) return { baseline: out, droppedSaved: [] as SavedSchedule["overrides"] };
+    const all = saved.overrides.map((o) => ({ ...o, occurrenceDate: asDate(o.occurrenceDate), date: o.date ? asDate(o.date) : null, src: o }));
+    const { kept, dropped } = patternChanged ? overridesKeptOnReanchor(rule, all, asDate(today)) : { kept: all, dropped: [] };
+    for (const o of kept) out.set(o.src.occurrenceDate, { date: o.src.date, amount: o.src.amount });
+    return { baseline: out, droppedSaved: dropped.map((o) => o.src) };
+  }, [saved, patternChanged, rule, today]);
+
+  // Stored occurrences ahead of the next date: skipped ahead of time. After a
+  // pattern change only those the new pattern still has remain.
+  const stored = useMemo(() => {
+    const m = new Map<string, SavedSchedule["executions"][number]>();
+    for (const x of saved?.executions ?? []) {
+      if (!x.occurrenceDate) continue;
+      if (patternChanged && !isNominalOf(rule, asDate(x.occurrenceDate))) continue;
+      m.set(x.occurrenceDate, x);
     }
-    return out;
-  }, [rule, frequency, startDate, endDate]);
+    return m;
+  }, [saved, patternChanged, rule]);
+
+  // Every nominal date up to the end (capped), or the next few when open-ended.
+  const nominals = useMemo(() => {
+    if (!startDate) return [];
+    const from = keepsSavedPattern ? asDate(saved!.next) : asDate(startDate);
+    return nominalsFrom(rule, from, endDate ? 120 : PREVIEW_COUNT[frequency]).map(isoDate);
+  }, [rule, keepsSavedPattern, saved, startDate, endDate, frequency]);
 
   useEffect(() => {
     if (!modeTouched) setAmountMode(endDate && frequency !== "ONE_TIME" ? "TOTAL" : "EACH");
   }, [endDate, frequency, modeTouched]);
   // A total is split evenly; the last payment absorbs the rounding.
-  const splitting = amountMode === "TOTAL" && !editing && frequency !== "ONE_TIME" && !!endDate && preview.length > 0;
-  const each = splitting ? Math.floor((amt / preview.length) * 100) / 100 : amt;
-  const lastAmount = splitting ? Math.round((amt - each * (preview.length - 1)) * 100) / 100 : amt;
-  const defaultFor = (i: number) => (splitting && i === preview.length - 1 ? lastAmount : each);
-  const plannedTotal = preview.reduce((t, d, i) => t + (Number(overrides[isoDate(d)]?.amount) || defaultFor(i)), 0);
+  const splitting = amountMode === "TOTAL" && !editing && frequency !== "ONE_TIME" && !!endDate && nominals.length > 0;
+  const each = splitting ? Math.floor((amt / nominals.length) * 100) / 100 : amt;
+  const lastAmount = splitting ? Math.round((amt - each * (nominals.length - 1)) * 100) / 100 : amt;
+  const defaultFor = (i: number) => (splitting && i === nominals.length - 1 ? lastAmount : each);
 
-  const overrideErrors = useMemo(() => {
-    const errs: Record<string, string> = {};
-    for (const [nominal, o] of Object.entries(overrides)) {
-      if (!o.date) continue;
-      const { prev, next } = neighbours(rule, new Date(nominal));
-      const d = new Date(o.date);
-      if ((prev && d <= prev) || (next && d >= next)) errs[nominal] = "Keep it within its own period";
-    }
-    return errs;
-  }, [overrides, rule]);
+  /** One row of Upcoming dates: what's saved, what's been typed, and what
+   * will be saved. Untouched rows keep their saved values exactly. */
+  const rows = nominals.map((key, i) => {
+    const base = baseline.get(key);
+    const draft = drafts[key];
+    const regular = defaultFor(i);
+    const finalDate = draft?.date !== undefined ? (draft.date && draft.date !== key ? draft.date : null) : (base?.date ?? null);
+    const typedAmount = draft?.amount !== undefined && draft.amount !== "" ? Number(draft.amount) : null;
+    const finalAmount =
+      draft?.amount !== undefined ? (typedAmount != null && Math.abs(typedAmount - regular) > 0.004 ? typedAmount : null) : (base?.amount ?? null);
+    const changed = finalDate !== (base?.date ?? null) || finalAmount !== (base?.amount ?? null);
+    const x = stored.get(key);
+    const problem =
+      x ? null
+      : draft?.date === "" ? "Pick a date"
+      : finalDate ? overrideDateProblem(rule, asDate(key), asDate(finalDate))?.replace(/\d{4}-\d{2}-\d{2}/g, nice) ?? null
+      : typedAmount != null && !(typedAmount > 0) ? "Amount must be more than zero"
+      : null;
+    return { key, regular, date: draft?.date ?? finalDate ?? key, amountShown: finalAmount ?? regular, finalDate, finalAmount, changed, stored: x, problem };
+  });
+  const plannedTotal = rows.reduce((t, r) => t + (r.stored?.status === "SKIPPED" ? 0 : r.amountShown), 0);
+  // Edits typed for dates the current pattern doesn't produce.
+  const setAside = Object.entries(drafts).filter(([k, d]) => !nominals.includes(k) && (d.date !== undefined || d.amount !== undefined) && !(d.date === k && !d.amount));
+  const rowProblems = rows.filter((r) => r.problem);
+
+  const setDraft = (key: string, patch: Draft) => setDrafts((s) => ({ ...s, [key]: { ...s[key], ...patch } }));
+  // Back to the regular date and amount (clears a saved change on save).
+  const resetRow = (key: string) => setDrafts((s) => ({ ...s, [key]: { date: key, amount: "" } }));
 
   async function createCategory() {
     if (!newCat.trim()) return;
@@ -196,8 +345,18 @@ export function ScheduleForm({
     }
   }
 
-  const valid =
-    name.trim() && amt > 0 && (accountId || direction === "PAYMENT") && startDate && (direction === "INCOME" || (categoryId && categoryId !== "__new__")) && Object.keys(overrideErrors).length === 0 && (!endDate || endDate >= startDate);
+  // Everything that stops a save, in the order it appears on the form.
+  const problems = [
+    !name.trim() && "Give it a name.",
+    !(amt > 0) && "Enter an amount above zero.",
+    !accountId && direction === "INCOME" && "Choose the account it's credited to.",
+    direction === "PAYMENT" && (!categoryId || categoryId === "__new__") && "Choose a budget category.",
+    !startDate && "Pick a date.",
+    patternChanged && startDate && startDate < today && "A new pattern has to start today or later. Past dates stay as they were.",
+    endDate && startDate && endDate < startDate && "The end date is before the first date.",
+    rowProblems.length > 0 && `Fix the date${rowProblems.length > 1 ? "s" : ""} marked under Upcoming dates.`,
+  ].filter((p): p is string => !!p);
+  const valid = problems.length === 0;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -211,41 +370,43 @@ export function ScheduleForm({
       accountId: accountId || null,
       categoryId: direction === "PAYMENT" ? categoryId : null,
       frequency,
-      customIntervalDays: frequency === "CUSTOM" ? Number(customDays) : null,
+      customIntervalDays: frequency === "CUSTOM" ? days : null,
       startDate,
       endDate: endDate || null,
       requiresConfirmation: confirmEach,
       notes: notes || null,
     };
+    const changes = rows.filter((r) => r.changed && !r.stored);
     try {
       if (editing) {
-        const changed = startDate !== initial!.startDate || frequency !== initial!.frequency || (frequency === "CUSTOM" && Number(customDays) !== initial!.customIntervalDays);
         // Only re-anchor the pattern when it actually changed — otherwise the
         // schedule keeps its original anchor (and its moved occurrences).
         await api(`/api/schedules/${initial!.id}`, {
           method: "PATCH",
-          body: changed ? body : { ...body, startDate: undefined, frequency: undefined, customIntervalDays: undefined },
+          body: patternChanged ? body : { ...body, startDate: undefined, frequency: undefined, customIntervalDays: undefined },
         });
-        // Per-date changes made in the list below.
-        for (const [nominal, o] of Object.entries(overrides)) {
-          if (!o.date && !o.amount) continue;
-          await api(`/api/schedules/${initial!.id}/override`, { method: "PUT", body: { occurrenceDate: nominal, date: o.date || null, amount: o.amount ? Number(o.amount) : null } });
+        // Per-date changes, each sent whole (date and amount together) so
+        // changing one never resets the other.
+        const failed: string[] = [];
+        for (const r of changes) {
+          try {
+            await api(`/api/schedules/${initial!.id}/override`, { method: "PUT", body: { occurrenceDate: r.key, date: r.finalDate, amount: r.finalAmount } });
+          } catch (err) {
+            failed.push(`${nice(r.key)}: ${(err as Error).message}`);
+          }
         }
-        toast.success("Schedule updated. Anything in the past stays exactly as it was.");
+        if (failed.length) toast.error(`Schedule saved, but ${failed.length === 1 ? "one date" : "some dates"} couldn't be changed. ${failed.join(" ")}`);
+        else toast.success(changes.length ? `Schedule and ${changes.length} date${changes.length > 1 ? "s" : ""} updated. Past ones stay exactly as they were.` : "Schedule updated. Past ones stay exactly as they were.");
       } else {
+        const last = rows[rows.length - 1];
         const r = await api<{ due: { pending: number; executed: number } }>("/api/schedules", {
           body: {
             ...body,
             direction,
-            overrides: [
-              ...Object.entries(overrides)
-                .filter(([, o]) => o.date || o.amount)
-                .map(([nominal, o]) => ({ occurrenceDate: nominal, date: o.date || null, amount: o.amount ? Number(o.amount) : null })),
+            overrides: rows
+              .filter((x) => x.finalDate || x.finalAmount != null || (splitting && x === last && Math.abs(lastAmount - each) > 0.004))
               // The split's last payment carries the rounding.
-              ...(splitting && Math.abs(lastAmount - each) > 0.004 && !overrides[isoDate(preview[preview.length - 1])]?.amount
-                ? [{ occurrenceDate: isoDate(preview[preview.length - 1]), date: overrides[isoDate(preview[preview.length - 1])]?.date || null, amount: lastAmount }]
-                : []),
-            ].filter((o, i, all) => all.findIndex((x) => x.occurrenceDate === o.occurrenceDate) === i),
+              .map((x) => ({ occurrenceDate: x.key, date: x.finalDate, amount: x.finalAmount ?? (splitting && x === last && Math.abs(lastAmount - each) > 0.004 ? lastAmount : null) })),
           },
         });
         toast.success(
@@ -258,14 +419,17 @@ export function ScheduleForm({
       }
       onSaved();
     } catch (err) {
-      toast.error((err as Error).message);
+      toast.error(`Not saved. ${(err as Error).message}`);
     } finally {
       setBusy(false);
     }
   }
 
+  const nextRow = rows[0];
+  const showList = rows.length > 0 && amt > 0;
+
   return (
-    <form onSubmit={submit} className="space-y-5">
+    <form onSubmit={submit} noValidate className="space-y-5">
       <div className="space-y-1.5">
         <Label>Type</Label>
         <div className="flex flex-wrap gap-1.5">
@@ -273,6 +437,7 @@ export function ScheduleForm({
             <button
               key={k.v}
               type="button"
+              aria-pressed={kind === k.v}
               onClick={() => setKind(k.v)}
               className={cn("h-8 cursor-pointer rounded-lg border px-3 text-xs transition-colors", kind === k.v ? "border-foreground/50 bg-card font-medium text-foreground shadow-card" : "border-border text-muted-foreground hover:text-foreground")}
             >
@@ -318,10 +483,11 @@ export function ScheduleForm({
           {amountMode === "TOTAL" && !editing && frequency !== "ONE_TIME" && (
             <p className="text-[11px] text-muted-foreground">
               {splitting && amt > 0
-                ? <>Split into {preview.length} payments of {formatMoney(each, cur)}{Math.abs(lastAmount - each) > 0.004 ? <> (last {formatMoney(lastAmount, cur)})</> : null}. Change any of them below.</>
+                ? <>Split into {nominals.length} payments of {formatMoney(each, cur)}{Math.abs(lastAmount - each) > 0.004 ? <> (last {formatMoney(lastAmount, cur)})</> : null}. Change any of them below.</>
                 : "Set an end date and the total is split across every payment."}
             </p>
           )}
+          {editing && <p className="text-[11px] text-muted-foreground">Applies to every upcoming date that doesn&apos;t have its own amount.</p>}
           {account && cur !== account.currency && (
             <p className="text-[11px] text-muted-foreground">
               {crossRate != null && amt > 0 ? <>≈ {formatMoney(amt * crossRate, account.currency)} at today&apos;s rate. </> : null}
@@ -374,6 +540,7 @@ export function ScheduleForm({
             <button
               key={f.v}
               type="button"
+              aria-pressed={frequency === f.v}
               onClick={() => setFrequency(f.v)}
               className={cn("h-8 cursor-pointer rounded-lg border px-3 text-xs transition-colors", frequency === f.v ? "border-foreground/50 bg-card font-medium text-foreground shadow-card" : "border-border text-muted-foreground hover:text-foreground")}
             >
@@ -385,8 +552,25 @@ export function ScheduleForm({
 
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="space-y-1.5">
-          <Label htmlFor="s-start">{editing ? "Next date" : frequency === "ONE_TIME" ? "Date" : "First date"}</Label>
-          <Input id="s-start" type="date" required value={startDate} min={editing ? today : undefined} onChange={(e) => { setStartTouched(true); setStartDate(e.target.value); }} />
+          <Label htmlFor="s-start">{editing ? "Next regular date" : frequency === "ONE_TIME" ? "Date" : "First date"}</Label>
+          <Input
+            id="s-start"
+            type="date"
+            required
+            value={startDate}
+            aria-invalid={patternChanged && !!startDate && startDate < today}
+            aria-describedby="s-start-hint"
+            onChange={(e) => { setStartTouched(true); setStartDate(e.target.value); }}
+          />
+          <p id="s-start-hint" className={cn("text-[11px]", patternChanged && startDate && startDate < today ? "text-negative" : "text-muted-foreground")}>
+            {patternChanged && startDate && startDate < today
+              ? "Pick today or later for the new pattern."
+              : editing && frequency !== "ONE_TIME"
+                ? nextRow && nextRow.date !== nextRow.key && keepsSavedPattern
+                  ? <>Expected on {nice(nextRow.date)}. Changing this date resets the pattern from it; to move one payment, change it below.</>
+                  : "Changing this resets the pattern from that date. To move one payment, change it below."
+                : null}
+          </p>
         </div>
         {frequency === "CUSTOM" && (
           <div className="space-y-1.5">
@@ -397,56 +581,115 @@ export function ScheduleForm({
         {frequency !== "ONE_TIME" && (
           <div className="space-y-1.5">
             <Label htmlFor="s-end">Ends</Label>
-            <Input id="s-end" type="date" min={startDate} value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-            <p className="text-[11px] text-muted-foreground">Leave empty to continue until you end it.</p>
+            <Input id="s-end" type="date" value={endDate} aria-invalid={!!endDate && endDate < startDate} onChange={(e) => setEndDate(e.target.value)} />
+            <p className={cn("text-[11px]", endDate && endDate < startDate ? "text-negative" : "text-muted-foreground")}>
+              {endDate && endDate < startDate ? "The end date is before the first date." : "Leave empty to continue until you end it."}
+            </p>
           </div>
         )}
       </div>
 
-      {preview.length > 0 && amt > 0 && (
+      {(droppedSaved.length > 0 || setAside.length > 0) && (
+        <div role="status" className="rounded-lg border border-warning/40 bg-warning-soft px-3 py-2 text-xs text-warning">
+          {droppedSaved.length > 0 && (
+            <p>
+              The new pattern doesn&apos;t have {droppedSaved.length === 1 ? "the date" : "the dates"} you changed by hand for{" "}
+              {droppedSaved.map((o) => nice(o.occurrenceDate)).join(", ")}. {droppedSaved.length === 1 ? "That change is" : "Those changes are"} cleared when you save.
+            </p>
+          )}
+          {setAside.length > 0 && (
+            <p className={cn(droppedSaved.length > 0 && "mt-1")}>
+              Your edit{setAside.length > 1 ? "s" : ""} for {setAside.map(([k]) => nice(k)).join(", ")} {setAside.length > 1 ? "don't" : "doesn't"} match this pattern and won&apos;t be saved. Switch back to keep {setAside.length > 1 ? "them" : "it"}.
+            </p>
+          )}
+        </div>
+      )}
+
+      {showList && (
         <div className="rounded-lg border border-border">
-          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 border-b border-border px-3 py-2">
             <p className="text-xs font-medium">Upcoming dates</p>
-            <p className="text-[11px] text-muted-foreground">Change any date or amount that differs</p>
+            <p className="text-[11px] text-muted-foreground">
+              {frequency === "ONE_TIME" ? "Change the date above" : "Change the date or amount of any payment that differs"}
+            </p>
           </div>
+          {frequency !== "ONE_TIME" && (
+            <div className="hidden grid-cols-[1fr_150px_120px_32px] gap-2 px-3 pt-2 text-[10px] font-medium tracking-wide text-muted-foreground uppercase sm:grid">
+              <span>Regular date</span>
+              <span>Expected on</span>
+              <span className="text-right">Amount</span>
+              <span />
+            </div>
+          )}
           <ul className="divide-y divide-border/70">
-            {preview.map((d, i) => {
-              const key = isoDate(d);
-              const o = overrides[key] ?? {};
+            {rows.map((r) => {
+              const st = r.stored ? occurrenceStatus(r.stored.status, direction) : null;
+              const custom = !!r.finalDate || r.finalAmount != null;
               return (
-                <li key={key} className="grid grid-cols-2 items-center gap-2 px-3 py-1.5 sm:grid-cols-[1fr_140px_110px]">
-                  <span className={cn("col-span-2 text-xs sm:col-span-1", (o.date || o.amount) && "text-brass")}>
-                    {d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })}
-                    {overrideErrors[key] && <span className="ml-2 text-negative">{overrideErrors[key]}</span>}
-                  </span>
-                  <Input
-                    type="date"
-                    aria-label={`Date for ${key}`}
-                    value={o.date ?? key}
-                    onChange={(e) => setOverrides((s) => ({ ...s, [key]: { ...s[key], date: e.target.value && e.target.value !== key ? e.target.value : undefined } }))}
-                    className="h-8 text-xs"
-                  />
-                  <Input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    aria-label={`Amount for ${key}`}
-                    placeholder={String(defaultFor(i))}
-                    value={o.amount ?? ""}
-                    onChange={(e) => setOverrides((s) => ({ ...s, [key]: { ...s[key], amount: e.target.value || undefined } }))}
-                    className="h-8 text-right text-xs tabular-nums"
-                  />
+                <li key={r.key} className="grid grid-cols-[1fr_1fr_32px] items-center gap-x-2 gap-y-1 px-3 py-2 sm:grid-cols-[1fr_150px_120px_32px] sm:py-1.5">
+                  <div className="col-span-3 flex min-w-0 flex-wrap items-center gap-1.5 sm:col-span-1">
+                    <span className={cn("text-xs tabular-nums", r.stored?.status === "SKIPPED" && "text-muted-foreground line-through")}>{nice(r.key)}</span>
+                    {st ? (
+                      <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
+                    ) : r.changed ? (
+                      <StatusBadge tone="brass" dot={false}>Unsaved</StatusBadge>
+                    ) : custom ? (
+                      <StatusBadge tone="brass" dot={false}>{r.finalDate && r.finalAmount != null ? "Date & amount set" : r.finalDate ? "Moved" : "Amount set"}</StatusBadge>
+                    ) : null}
+                  </div>
+                  {r.stored ? (
+                    <p className="col-span-3 text-[11px] text-muted-foreground sm:col-span-3">
+                      {r.stored.status === "SKIPPED" ? "Skipped ahead of time. Restore it from the schedule to bring it back." : `On record for ${nice(r.stored.executedDate)}.`}
+                    </p>
+                  ) : frequency === "ONE_TIME" ? (
+                    <p className="col-span-3 text-right text-xs tabular-nums sm:col-span-3">{formatMoney(r.amountShown, cur)}</p>
+                  ) : (
+                    <>
+                      <Input
+                        type="date"
+                        aria-label={`Date for ${r.key}`}
+                        aria-invalid={!!r.problem}
+                        value={r.date}
+                        onChange={(e) => setDraft(r.key, { date: e.target.value })}
+                        className={cn("h-8 text-xs", r.finalDate && "text-brass")}
+                      />
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        inputMode="decimal"
+                        aria-label={`Amount for ${r.key}`}
+                        placeholder={String(r.regular)}
+                        value={drafts[r.key]?.amount ?? (r.finalAmount != null ? String(r.finalAmount) : "")}
+                        onChange={(e) => setDraft(r.key, { amount: e.target.value })}
+                        className={cn("h-8 text-right text-xs tabular-nums", r.finalAmount != null && "text-brass")}
+                      />
+                      <Button
+                        type="button"
+                        size="icon-sm"
+                        variant="ghost"
+                        aria-label={`Reset ${nice(r.key)} to the regular date and amount`}
+                        title="Back to the regular date and amount"
+                        disabled={!custom}
+                        onClick={() => resetRow(r.key)}
+                        className={cn(!custom && "invisible")}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </Button>
+                      {r.problem && <p className="col-span-3 text-[11px] text-negative sm:col-start-2 sm:col-span-3">{r.problem}</p>}
+                    </>
+                  )}
                 </li>
               );
             })}
           </ul>
           {endDate && frequency !== "ONE_TIME" ? (
             <p className={cn("border-t border-border px-3 py-2 text-[11px]", splitting && Math.abs(plannedTotal - amt) > 0.004 ? "text-warning" : "text-muted-foreground")}>
-              {preview.length} payments · {formatMoney(Math.round(plannedTotal * 100) / 100, cur)} in all
+              {rows.length} payments · {formatMoney(Math.round(plannedTotal * 100) / 100, cur)} in all
               {splitting && Math.abs(plannedTotal - amt) > 0.004 && <> (the total is {formatMoney(amt, cur)})</>}
             </p>
           ) : (
-            frequency !== "ONE_TIME" && <p className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">You can move later dates from the schedule any time.</p>
+            frequency !== "ONE_TIME" && <p className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">Showing the next {rows.length}. Later dates can be changed from the schedule any time.</p>
           )}
         </div>
       )}
@@ -478,11 +721,13 @@ export function ScheduleForm({
         </p>
       )}
 
-      <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
-        <p className="text-xs text-muted-foreground">
-          {amt > 0 && account && frequency !== "ONE_TIME" && `${formatMoney(amt, cur)} · ${frequencyLabel(frequency, Number(customDays)).toLowerCase()}`}
+      <div className="flex flex-col-reverse gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-xs text-muted-foreground" aria-live="polite">
+          {problems.length
+            ? problems[0]
+            : amt > 0 && account && frequency !== "ONE_TIME" && `${formatMoney(amt, cur)} · ${frequencyLabel(frequency, days).toLowerCase()}`}
         </p>
-        <div className="flex gap-2">
+        <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
           <Button type="submit" disabled={!valid || busy}>{busy ? "Saving…" : editing ? "Save changes" : "Create schedule"}</Button>
         </div>

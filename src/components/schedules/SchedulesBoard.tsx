@@ -51,6 +51,8 @@ export interface Schedule {
   history: { id: string; date: string; amount: number; status: string }[];
   /** Booked (confirmed) payments, all time. */
   paidCount: number;
+  /** The next scheduled date, even beyond the upcoming list's horizon. */
+  nextDate: string | null;
 }
 
 const kindLabel = (k: string) => [...KINDS.INCOME, ...KINDS.PAYMENT].find((x) => x.v === k)?.l ?? k;
@@ -241,7 +243,11 @@ function OverrideDialog({ occ, onClose, onDone }: { occ: Occurrence | null; onCl
     try {
       await api(`/api/schedules/${occ!.scheduleId}/override`, {
         method: "PUT",
-        body: clear ? { occurrenceDate: occ!.occurrenceDate, date: null, amount: null } : { occurrenceDate: occ!.occurrenceDate, date: date !== occ!.occurrenceDate ? date : null, amount: Number(amount) },
+        // An untouched amount stays the schedule's own, so a later change to
+        // the schedule's amount still reaches this occurrence.
+        body: clear
+          ? { occurrenceDate: occ!.occurrenceDate, date: null, amount: null }
+          : { occurrenceDate: occ!.occurrenceDate, date: date !== occ!.occurrenceDate ? date : null, amount: occ!.amountOverridden || Number(amount) !== occ!.amount ? Number(amount) : null },
       });
       toast.success(clear ? "Back to the regular schedule." : "Updated.");
       onClose();
@@ -431,7 +437,7 @@ export function SchedulesBoard({
           <p className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">{formatDate(o.date, { month: "short" })}</p>
           <p className="font-display text-xl leading-none">{formatDate(o.date, { day: "numeric" })}</p>
         </div>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 basis-[calc(100%-4.5rem)] sm:basis-0">
           <p className="truncate text-sm">{o.scheduleName}</p>
           <p className="truncate text-xs text-muted-foreground">
             {accounts.find((a) => a.id === o.accountId)?.name ?? "Account not set"}
@@ -440,11 +446,11 @@ export function SchedulesBoard({
             {o.note && ` · ${o.note}`}
           </p>
         </div>
-        <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
-        <span className={cn("w-28 text-right text-sm font-medium tabular-nums", o.status === "REVERSED" && "line-through", income && o.status === "CONFIRMED" && "text-positive")}>
+        <StatusBadge tone={st.tone} className="ml-16 sm:ml-0">{st.label}</StatusBadge>
+        <span className={cn("ml-auto text-right text-sm font-medium tabular-nums sm:ml-0 sm:w-28", o.status === "REVERSED" && "line-through", income && o.status === "CONFIRMED" && "text-positive")}>
           {income ? "+" : "−"}{formatMoney(o.amount, o.currency)}
         </span>
-        <div className="flex w-[148px] justify-end gap-1">
+        <div className="ml-auto flex justify-end gap-1 sm:ml-0 sm:w-[148px]">
           {showActions && (o.status === "PENDING" || o.status === "FAILED") && (
             <>
               <Button size="sm" variant="ghost" onClick={() => setSkipping(o)}>Skip</Button>
@@ -554,7 +560,13 @@ export function SchedulesBoard({
                   </div>
                   <div className="flex flex-col items-end gap-1.5 text-right">
                     {s.isActive ? (
-                      s.upcoming[0] ? <span className="text-xs text-muted-foreground">Next <span className="text-foreground">{formatDate(s.upcoming[0].date, { day: "numeric", month: "short" })}</span></span> : <span className="text-xs text-muted-foreground">Nothing left to come</span>
+                      s.nextDate ? (
+                        <span className="text-xs text-muted-foreground">
+                          Next <span className="text-foreground">{formatDate(s.nextDate, s.nextDate.slice(0, 4) === localToday().slice(0, 4) ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" })}</span>
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">Nothing left to come</span>
+                      )
                     ) : (
                       <StatusBadge tone="neutral">{s.cancelledAt ? "Ended" : "Paused"}</StatusBadge>
                     )}

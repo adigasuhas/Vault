@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { Prisma, type ScheduledCredit, type CreditExecution, type ScheduleOverride } from "@prisma/client";
+import { isNominalOf, overrideDateProblem, overridesKeptOnReanchor, projectOccurrences, type Occurrence } from "@/lib/recurrence";
 import { ValidationError } from "@/lib/validate";
 import { createFxConverter } from "@/lib/fx";
 import { loanAmortization } from "@/lib/loans";
@@ -9,9 +10,7 @@ import {
   isoDate,
   monthKey,
   monthRange,
-  neighbours,
   nthOccurrence,
-  occurrencesBetween,
   todayIn,
   type Frequency,
 } from "@/lib/dates";
@@ -35,109 +34,18 @@ import {
 export const INCOME_KINDS = ["SALARY", "STIPEND", "REFUND", "POCKET_MONEY", "OTHER_INCOME"] as const;
 export const PAYMENT_KINDS = ["RENT", "EMI", "SUBSCRIPTION", "INSURANCE", "FEES", "UTILITIES", "OTHER_PAYMENT"] as const;
 
-export type OccurrenceStatus = "SCHEDULED" | "PENDING" | "CONFIRMED" | "SKIPPED" | "FAILED" | "REVERSED";
-
-export interface Occurrence {
-  scheduleId: string;
-  scheduleName: string;
-  direction: "INCOME" | "PAYMENT";
-  kind: string;
-  occurrenceDate: string; // nominal, YYYY-MM-DD
-  date: string; // effective (override or nominal)
-  amount: number;
-  currency: string;
-  /** Null: a payment with no account set yet (see accountForOccurrence). */
-  accountId: string | null;
-  categoryId: string | null;
-  status: OccurrenceStatus;
-  executionId: string | null;
-  overridden: boolean;
-  failureReason?: string | null;
-  note?: string | null;
-}
+export type { Occurrence, OccurrenceStatus } from "@/lib/recurrence";
 
 type ScheduleWithRelations = ScheduledCredit & {
   overrides: ScheduleOverride[];
   executions: CreditExecution[];
 };
 
-function rule(s: ScheduledCredit) {
-  return {
-    startDate: s.startDate,
-    frequency: s.frequency as Frequency,
-    customIntervalDays: s.customIntervalDays,
-    endDate: s.endDate,
-  };
-}
-
 /** Occurrences of one schedule whose *effective* date falls in [from, to],
- * merging stored executions (what happened) with projections (what will). */
+ * merging stored executions (what happened) with projections (what will).
+ * The same engine drives the editor's preview (see lib/recurrence). */
 export function projectSchedule(s: ScheduleWithRelations, from: Date, to: Date): Occurrence[] {
-  const overrides = new Map(s.overrides.map((o) => [dateOnly(o.occurrenceDate).getTime(), o]));
-  const byNominal = new Map<number, CreditExecution>();
-  const legacy: CreditExecution[] = [];
-  for (const x of s.executions) {
-    if (x.occurrenceDate) byNominal.set(dateOnly(x.occurrenceDate).getTime(), x);
-    else legacy.push(x);
-  }
-  const base = {
-    scheduleId: s.id,
-    scheduleName: s.name,
-    direction: s.direction,
-    kind: s.kind,
-    currency: s.currency,
-    accountId: s.receivingAccountId,
-    categoryId: s.categoryId,
-  };
-  const out: Occurrence[] = [];
-  const seen = new Set<string>();
-
-  // Stored occurrences (any status) in range.
-  for (const x of s.executions) {
-    const eff = dateOnly(x.executedDate);
-    if (eff < from || eff > to) continue;
-    const nominal = x.occurrenceDate ? dateOnly(x.occurrenceDate) : eff;
-    seen.add(isoDate(nominal));
-    out.push({
-      ...base,
-      occurrenceDate: isoDate(nominal),
-      date: isoDate(eff),
-      amount: Number(x.amount),
-      status: x.status as OccurrenceStatus,
-      executionId: x.id,
-      overridden: overrides.has(nominal.getTime()),
-      failureReason: x.failureReason,
-      note: x.note,
-    });
-  }
-
-  // Projections — only for an active schedule, from its next unprocessed
-  // nominal date onward. Widen the nominal window so an override that pulls
-  // an occurrence into range is still found.
-  if (s.isActive) {
-    const pad = 400 * 86_400_000;
-    const nominals = occurrencesBetween(rule(s), new Date(Math.max(from.getTime() - pad, 0)), new Date(to.getTime() + pad));
-    const next = dateOnly(s.nextExecutionDate);
-    for (const n of nominals) {
-      if (n < next) continue;
-      const key = isoDate(n);
-      if (seen.has(key) || byNominal.has(n.getTime())) continue;
-      const ov = overrides.get(n.getTime());
-      const eff = ov?.date ? dateOnly(ov.date) : n;
-      if (eff < from || eff > to) continue;
-      out.push({
-        ...base,
-        occurrenceDate: key,
-        date: isoDate(eff),
-        amount: ov?.amount != null ? Number(ov.amount) : Number(s.amount),
-        status: "SCHEDULED",
-        executionId: null,
-        overridden: !!ov,
-      });
-    }
-  }
-  void legacy;
-  return out.sort((a, b) => a.date.localeCompare(b.date));
+  return projectOccurrences(s, from, to);
 }
 
 /** Every user occurrence in [from, to] across schedules. */
@@ -562,7 +470,7 @@ async function userTodayTx(tx: Tx, userId: string) {
 }
 
 function isNominal(s: ScheduledCredit, d: Date) {
-  return occurrencesBetween(rule(s), d, d).some((n) => n.getTime() === d.getTime());
+  return isNominalOf(s, d);
 }
 
 // ------------------------------------------------------------- overrides
@@ -610,13 +518,8 @@ export async function setOverride(
 }
 
 export function validateOverrideDate(s: Pick<ScheduledCredit, "startDate" | "frequency" | "customIntervalDays">, nominal: Date, date: Date) {
-  if (s.frequency === "ONE_TIME") return;
-  const { prev, next } = neighbours({ startDate: s.startDate, frequency: s.frequency as Frequency, customIntervalDays: s.customIntervalDays }, nominal);
-  if ((prev && date <= prev) || (next && date >= next)) {
-    throw new ValidationError(
-      `Keep this date between ${prev ? isoDate(prev) : "the start"} and ${next ? isoDate(next) : "the end"}. To go further, move the next one instead.`
-    );
-  }
+  const problem = overrideDateProblem(s, nominal, date);
+  if (problem) throw new ValidationError(problem);
 }
 
 // ------------------------------------------------------------- schedule CRUD
@@ -820,9 +723,28 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
       data.customIntervalDays = freq === "CUSTOM" ? changes.customIntervalDays ?? s.customIntervalDays ?? 30 : null;
       data.startDate = start;
       data.nextExecutionDate = start;
-      // Overrides belonged to the old pattern's future dates.
-      await tx.scheduleOverride.deleteMany({ where: { scheduledCreditId: s.id, occurrenceDate: { gte: today } } });
-      track("pattern", { frequency: s.frequency, next: isoDate(s.nextExecutionDate) }, { frequency: freq, next: isoDate(start) });
+      const newRule = {
+        startDate: start,
+        frequency: freq,
+        customIntervalDays: data.customIntervalDays as number | null,
+        endDate: changes.endDate !== undefined ? changes.endDate : s.endDate,
+      };
+      // Hand-set dates and amounts stay where the new pattern still produces
+      // that occurrence (and a moved date still fits its period); the rest
+      // belonged to the old pattern's dates and go.
+      const overrides = await tx.scheduleOverride.findMany({ where: { scheduledCreditId: s.id } });
+      const { dropped } = overridesKeptOnReanchor(newRule, overrides, today);
+      if (dropped.length) await tx.scheduleOverride.deleteMany({ where: { id: { in: dropped.map((o) => o.id) } } });
+      // Upcoming ones skipped ahead of time on dates the new pattern no longer
+      // has would linger as phantom occurrences. Nothing was booked on them.
+      const skippedAhead = await tx.creditExecution.findMany({ where: { scheduledCreditId: s.id, status: "SKIPPED", executedDate: { gt: today } } });
+      const obsolete = skippedAhead.filter((x) => !x.occurrenceDate || !isNominalOf(newRule, x.occurrenceDate));
+      if (obsolete.length) await tx.creditExecution.deleteMany({ where: { id: { in: obsolete.map((x) => x.id) } } });
+      track(
+        "pattern",
+        { frequency: s.frequency, next: isoDate(s.nextExecutionDate) },
+        { frequency: freq, next: isoDate(start), droppedOverrides: dropped.map((o) => isoDate(o.occurrenceDate)), droppedSkips: obsolete.length }
+      );
     }
 
     const updated = await tx.scheduledCredit.update({ where: { id: s.id }, data });

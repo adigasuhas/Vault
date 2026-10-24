@@ -41,7 +41,12 @@ export const GET = authed(async (req, { userId }) => {
       }));
       // Every booked payment, not just the recent ones shown: decides delete vs pay off.
       const paidCount = executions.filter((x) => x.status === "CONFIRMED").length;
-      return { ...s, amount: Number(s.amount), upcoming, history, paidCount };
+      // The next date even when it's beyond the list's horizon (a yearly one
+      // on 29 Feb), so an active schedule never reads as finished.
+      const nextDate =
+        upcoming.find((o) => o.status === "SCHEDULED")?.date ??
+        (s.isActive ? projectSchedule({ ...s, overrides, executions }, addDaysUTC(today, 1), addMonthsUTC(today, 12 * 30)).find((o) => o.status === "SCHEDULED")?.date ?? null : null);
+      return { ...s, amount: Number(s.amount), upcoming, history, paidCount, nextDate };
     }),
   };
 });
