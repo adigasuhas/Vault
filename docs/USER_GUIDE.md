@@ -66,7 +66,11 @@ Below that:
 - **Coming up:** scheduled income and payments for the next 60 days.
 - **Accounts:** your balances at a glance.
 
-The **Log expense** and **Transfer** buttons at the top are shortcuts for the two things you will do most.
+To record money, use **Credit** (money in) or **Debit** (money out) at the top of every page; on a phone, tap **+**.
+
+- **Credit:** money received (a refund, gift or one-off payment), or recurring income such as a salary.
+- **Debit:** an expense, or a scheduled payment such as rent, an EMI or a subscription.
+- **Transfer between my accounts** appears under both. It moves money out of one of your accounts and into another, so it never counts as income or spending.
 
 ---
 
@@ -188,6 +192,15 @@ Use the menu on an expense or purchase:
 
 - **Edit…** books a correction: the original is reversed on the statement and the corrected version is recorded.
 - **Remove…** returns the amount to the account. The entry stays on the statement, struck through, with its reversal next to it.
+
+### Notebooks
+
+The Notebook keeps planning notes that don't touch your balances or budget. You can keep several notebooks (for a trip, a move or a project), each with its own entries and totals.
+
+- Use the notebook menu next to **Add entry** to switch notebooks or create a new one. VAULT remembers the one you had open.
+- Use **⋯** to rename or delete the open notebook. Deleting one that has entries asks whether to move them to another notebook (the default) or delete them too. Entries already turned into a loan, expense or receivable can only be moved. Your last notebook can't be deleted.
+- To move a single entry, edit it and choose another **Notebook**.
+- If you used the Notebook before notebooks existed, your entries are in **My Notebook**.
 
 ---
 

@@ -7,6 +7,7 @@ import { useSession } from "@/context/SessionContext";
 import { FxTicker } from "@/components/app/FxTicker";
 import { Logo } from "@/components/brand/Logo";
 import { RemindersBell } from "@/components/app/RemindersBell";
+import { TransactionEntry, TransactionEntryCompact } from "@/components/app/TransactionEntry";
 import { cn } from "@/lib/utils";
 import {
   LayoutGrid,
@@ -23,7 +24,6 @@ import {
   Menu,
   X,
   LogOut,
-  Plus,
   PanelLeftClose,
   PanelLeftOpen,
   NotebookPen,
@@ -32,7 +32,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -166,30 +165,6 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
   const groups = NAV;
 
-  const quickAdd = (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          aria-label="Add a transaction"
-          className="flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-primary px-3 text-[13px] font-medium text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] transition-transform hover:bg-primary/90 active:scale-95"
-        >
-          <Plus className="h-4 w-4" />
-          New
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuLabel className="text-xs text-muted-foreground">Add</DropdownMenuLabel>
-        <DropdownMenuItem asChild><Link href="/expenses?new=1">Expense</Link></DropdownMenuItem>
-        <DropdownMenuItem asChild><Link href="/accounts?tab=transfers&new=1">Transfer</Link></DropdownMenuItem>
-        <DropdownMenuItem asChild><Link href="/receivables?income=1">Money received</Link></DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild><Link href="/receivables?new=1">Recurring income</Link></DropdownMenuItem>
-        <DropdownMenuItem asChild><Link href="/payments?new=1">Scheduled payment</Link></DropdownMenuItem>
-        <DropdownMenuItem asChild><Link href="/accounts?new=1">Account or card</Link></DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-
   return (
     <div className="grain flex min-h-screen bg-background text-foreground">
       <a
@@ -304,16 +279,14 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           <Link href="/dashboard" aria-label="VAULT overview"><Logo /></Link>
           <span className="flex items-center gap-1">
           <RemindersBell align="end" className="h-10 w-10" />
-          <Link href="/expenses?new=1" aria-label="Log an expense" className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:text-foreground">
-            <Plus className="h-5 w-5" />
-          </Link>
+          <TransactionEntryCompact className="h-10 w-10" />
           </span>
         </header>
 
         <div className="sticky top-0 z-30 hidden h-14 items-center justify-end gap-2 border-b border-border/70 bg-background/80 px-8 backdrop-blur-md md:flex">
           <FxTicker className="mr-auto" />
           <RemindersBell align="end" />
-          {quickAdd}
+          <TransactionEntry />
         </div>
 
         <main id="main-content" key={pathname} className="mx-auto w-full min-w-0 max-w-[1280px] flex-1 px-4 pt-6 pb-[calc(7rem+env(safe-area-inset-bottom))] md:px-6 md:pt-8 md:pb-16 lg:px-8">

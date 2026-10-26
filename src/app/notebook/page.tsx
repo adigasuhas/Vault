@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { api, localToday } from "@/lib/client";
 import { formatMoney, SUPPORTED_CURRENCIES } from "@/lib/currencies";
@@ -19,10 +20,12 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { ConfirmAction } from "@/components/ConfirmAction";
 import { FxTicker } from "@/components/app/FxTicker";
 import { MoreHorizontal, NotebookPen, Plus } from "lucide-react";
+import { NotebookSwitcher, type Notebook } from "@/components/notebook/NotebookSwitcher";
 import { cn } from "@/lib/utils";
 
 interface Entry {
   id: string;
+  notebookId: string;
   title: string;
   amount: string;
   currency: string;
@@ -62,6 +65,8 @@ function EntryDialog({
   onOpenChange,
   initial,
   projects,
+  notebooks,
+  notebookId,
   defaultCurrency,
   defaultProjectId,
   onProjectCreated,
@@ -71,6 +76,9 @@ function EntryDialog({
   onOpenChange: (o: boolean) => void;
   initial: Entry | null;
   projects: Project[];
+  notebooks: Notebook[];
+  /** The notebook being viewed: where a new entry goes. */
+  notebookId: string;
   defaultCurrency: string;
   defaultProjectId: string | null;
   onProjectCreated: (p: Project) => void;
@@ -85,6 +93,7 @@ function EntryDialog({
     person: initial?.person ?? "",
     notes: initial?.notes ?? "",
     projectId: initial ? (initial.project?.id ?? NO_GROUP) : (defaultProjectId ?? NO_GROUP),
+    notebookId: initial?.notebookId ?? notebookId,
   });
   const [f, setF] = useState(blank);
   const [newGroup, setNewGroup] = useState("");
@@ -121,10 +130,16 @@ function EntryDialog({
         person: f.person.trim() || null,
         notes: f.notes.trim() || null,
         projectId,
+        notebookId: f.notebookId,
       };
       if (editingId) await api(`/api/notebook/${editingId}`, { method: "PATCH", body });
       else await api("/api/notebook", { body });
-      toast.success(editingId ? "Entry updated." : `${body.title} added to your notebook.`);
+      const nbName = notebooks.find((n) => n.id === f.notebookId)?.name ?? "your notebook";
+      toast.success(
+        editingId
+          ? initial && f.notebookId !== initial.notebookId ? `Entry updated and moved to ${nbName}.` : "Entry updated."
+          : `${body.title} added to ${nbName}.`
+      );
       onOpenChange(false);
       onSaved();
     } catch (err) {
@@ -207,6 +222,18 @@ function EntryDialog({
           </div>
           {f.projectId === NEW_GROUP && (
             <Input autoFocus value={newGroup} onChange={(e) => setNewGroup(e.target.value)} placeholder="Group name, e.g. Liverpool move" aria-label="New group name" />
+          )}
+          {notebooks.length > 1 && (
+            <div className="space-y-1.5">
+              <Label>Notebook</Label>
+              <Select value={f.notebookId} onValueChange={(v) => setF({ ...f, notebookId: v })}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>{notebooks.map((n) => <SelectItem key={n.id} value={n.id}>{n.name}</SelectItem>)}</SelectContent>
+              </Select>
+              {editingId && initial && f.notebookId !== initial.notebookId && (
+                <p className="text-xs text-muted-foreground">Saving moves this entry to {notebooks.find((n) => n.id === f.notebookId)?.name}.</p>
+              )}
+            </div>
           )}
           <div className="space-y-1.5">
             <Label htmlFor="n-notes">Notes <span className="font-normal text-muted-foreground">(optional)</span></Label>
@@ -319,7 +346,15 @@ function ConvertDialog({
   );
 }
 
+const CURRENT_KEY = "vault.notebook.current";
+
 export default function NotebookPage() {
+  const search = useSearchParams();
+  const [notebooks, setNotebooks] = useState<Notebook[] | null>(null);
+  // The notebook being viewed: from the link (?notebook=), else the one last
+  // opened on this device, else the default. Kept in both, so a refresh or
+  // reopening VAULT comes back to it.
+  const [current, setCurrent] = useState<string | null>(null);
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -342,11 +377,58 @@ export default function NotebookPage() {
     }
   });
 
+  // The link's ?notebook= is read once, on arrival. After that the page owns
+  // the choice and only writes it back, so a slow URL update can never pull
+  // it back to an older notebook.
+  const [wanted] = useState(() => search.get("notebook"));
+  const applyNotebooks = useCallback(
+    (r: { notebooks: Notebook[]; defaultId: string }) => {
+      setNotebooks(r.notebooks);
+      setCurrent((cur) => {
+        const has = (id: string | null | undefined): id is string => !!id && r.notebooks.some((n) => n.id === id);
+        let stored: string | null = null;
+        try {
+          stored = localStorage.getItem(CURRENT_KEY);
+        } catch {}
+        return has(cur) ? cur : has(wanted) ? wanted : has(stored) ? stored : r.defaultId;
+      });
+    },
+    [wanted]
+  );
+  const loadNotebooks = useCallback(async () => {
+    try {
+      applyNotebooks(await api<{ notebooks: Notebook[]; defaultId: string }>("/api/notebooks"));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [applyNotebooks]);
+  function openNotebook(id: string) {
+    if (id === current) return;
+    setEntries(null);
+    setDuplicates([]);
+    setGroup("ALL");
+    setCurrent(id);
+  }
+  // Remember the open notebook and keep the address in step with it
+  // (replaceState: no navigation, no history entry per switch).
+  useEffect(() => {
+    if (!current) return;
+    try {
+      localStorage.setItem(CURRENT_KEY, current);
+    } catch {}
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("notebook") !== current) {
+      url.searchParams.set("notebook", current);
+      window.history.replaceState(window.history.state, "", url);
+    }
+  }, [current]);
+
   const load = useCallback(async () => {
+    if (!current) return;
     try {
       const [n, p] = await Promise.all([
-        api<{ entries: Entry[]; currency: string; possibleDuplicates?: string[][] }>("/api/notebook"),
-        api<{ projects: Project[] }>("/api/expense-projects?includeArchived=1"),
+        api<{ entries: Entry[]; currency: string; possibleDuplicates?: string[][] }>(`/api/notebook?notebookId=${current}`),
+        api<{ projects: Project[] }>(`/api/expense-projects?includeArchived=1&notebookId=${current}`),
       ]);
       setEntries(n.entries);
       setDuplicates(n.possibleDuplicates ?? []);
@@ -356,7 +438,21 @@ export default function NotebookPage() {
     } catch (e) {
       setError((e as Error).message);
     }
-  }, []);
+  }, [current]);
+  // Entry counts on the switcher follow every change.
+  const reload = useCallback(() => {
+    load();
+    loadNotebooks();
+  }, [load, loadNotebooks]);
+  useEffect(() => {
+    let live = true;
+    api<{ notebooks: Notebook[]; defaultId: string }>("/api/notebooks")
+      .then((r) => live && applyNotebooks(r))
+      .catch((e) => live && setError((e as Error).message));
+    return () => {
+      live = false;
+    };
+  }, [applyNotebooks]);
   useEffect(() => {
     load();
     Promise.all([api<{ accounts: Account[] }>("/api/accounts"), api<{ categories: Category[] }>("/api/categories")])
@@ -370,7 +466,9 @@ export default function NotebookPage() {
   const all = useMemo(() => entries ?? [], [entries]);
   const open = all.filter((e) => e.status === "OPEN");
   const visible = all.filter((e) => (show === "ALL" || e.status === "OPEN") && (group === "ALL" || (group === NO_GROUP ? !e.project : e.project?.id === group)));
-  const activeProjects = projects.filter((p) => !p.archivedAt);
+  // Groups are shared by every notebook; each shows only what's in this one.
+  const activeProjects = projects.filter((p) => !p.archivedAt && p.count > 0);
+  const currentNotebook = notebooks?.find((n) => n.id === current) ?? null;
   const byId = new Map(all.map((e) => [e.id, e]));
   const toReview = duplicates.filter((g) => !dismissed.includes(g.join(","))).map((g) => g.map((id) => byId.get(id)).filter((e): e is Entry => !!e)).filter((g) => g.length > 1);
   function keepBoth(group: Entry[]) {
@@ -385,7 +483,7 @@ export default function NotebookPage() {
     try {
       await api(`/api/notebook/${e.id}`, { method: "DELETE" });
       toast.success(`Deleted ${e.title}.`);
-      load();
+      reload();
     } catch (err) {
       toast.error((err as Error).message);
     }
@@ -396,9 +494,18 @@ export default function NotebookPage() {
       <PageHeader
         title="Notebook"
         description="Jot down money spent outside your monthly routine, whether you paid or someone paid for you. Nothing here touches your balances, outflow or budget. When it's settled how it'll be paid, turn an entry into a loan, an expense or money you're owed."
-        actions={<Button onClick={() => setEditor({ open: true, entry: null })}><Plus /> Add entry</Button>}
+        actions={
+          <>
+            {notebooks && current ? (
+              <NotebookSwitcher notebooks={notebooks} current={current} onOpen={openNotebook} onChanged={loadNotebooks} />
+            ) : (
+              <SkeletonBlock className="h-9 w-52" />
+            )}
+            <Button onClick={() => setEditor({ open: true, entry: null })} disabled={!current}><Plus /> Add entry</Button>
+          </>
+        }
       />
-      {error && <ErrorState message={error} onRetry={load} />}
+      {error && <ErrorState message={error} onRetry={reload} />}
 
       {entries && entries.length > 0 && (
         <div className="grid gap-3 sm:grid-cols-3">
@@ -501,7 +608,7 @@ export default function NotebookPage() {
             <div className="p-5">
               <EmptyState
                 icon={<NotebookPen className="h-5 w-5" />}
-                title={all.length === 0 ? "Your notebook is empty" : "Nothing to show here"}
+                title={all.length === 0 ? `${currentNotebook?.name ?? "This notebook"} is empty` : "Nothing to show here"}
                 action={<Button size="sm" variant="outline" onClick={() => setEditor({ open: true, entry: null })}>Add an entry</Button>}
               >
                 Flights a parent paid for, a deposit you covered for a flatmate, a laptop you&apos;re still deciding how to pay off. Note it here; decide later.
@@ -567,10 +674,12 @@ export default function NotebookPage() {
         onOpenChange={(o) => setEditor((s) => ({ ...s, open: o }))}
         initial={editor.entry}
         projects={projects}
+        notebooks={notebooks ?? []}
+        notebookId={current ?? ""}
         defaultCurrency={currency}
         defaultProjectId={group !== "ALL" && group !== NO_GROUP ? group : null}
         onProjectCreated={(p) => setProjects((ps) => [p, ...ps])}
-        onSaved={load}
+        onSaved={reload}
       />
       <ConvertDialog
         entry={converting.entry}
@@ -578,14 +687,14 @@ export default function NotebookPage() {
         onOpenChange={(o) => !o && setConverting((s) => ({ ...s, entry: null }))}
         accounts={accounts}
         categories={categories}
-        onDone={load}
+        onDone={reload}
       />
       <LoanDialog
         open={!!loanFrom}
         onOpenChange={(o) => !o && setLoanFrom(null)}
         onDone={() => {
           toast.success("The entry is now a loan. Find it in Loans & payments.");
-          load();
+          reload();
         }}
         initial={loanFrom ? { name: loanFrom.person ? `${loanFrom.title} (${loanFrom.person})` : loanFrom.title, principal: Number(loanFrom.amount), currency: loanFrom.currency } : undefined}
         notebookEntryId={loanFrom?.id}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { TransactionEntry } from "@/components/app/TransactionEntry";
 import { useSession } from "@/context/SessionContext";
 import { api } from "@/lib/client";
 import { formatCompactMoney, formatMoney } from "@/lib/currencies";
@@ -11,7 +12,7 @@ import { PageHeader, Panel, Section, Stat, EmptyState, SkeletonBlock, ErrorState
 import { Money } from "@/components/app/Money";
 import { StatusBadge, occurrenceStatus } from "@/components/app/StatusBadge";
 import { Button } from "@/components/ui/button";
-import { ArrowUpRight, CalendarClock, Landmark, Plus } from "lucide-react";
+import { ArrowUpRight, CalendarClock, Landmark } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, Tooltip } from "recharts";
 import type { Occurrence } from "@/lib/schedules";
 import { Equivalent } from "@/components/app/Money";
@@ -75,10 +76,7 @@ export default function DashboardPage() {
         eyebrow={new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}
         title={`${greeting()}${user?.name ? `, ${user.name.split(" ")[0]}` : ""}.`}
         actions={
-          <>
-            <Button variant="outline" asChild><Link href="/accounts?tab=transfers&new=1">Transfer</Link></Button>
-            <Button asChild><Link href="/expenses?new=1"><Plus /> Log expense</Link></Button>
-          </>
+<TransactionEntry size="md" className="md:hidden" />
         }
       />
 
@@ -138,7 +136,7 @@ export default function DashboardPage() {
         <Section title="Six months of cash flow" actions={<Link href="/analytics" className="text-xs text-muted-foreground hover:text-foreground">Analytics →</Link>}>
           <Panel>
             {data.trend.every((t) => t.income === 0 && t.expenses === 0) ? (
-              <EmptyState title="No income or spending booked yet">Log an expense or confirm a receivable and this fills in.</EmptyState>
+              <EmptyState title="No income or spending booked yet">Record a credit or a debit and this fills in.</EmptyState>
             ) : (
               <>
                 <div className="mb-3 flex gap-4 text-xs text-muted-foreground">

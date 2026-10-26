@@ -110,8 +110,18 @@ const notebookFields = {
   person: z.string().trim().max(120).nullish(),
   notes: z.string().trim().max(500).nullish(),
   projectId: zId.nullish(),
+  /** Which notebook it's in; the default notebook when left out. */
+  notebookId: zId.nullish(),
 };
 export const notebookEntrySchema = z.object(notebookFields);
+export const notebookSchema = z.object({
+  name: z.string().trim().min(1, "Give the notebook a name.").max(60, "Keep the name under 60 characters."),
+});
+/** Deleting a notebook that has entries: move them, or delete them with it. */
+export const deleteNotebookSchema = z.object({
+  moveTo: zId.nullish(),
+  deleteEntries: z.boolean().optional(),
+});
 export const patchNotebookEntrySchema = z.object(notebookFields).partial();
 export const convertNotebookEntrySchema = z.discriminatedUnion("to", [
   z.object({ to: z.literal("EXPENSE"), accountId: zId, categoryId: zId, date: zIsoDate.optional() }),

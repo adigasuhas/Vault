@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { audit, recordExpense, voidExpense, type Tx } from "@/lib/ledger";
 import { createSchedule } from "@/lib/schedules";
+import { defaultNotebookId } from "@/lib/notebooks";
 import { ValidationError } from "@/lib/validate";
 import { dateOnly } from "@/lib/dates";
 
@@ -37,6 +38,7 @@ export async function moveOneTimeExpensesToNotebook(userId: string) {
           await tx.notebookEntry.create({
             data: {
               userId,
+              notebookId: await defaultNotebookId(userId, tx),
               title: e.description || e.category.name,
               amount: e.amount,
               currency: e.currency,

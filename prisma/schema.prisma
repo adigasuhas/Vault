@@ -192,6 +192,7 @@ model User {
   auditEvents          AuditEvent[]
   expenseProjects      ExpenseProject[]
   notebookEntries      NotebookEntry[]
+  notebooks            Notebook[]
   investmentCategories InvestmentCategory[]
   priceAlerts          StockPriceAlert[]
   priceAlertEvents     PriceAlertEvent[]
@@ -425,6 +426,22 @@ model ExpenseProject {
 // balances, outflow or budgets. One can later be turned into a loan, a real
 // expense, or an expected incoming payment (receivable).
 
+/// A named, independent notebook ("My Notebook", "Liverpool move"). Every
+/// entry belongs to exactly one. A notebook with entries can't be deleted
+/// out from under them: they're moved to another notebook or deleted first.
+model Notebook {
+  id        String          @id @default(uuid())
+  userId    String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  entries   NotebookEntry[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
 enum NotebookStatus {
   OPEN
   CONVERTED
@@ -434,6 +451,8 @@ model NotebookEntry {
   id              String          @id @default(uuid())
   userId          String
   user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notebookId      String
+  notebook        Notebook        @relation(fields: [notebookId], references: [id], onDelete: NoAction)
   title           String
   amount          Decimal
   currency        String
@@ -455,6 +474,7 @@ model NotebookEntry {
   updatedAt       DateTime        @updatedAt
 
   @@index([userId])
+  @@index([notebookId])
 }
 
 // ---------- Transfers ----------

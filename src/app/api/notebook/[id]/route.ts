@@ -3,6 +3,7 @@ import { authed } from "@/lib/api";
 import { parseJson, ValidationError } from "@/lib/validate";
 import { patchNotebookEntrySchema } from "@/lib/schemas";
 import { dateOnly } from "@/lib/dates";
+import { resolveNotebookId } from "@/lib/notebooks";
 
 export const dynamic = "force-dynamic";
 
@@ -22,9 +23,12 @@ export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   if (input.projectId && !(await db.expenseProject.findFirst({ where: { id: input.projectId, userId } }))) {
     throw new ValidationError("Group not found.");
   }
+  // Moving it to another notebook: that notebook has to be the user's.
+  const notebookId = input.notebookId ? await resolveNotebookId(userId, input.notebookId) : undefined;
   const updated = await db.notebookEntry.update({
     where: { id: entry.id },
     data: {
+      notebookId,
       title: input.title,
       amount: input.amount,
       currency: input.currency,

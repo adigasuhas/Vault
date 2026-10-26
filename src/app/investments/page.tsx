@@ -1035,6 +1035,7 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
   const changed = (v: PickerValue, was: string[]) => v.newNames.length > 0 || v.ids.length !== was.length || v.ids.some((id) => !was.includes(id));
   const [saving, setSaving] = useState(false);
   const [alertRows, setAlertRows] = useState<AlertRow[]>(() => alertRowsFrom(holding));
+  const [moreOpen, setMoreOpen] = useState(false);
 
   const paidAny = holding.lots.some((l) => l.paidFrom);
   const currencyLocked = paidAny || (holding.saleCount ?? 0) > 0;
@@ -1090,90 +1091,119 @@ function StockEditForm({ holding, focusLot, onClose, onSaved }: { holding: Stock
       : l.paidFrom.kind === "ACCOUNT"
         ? `Paid from ${l.paidFrom.name}${l.paidFrom.amount ? ` · ${formatMoney(Number(l.paidFrom.amount), l.paidFrom.currency ?? holding.currency)}` : ""}. A new cost re-books that payment.`
         : `Paid from the ${l.paidFrom.name} sale's proceeds. A new cost updates that reinvestment.`;
+  const alertCount = alertRows.length;
+  const lotCatCount = lotsInOrder.filter((l) => lotCats[l.id].ids.length + lotCats[l.id].newNames.length > 0).length;
+  const extras = [alertCount ? `${alertCount} alert${alertCount > 1 ? "s" : ""}` : "", lotCatCount && !single ? "purchase categories" : ""].filter(Boolean).join(", ");
 
+  // Laid out like "Add a stock": the stock, its purchase(s), categories, and
+  // everything less common under More options.
   return (
     <form onSubmit={save} className="space-y-4">
-      <div className="space-y-2">
-        <Label>Search in</Label>
-        <Select value={searchExchange} onValueChange={setSearchExchange}>
-          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {EXCHANGE_FILTERS.map((e) => <SelectItem key={e.code} value={e.code}>{e.label}</SelectItem>)}
-          </SelectContent>
-        </Select>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-2">
-          <Label>Ticker</Label>
-          <TickerAutocomplete value={ticker} onChange={setTicker} onSelect={(s) => { setTicker(s.symbol); setExchange(s.exchange); }} exchangeFilter={searchExchange} />
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <Label>Stock</Label>
+          <Select value={searchExchange} onValueChange={setSearchExchange}>
+            <SelectTrigger className="h-7 w-auto gap-1 border-0 bg-transparent px-1 text-xs text-muted-foreground shadow-none" aria-label="Search in"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {EXCHANGE_FILTERS.map((e) => <SelectItem key={e.code} value={e.code}>{e.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
-        <div className="space-y-2">
-          <Label>Exchange</Label>
-          <Input value={exchange} onChange={(e) => setExchange(e.target.value)} placeholder="Optional" aria-label="Exchange" />
-        </div>
-      </div>
-      {ticker.trim().toUpperCase() !== holding.ticker && (
-        <p className="-mt-2 text-xs text-muted-foreground">Its price is fetched again for the new ticker. Sales already recorded keep the name they were sold under.</p>
-      )}
-      <div className="space-y-2">
-        <Label>Currency</Label>
-        <Select value={currency} onValueChange={setCurrency} disabled={currencyLocked}>
-          <SelectTrigger className="w-full" aria-label="Currency"><SelectValue /></SelectTrigger>
-          <SelectContent>{SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}</SelectContent>
-        </Select>
-        {currencyLocked && (
-          <p className="text-xs text-muted-foreground">
-            Fixed at {holding.currency}: {paidAny ? "a purchase was paid for in it" : "it has sales recorded in it"}. To change it, delete {paidAny ? "that purchase" : "this stock"} and add it again in the right currency.
-          </p>
+        <TickerAutocomplete value={ticker} onChange={setTicker} onSelect={(s) => { setTicker(s.symbol); setExchange(s.exchange); }} exchangeFilter={searchExchange} />
+        {ticker.trim().toUpperCase() !== holding.ticker && (
+          <p className="text-xs text-muted-foreground">Its price is fetched again for the new ticker. Sales already recorded keep the name they were sold under.</p>
         )}
       </div>
 
       <div className="space-y-2">
-        <div className="flex items-baseline justify-between gap-2">
-          <Label>{single ? "Purchase" : `Purchases (${lotsInOrder.length})`}</Label>
-          {!single && <span className="text-xs text-muted-foreground tabular-nums">{Number(totals.qty.toFixed(4))} shares · avg {formatMoney(totals.qty ? totals.cost / totals.qty : 0, currency)}</span>}
-        </div>
-        <div className="space-y-2">
-          {lotsInOrder.map((l, i) => (
-            <div key={l.id} className={`space-y-2 rounded-lg border p-3 ${focusLot === l.id ? "border-foreground/40 bg-muted/40" : "border-border"}`}>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Quantity</Label>
-                  <Input type="number" step="0.0001" min="0" value={lots[l.id].quantity} onChange={(e) => setLot(l.id, { quantity: e.target.value })} required id={`lot-quantity-${l.id}`} aria-label={`Quantity, purchase ${i + 1}`} />
+        {!single && (
+          <div className="flex items-baseline justify-between gap-2">
+            <p className="text-sm font-medium">Purchases ({lotsInOrder.length})</p>
+            <span className="text-xs text-muted-foreground tabular-nums">{Number(totals.qty.toFixed(4))} shares · avg {formatMoney(totals.qty ? totals.cost / totals.qty : 0, currency)}</span>
+          </div>
+        )}
+        <div className={single ? "" : "divide-y divide-border/70 rounded-lg border border-border"}>
+          {lotsInOrder.map((l, i) => {
+            const v = lots[l.id];
+            const cost = (Number(v.quantity) || 0) * (Number(v.price) || 0);
+            return (
+              <div key={l.id} className={single ? "space-y-2" : cn("space-y-2 p-3", focusLot === l.id && "bg-muted/40")}>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor={`lot-quantity-${l.id}`}>Quantity</Label>
+                    <Input id={`lot-quantity-${l.id}`} type="number" inputMode="decimal" step="any" min="0" value={v.quantity} onChange={(e) => setLot(l.id, { quantity: e.target.value })} required aria-label={single ? undefined : `Quantity, purchase ${i + 1}`} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor={`lot-price-${l.id}`}>Price paid</Label>
+                    <Input id={`lot-price-${l.id}`} type="number" inputMode="decimal" step="any" min="0" value={v.price} onChange={(e) => setLot(l.id, { price: e.target.value })} required aria-label={single ? undefined : `Price, purchase ${i + 1}`} />
+                  </div>
+                  <div className="col-span-2 space-y-1.5 sm:col-span-1">
+                    <Label htmlFor={`lot-date-${l.id}`}>Bought on</Label>
+                    <Input id={`lot-date-${l.id}`} type="date" value={v.date} onChange={(e) => setLot(l.id, { date: e.target.value })} required aria-label={single ? undefined : `Date, purchase ${i + 1}`} />
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Price paid</Label>
-                  <Input type="number" step="0.01" min="0" value={lots[l.id].price} onChange={(e) => setLot(l.id, { price: e.target.value })} required aria-label={`Price, purchase ${i + 1}`} />
-                </div>
-                <div className="col-span-2 space-y-1.5 sm:col-span-1">
-                  <Label className="text-xs text-muted-foreground">Bought on</Label>
-                  <Input type="date" value={lots[l.id].date} onChange={(e) => setLot(l.id, { date: e.target.value })} required aria-label={`Date, purchase ${i + 1}`} />
-                </div>
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  {cost > 0 && <>Total {formatMoney(cost, currency)} · </>}
+                  {paidNote(l)}
+                </p>
               </div>
-              <p className="text-xs text-muted-foreground">{paidNote(l)}</p>
-              <div className="space-y-1.5 border-t border-border/70 pt-2">
-                <Label className="text-xs text-muted-foreground">{single ? "Categories for this purchase" : `Categories for these ${Number(lots[l.id].quantity) || ""} shares`}</Label>
-                <CategoryPicker compact value={lotCats[l.id]} onChange={(v) => setLotCats((all) => ({ ...all, [l.id]: v }))} categories={categoryCtx?.categories ?? []} />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
-        <p className="text-xs text-muted-foreground">
-          How a purchase was paid stays as recorded; it&apos;s part of that account&apos;s history. To change it, delete the purchase from the stock&apos;s details and add it again.{!single && " Quantity and average price are worked out from these purchases."}
-        </p>
       </div>
 
       <div className="space-y-1.5">
-        <Label>Categories for the whole stock <span className="font-normal text-muted-foreground">(optional)</span></Label>
-        <p className="text-xs text-muted-foreground">Every share, now and later, e.g. an industry. Use a purchase&apos;s own categories above for who it was bought for.</p>
+        <Label>Categories <span className="font-normal text-muted-foreground">(optional)</span></Label>
         <CategoryPicker value={cats} onChange={setCats} categories={categoryCtx?.categories ?? []} />
+        <p className="text-xs text-muted-foreground">For every share of it, e.g. an industry.</p>
       </div>
 
-      <PriceAlertsEditor holding={holding} rows={alertRows} onChange={setAlertRows} currency={currency} />
+      <div>
+        <button type="button" onClick={() => setMoreOpen(!moreOpen)} aria-expanded={moreOpen} className="inline-flex cursor-pointer items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${moreOpen ? "rotate-180" : ""}`} />
+          More options{extras ? ` · ${extras}` : ""}
+        </button>
+        {moreOpen && (
+          <div className="mt-3 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-exchange">Exchange</Label>
+                <Input id="edit-exchange" value={exchange} onChange={(e) => setExchange(e.target.value)} placeholder="Optional" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Currency</Label>
+                <Select value={currency} onValueChange={setCurrency} disabled={currencyLocked}>
+                  <SelectTrigger className="w-full" aria-label="Currency"><SelectValue /></SelectTrigger>
+                  <SelectContent>{SUPPORTED_CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.code}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+            </div>
+            {currencyLocked && (
+              <p className="-mt-2 text-xs text-muted-foreground">
+                Currency is fixed at {holding.currency}: {paidAny ? "a purchase was paid for in it" : "it has sales recorded in it"}. To change it, delete {paidAny ? "that purchase" : "this stock"} and add it again.
+              </p>
+            )}
+            <div className="space-y-1.5">
+              <Label>{single ? "Categories for this purchase" : "Categories for each purchase"}</Label>
+              <p className="text-xs text-muted-foreground">Who or what a purchase was for, e.g. a client.</p>
+              <div className="space-y-2">
+                {lotsInOrder.map((l) => (
+                  <div key={l.id} className={single ? "" : "space-y-1"}>
+                    {!single && <p className="text-xs tabular-nums text-muted-foreground">{Number(lots[l.id].quantity) || 0} shares · {formatDate(lots[l.id].date || l.purchaseDate)}</p>}
+                    <CategoryPicker compact value={lotCats[l.id]} onChange={(v) => setLotCats((all) => ({ ...all, [l.id]: v }))} categories={categoryCtx?.categories ?? []} />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <PriceAlertsEditor holding={holding} rows={alertRows} onChange={setAlertRows} currency={currency} />
+          </div>
+        )}
+      </div>
 
-      <DialogFooter className="gap-2">
-        <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-        <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
+      <p className="text-xs text-muted-foreground">How each purchase was paid stays as recorded. To change it, delete the purchase from the stock&apos;s details and add it again.</p>
+
+      <DialogFooter>
+        <Button type="submit" disabled={saving} className="w-full cursor-pointer">{saving ? "Saving…" : "Save changes"}</Button>
       </DialogFooter>
     </form>
   );
