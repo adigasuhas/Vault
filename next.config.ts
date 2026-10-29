@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 
 const isDev = process.env.NODE_ENV !== "production";
 
+const isHttps = process.env.NEXT_PUBLIC_APP_URL?.startsWith("https://") === true;
+
 /**
  * Content-Security-Policy.
  *
@@ -23,7 +25,7 @@ const csp = [
   `connect-src 'self'${isDev ? " ws: http://localhost:*" : ""}`,
   "worker-src 'self' blob:",
   "manifest-src 'self'",
-  "upgrade-insecure-requests",
+  ...(isHttps ? ["upgrade-insecure-requests"] : []),
 ].join("; ");
 
 const securityHeaders = [

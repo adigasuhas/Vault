@@ -19,6 +19,7 @@ export interface SessionUser {
 interface LoginResult {
   success: boolean;
   error?: string;
+  user?: SessionUser;
 }
 
 interface SessionContextValue {
@@ -54,15 +55,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (email: string, password: string): Promise<LoginResult> => {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) return { success: false, error: data.error || "Login failed." };
-      setUser(data.user);
-      return { success: true };
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) return { success: false, error: data.error || "Login failed." };
+        setUser(data.user);
+        return { success: true, user: data.user };
+      } catch (err: unknown) {
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : "Unable to reach the server. Check your connection.",
+        };
+      }
     },
     []
   );

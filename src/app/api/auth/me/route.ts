@@ -12,7 +12,11 @@ export async function GET() {
   }
 
   // One-time expenses now live in the Notebook; move any left over (once).
-  await moveOneTimeExpensesToNotebook(user.id);
+  try {
+    await moveOneTimeExpensesToNotebook(user.id);
+  } catch (err) {
+    console.error("auth/me: moveOneTimeExpensesToNotebook failed non-fatally", err);
+  }
   const isDeveloper = user.role === "DEVELOPER";
   const otherUsers = isDeveloper ? await db.user.count({ where: { id: { not: user.id } } }) : 0;
 

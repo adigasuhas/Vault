@@ -38,7 +38,10 @@ function LoginForm() {
   const [password, setPassword] = useState("");
 
   useEffect(() => {
-    if (user && !loading) router.push("/dashboard");
+    if (user && !loading) {
+      const target = !user.isOnboarded ? "/onboarding" : "/dashboard";
+      router.replace(target);
+    }
   }, [user, loading, router]);
 
   useEffect(() => {
@@ -48,13 +51,21 @@ function LoginForm() {
 
   const handleCredentialsSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) return;
+    if (!email || !password || signingIn) return;
     setSigningIn(true);
     setErrorMsg(null);
 
-    const result = await login(email, password);
-    if (!result.success) {
-      setErrorMsg(result.error || "Invalid email or password.");
+    try {
+      const result = await login(email, password);
+      if (!result.success) {
+        setErrorMsg(result.error || "Invalid email or password.");
+        setSigningIn(false);
+      } else {
+        const target = result.user && !result.user.isOnboarded ? "/onboarding" : "/dashboard";
+        router.replace(target);
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
       setSigningIn(false);
     }
   };

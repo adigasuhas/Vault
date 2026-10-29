@@ -118,8 +118,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
   useEffect(() => {
     if (loading || isPublic) return;
-    if (!user) router.push("/login");
-    else if (!user.isOnboarded && pathname !== "/onboarding") router.push("/onboarding");
+    if (!user) router.replace("/login");
+    else if (!user.isOnboarded && pathname !== "/onboarding") router.replace("/onboarding");
   }, [user, loading, isPublic, pathname, router]);
 
   // Items waiting on the user (due receivables / payments) badge the nav.

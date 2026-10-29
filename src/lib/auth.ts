@@ -124,12 +124,18 @@ export async function revokeUserSessions(userId: string) {
   await db.user.update({ where: { id: userId }, data: { tokenVersion: { increment: 1 } } });
 }
 
+function shouldSecureCookie(): boolean {
+  if (process.env.SECURE_COOKIES === "false" || process.env.COOKIE_SECURE === "false") return false;
+  if (process.env.NEXT_PUBLIC_APP_URL && !process.env.NEXT_PUBLIC_APP_URL.startsWith("https://")) return false;
+  return process.env.NODE_ENV === "production";
+}
+
 export async function setSessionCookie(payload: SessionPayload) {
   const token = await signSessionToken(payload);
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: shouldSecureCookie(),
     sameSite: "lax",
     maxAge: 60 * 60 * 24 * 7,
     path: "/",
@@ -140,6 +146,7 @@ export async function clearSessionCookie() {
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, "", {
     httpOnly: true,
+    secure: shouldSecureCookie(),
     expires: new Date(0),
     path: "/",
   });
