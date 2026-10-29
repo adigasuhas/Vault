@@ -19,7 +19,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Users, UserPlus, Trash2, ShieldAlert } from "lucide-react";
+import { Users, UserPlus, Trash2, ShieldAlert, Database } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmAction } from "@/components/ConfirmAction";
 
@@ -30,6 +30,21 @@ interface DevUser {
   role: string;
   status: string;
   createdAt: string;
+  lastLogin: string | null;
+}
+
+interface Usage { accounts: number; ledgerEntries: number; notebookEntries: number; holdings: number; schedules: number; records: number }
+interface Storage {
+  database: { bytes: number; limitBytes: number; usedPct: number };
+  tables: { name: string; bytes: number; rows: number }[];
+  perUser: Record<string, Usage>;
+}
+
+function formatBytes(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 interface AuditEntry {
@@ -46,6 +61,7 @@ export default function DeveloperPage() {
   const [users, setUsers] = useState<DevUser[]>([]);
   const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
   const [stats, setStats] = useState({ totalUsers: 0, activeUsers: 0, totalAccounts: 0 });
+  const [storage, setStorage] = useState<Storage | null>(null);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -63,6 +79,8 @@ export default function DeveloperPage() {
       return;
     }
     const data = await res.json();
+    // Storage is extra detail: the page still works if it can't be read.
+    fetch("/api/developer/storage").then((r) => (r.ok ? r.json() : null)).then(setStorage).catch(() => setStorage(null));
     setUsers(data.users || []);
     setAuditLog(data.auditLog || []);
     setStats(data.stats || { totalUsers: 0, activeUsers: 0, totalAccounts: 0 });
@@ -117,7 +135,7 @@ export default function DeveloperPage() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="font-display text-[1.9rem] leading-tight">Developer</h1>
-          <p className="text-sm text-muted-foreground mt-1">Manage users. Only developer accounts can see this page.</p>
+          <p className="text-sm text-muted-foreground mt-1">Manage users and watch storage. Only developer accounts can see this page.</p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
@@ -178,6 +196,45 @@ export default function DeveloperPage() {
       </div>
 
       <Card>
+        <CardContent className="space-y-4 py-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="flex items-center gap-2 text-sm font-semibold"><Database className="h-4 w-4 text-muted-foreground" />Storage</h2>
+            {storage && (
+              <p className="text-xs text-muted-foreground tabular-nums">
+                {formatBytes(storage.database.bytes)} of {formatBytes(storage.database.limitBytes)} · {storage.database.usedPct}% used
+              </p>
+            )}
+          </div>
+          {!storage ? (
+            <p className="text-sm text-muted-foreground">{loading ? "Loading…" : "Storage details aren't available."}</p>
+          ) : (
+            <>
+              <div className="h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Database storage used" aria-valuenow={storage.database.usedPct} aria-valuemin={0} aria-valuemax={100}>
+                <div
+                  className={storage.database.usedPct >= 90 ? "h-full bg-destructive" : storage.database.usedPct >= 75 ? "h-full bg-warning" : "h-full bg-brass"}
+                  style={{ width: `${Math.min(100, Math.max(storage.database.usedPct, 1))}%` }}
+                />
+              </div>
+              {storage.database.usedPct >= 75 && (
+                <p className="text-xs text-warning">The database is getting close to its plan&apos;s limit. Writes stop when it&apos;s full.</p>
+              )}
+              <div>
+                <p className="mb-1.5 text-xs text-muted-foreground">Largest tables</p>
+                <div className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+                  {storage.tables.map((t) => (
+                    <div key={t.name} className="flex justify-between gap-3 border-b border-border/60 py-1 last:border-0">
+                      <span className="truncate font-mono text-[11px]">{t.name}</span>
+                      <span className="shrink-0 tabular-nums text-muted-foreground">{t.rows.toLocaleString("en-IN")} {t.rows === 1 ? "row" : "rows"} · {formatBytes(t.bytes)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardContent className="py-4">
           {loading ? (
             <p className="text-sm text-muted-foreground">Loading…</p>
@@ -193,6 +250,8 @@ export default function DeveloperPage() {
                   <TableHead>Email</TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>Role</TableHead>
+                  <TableHead>Usage</TableHead>
+                  <TableHead>Last sign-in</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="w-24" />
                 </TableRow>
@@ -204,6 +263,21 @@ export default function DeveloperPage() {
                     <TableCell className="text-muted-foreground">{u.name || "–"}</TableCell>
                     <TableCell>
                       <Badge variant={u.role === "DEVELOPER" ? "default" : "secondary"}>{u.role}</Badge>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground tabular-nums">
+                      {(() => {
+                        const x = storage?.perUser[u.id];
+                        if (!storage) return "–";
+                        if (!x) return "No records";
+                        return (
+                          <span title={`${x.accounts} accounts · ${x.ledgerEntries} ledger entries · ${x.notebookEntries} notebook entries · ${x.holdings} holdings · ${x.schedules} schedules`}>
+                            {x.records.toLocaleString("en-IN")} records · {x.accounts} accounts
+                          </span>
+                        );
+                      })()}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {u.lastLogin ? new Date(u.lastLogin).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "Never"}
                     </TableCell>
                     <TableCell>
                       <Select value={u.status} onValueChange={(v) => handleStatusChange(u.id, v)}>

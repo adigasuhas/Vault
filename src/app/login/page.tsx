@@ -81,7 +81,7 @@ function LoginForm() {
       <form onSubmit={handleCredentialsSignIn} className="space-y-4">
         <div className="space-y-1.5">
           <Label htmlFor="email">Email</Label>
-          <Input id="email" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="you@example.com" className="h-10" />
+          <Input id="email" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="you@example.com" className="h-10" />
         </div>
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">

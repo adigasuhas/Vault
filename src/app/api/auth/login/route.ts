@@ -3,7 +3,7 @@ import { timingSafeEqual } from "crypto";
 import { db } from "@/lib/db";
 import { hashPassword, verifyPassword, needsRehash } from "@/lib/crypto";
 import { setSessionCookie } from "@/lib/auth";
-import { ensureDevDemoData } from "@/lib/defaults";
+import { ensureDefaultCategories, ensureDevDemoData } from "@/lib/defaults";
 import { rateLimit, rateLimitReset, clientIp } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -42,7 +42,10 @@ async function findOrCreateDevUser(devEmail: string) {
         isOnboarded: true,
       },
     });
-    await ensureDevDemoData(user.id, user.baseCurrency);
+    // A demo account helps local development; in production the developer
+    // account is an admin and shouldn't carry made-up money.
+    if (process.env.NODE_ENV === "production") await ensureDefaultCategories(user.id);
+    else await ensureDevDemoData(user.id, user.baseCurrency);
     return { user, showCreateFirstUser: totalUsers === 0 };
   }
 

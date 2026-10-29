@@ -34,6 +34,8 @@ env:
 
 jobs:
   backup:
+    # Only the owner's repository has the secrets; forks and clones skip it.
+    if: github.repository == 'adigasuhas/Vault'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
