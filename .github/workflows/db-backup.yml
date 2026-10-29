@@ -1,0 +1,126 @@
+name: Database backup
+
+# Nightly backup of VAULT's production database to the owner's Google Drive.
+#
+# This repository is public, so the backup never touches the repo, the
+# workflow's artifacts or its logs: it's dumped, test-restored into a
+# throwaway database, encrypted with a passphrase only the owner knows, and
+# uploaded straight to Drive. Logs say whether each step worked, nothing more.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   BACKUP_DATABASE_URL  direct (non-pooled) Postgres URL of the production database
+#   BACKUP_PASSPHRASE    encrypts the backup. Keep a copy somewhere safe:
+#                        without it a backup can't be opened.
+#   GDRIVE_TOKEN         rclone's Google Drive token (drive.file scope: it can
+#                        only see the files it created itself)
+# Restoring: docs/DEPLOYMENT.md → "Backups".
+
+on:
+  schedule:
+    - cron: "30 20 * * *" # 02:00 IST
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+env:
+  # Must be the database's major version or newer (pg_dump refuses an older one).
+  PG_IMAGE: postgres:18
+  DRIVE_FOLDER: VAULT backups
+  KEEP_DAYS: "30"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      # A throwaway database to prove each backup actually restores.
+      scratch:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: scratch
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Check configuration
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$DATABASE_URL" ] || missing="$missing BACKUP_DATABASE_URL"
+          [ -n "$PASSPHRASE" ] || missing="$missing BACKUP_PASSPHRASE"
+          [ -n "$GDRIVE_TOKEN" ] || missing="$missing GDRIVE_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::Backup not configured. Missing secrets:$missing"
+            exit 1
+          fi
+
+      - name: Dump the database
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          umask 077
+          docker run --rm -e DATABASE_URL "$PG_IMAGE" \
+            sh -c 'pg_dump "$DATABASE_URL" --format=custom --no-owner --no-privileges --compress=9' > vault.dump
+          echo "Dump: $(du -h vault.dump | cut -f1)"
+
+      - name: Test-restore into a scratch database
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          scratch="postgresql://postgres:scratch@localhost:5432/postgres"
+          docker run --rm --network host -v "$PWD:/w" "$PG_IMAGE" \
+            pg_restore --exit-on-error --no-owner --no-privileges -d "$scratch" /w/vault.dump
+          # The restored copy must have the same tables as the live database
+          # and, for the core financial tables, rows in each where live has
+          # any. (Exact counts can differ by a write made during the dump.)
+          q() { URL="$1" SQL="$2" docker run --rm --network host -e URL -e SQL "$PG_IMAGE" sh -c 'psql "$URL" -At -v ON_ERROR_STOP=1 -c "$SQL"'; }
+          tables="SELECT count(*) FROM information_schema.tables WHERE table_schema='public'"
+          live=$(q "$DATABASE_URL" "$tables")
+          restored=$(q "$scratch" "$tables")
+          [ "$live" = "$restored" ] || { echo "::error::Restored $restored tables, live database has $live"; exit 1; }
+          for t in User Account LedgerEntry; do
+            l=$(q "$DATABASE_URL" "SELECT count(*) > 0 FROM \"$t\"")
+            r=$(q "$scratch" "SELECT count(*) > 0 FROM \"$t\"")
+            [ "$l" = "$r" ] || { echo "::error::Table $t is empty in the restored copy"; exit 1; }
+          done
+          echo "Restore check passed: all $restored tables restored."
+
+      - name: Encrypt
+        env:
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          umask 077
+          name="vault-$(date -u +%Y-%m-%dT%H%MZ).dump.gpg"
+          printf '%s' "$PASSPHRASE" | gpg --batch --yes --quiet --pinentry-mode loopback --passphrase-fd 0 \
+            --symmetric --cipher-algo AES256 --output "$name" vault.dump
+          shred -u vault.dump
+          echo "BACKUP_FILE=$name" >> "$GITHUB_ENV"
+
+      - name: Upload to Google Drive and prune old backups
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive.file
+          RCLONE_CONFIG_GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq rclone >/dev/null
+          rclone copy "$BACKUP_FILE" "gdrive:$DRIVE_FOLDER" --quiet
+          rclone lsf "gdrive:$DRIVE_FOLDER" --include "$BACKUP_FILE" | grep -qx "$BACKUP_FILE" \
+            || { echo "::error::Upload not found in Drive"; exit 1; }
+          rclone delete "gdrive:$DRIVE_FOLDER" --include "vault-*.dump.gpg" --min-age "${KEEP_DAYS}d" --quiet
+          echo "Uploaded $BACKUP_FILE to \"$DRIVE_FOLDER\"; backups older than $KEEP_DAYS days removed."
+
+      - name: Remove local copies
+        if: always()
+        run: rm -f vault.dump vault-*.dump.gpg

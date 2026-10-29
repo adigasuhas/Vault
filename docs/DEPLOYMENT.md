@@ -65,6 +65,33 @@ Both require `Authorization: Bearer $CRON_SECRET`.
 
 You can trigger a job by hand: `curl -H "Authorization: Bearer $CRON_SECRET" https://<app>/api/cron/daily`, or *Actions → Scheduled jobs → Run workflow*.
 
+## Backups
+
+`.github/workflows/db-backup.yml` backs up the production database every night (02:00 IST) to a **VAULT backups** folder in your Google Drive and keeps the last 30 days. Each run dumps the database, restores the dump into a throwaway database to prove it works, encrypts it, and uploads it. Nothing goes into the repository, its artifacts or its logs, so it's safe on a public repo. If a run fails, GitHub emails you.
+
+### Setting it up
+
+Add three repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | What it is |
+|---|---|
+| `BACKUP_DATABASE_URL` | The database's **direct** (non-pooled) connection string. On Neon, `DATABASE_URL_UNPOOLED`. |
+| `BACKUP_PASSPHRASE` | Encrypts every backup. **Store it in a password manager**: without it, a backup can't be opened. |
+| `GDRIVE_TOKEN` | rclone's Google Drive token. Create it once with `rclone config create gdrive drive scope=drive.file` (signs in through your browser), then copy the `token = {...}` value from `~/.config/rclone/rclone.conf`. The `drive.file` scope lets it see only the files it creates. |
+
+Then run it once by hand: *Actions → Database backup → Run workflow*.
+
+GitHub pauses scheduled workflows in a repository with no activity for 60 days; re-enable it from the Actions tab if that happens.
+
+### Restoring
+
+```bash
+gpg --decrypt vault-2026-10-29T2030Z.dump.gpg > vault.dump      # asks for BACKUP_PASSPHRASE
+pg_restore --clean --if-exists --no-owner --no-privileges -d "$TARGET_DATABASE_URL" vault.dump
+```
+
+`pg_restore` must be the database's Postgres version or newer. With Docker: `docker run --rm -v "$PWD:/w" postgres:18 pg_restore ... /w/vault.dump`. Restore into a fresh database first and check it before pointing the app at it.
+
 ## Health check
 
 `GET /api/health` returns `200 {"status":"ok"}` when the app can reach the database, `503` otherwise. The Docker image, Render, Railway and Fly configs use it.
