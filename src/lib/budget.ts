@@ -5,7 +5,7 @@ import { ensureDefaultCategories } from "@/lib/defaults";
 import { loadOccurrences, syncScheduledBudgets, userToday, type Occurrence } from "@/lib/schedules";
 import { monthKey, monthRange } from "@/lib/dates";
 import { createFxConverter, type FxConverter } from "@/lib/fx";
-import { audit, type Tx } from "@/lib/ledger";
+import { audit, SPEND_EXPENSE, spendOf, type Tx } from "@/lib/ledger";
 
 /**
  * Budgets are per month. A month's plan holds the allocations that apply to
@@ -113,7 +113,7 @@ export async function budgetForMonth(userId: string, month: string) {
       // Spending, plus investment purchases paid from an account under a budget
       // category (they count toward that line, though they aren't spending).
       where: { userId, reversedAt: null, date: { gte: start, lt: end }, OR: [{ type: "EXPENSE" }, { type: "INVESTMENT_PURCHASE", categoryId: { not: null } }] },
-      select: { categoryId: true, amount: true, currency: true, oneTime: true, countInBudget: true },
+      select: { categoryId: true, amount: true, currency: true, oneTime: true, countInBudget: true, expense: SPEND_EXPENSE },
     }),
     db.category.findMany({ where: { userId }, select: { id: true, name: true, isDefault: true } }),
     db.account.findMany({ where: { userId }, select: { id: true, name: true } }),
@@ -138,12 +138,13 @@ export async function budgetForMonth(userId: string, month: string) {
   // reported separately so the page can say what was left out.
   let oneTimeExcluded = 0;
   for (const r of spendRows) {
+    const { amount, currency } = spendOf(r);
     if (r.oneTime && !r.countInBudget) {
-      oneTimeExcluded += toPlan(Number(r.amount), r.currency);
+      oneTimeExcluded += toPlan(amount, currency);
       continue;
     }
     const k = r.categoryId ?? "_none";
-    spend.set(k, (spend.get(k) ?? 0) + toPlan(Number(r.amount), r.currency));
+    spend.set(k, (spend.get(k) ?? 0) + toPlan(amount, currency));
   }
   const conv = (o: Occurrence) => ({ ...o, nativeAmount: o.amount, nativeCurrency: o.currency, amount: toPlan(o.amount, o.currency), currency: planCurrency });
   const catName = new Map(categories.map((c) => [c.id, c]));

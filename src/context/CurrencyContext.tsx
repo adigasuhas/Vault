@@ -7,6 +7,8 @@ interface FxState {
   primary: string;
   secondary: string | null;
   budgetCurrency: string;
+  /** AUTOMATIC: market rates. MANUAL: the user sets each rate. */
+  mode: "AUTOMATIC" | "MANUAL";
   asOf: string | null;
   stale: boolean;
   toPrimary: Record<string, number | null>;
@@ -93,6 +95,7 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
       primary: user?.baseCurrency ?? "INR",
       secondary: null,
       budgetCurrency: user?.baseCurrency ?? "INR",
+      mode: "AUTOMATIC",
       asOf: null,
       stale: true,
       toPrimary: {},

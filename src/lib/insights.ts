@@ -3,7 +3,7 @@ import { createFxConverter, type FxConverter } from "@/lib/fx";
 import { computePortfolioValue } from "@/lib/portfolio";
 import { loadOccurrences, userToday, type Occurrence } from "@/lib/schedules";
 import { addDaysUTC, isoDate, lastNMonths, monthKey, monthRange, shiftMonth } from "@/lib/dates";
-import { isLiabilityAccount } from "@/lib/ledger";
+import { isLiabilityAccount, SPEND_EXPENSE, spendOf } from "@/lib/ledger";
 import { loanLiabilities } from "@/lib/loan-balance";
 
 /**
@@ -44,7 +44,7 @@ export async function ledgerFlows(userId: string, months: string[], fx: FxConver
       description: true,
       categoryId: true,
       oneTime: true,
-      expense: { select: { project: { select: { id: true, name: true } } } },
+      expense: { select: { ...SPEND_EXPENSE.select, project: { select: { id: true, name: true } } } },
       category: { select: { name: true } },
       creditExecution: { select: { scheduledCredit: { select: { name: true, kind: true } } } },
     },
@@ -58,7 +58,8 @@ export async function ledgerFlows(userId: string, months: string[], fx: FxConver
     const m = monthKey(e.date);
     const bucket = byMonth.get(m);
     if (!bucket) continue;
-    const v = fx.convert(Number(e.amount), e.currency);
+    const spent = spendOf(e);
+    const v = fx.convert(spent.amount, spent.currency);
     if (e.type === "INCOME") {
       bucket.income += v;
       const src = e.creditExecution?.scheduledCredit.name ?? e.description ?? "Other income";
@@ -150,12 +151,15 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
       // One-time purchases don't recur, so they don't shape the runway.
       // (This month too: with no full month yet, its pace stands in.)
       where: { userId, type: "EXPENSE", reversedAt: null, oneTime: false, creditExecutionId: null, loanPaymentId: null, date: { gte: recentStart, lte: today } },
-      select: { amount: true, currency: true, date: true },
+      select: { amount: true, currency: true, date: true, expense: SPEND_EXPENSE },
     }),
     db.budgetPlan.findUnique({ where: { userId_month: { userId, month: current } }, include: { allocations: { include: { category: { select: { schedules: { select: { id: true }, where: { direction: "PAYMENT", isActive: true } } } } } } } }),
   ]);
   const perMonth = new Map<string, number>();
-  for (const e of spend) perMonth.set(monthKey(e.date), (perMonth.get(monthKey(e.date)) ?? 0) + fx.convert(Number(e.amount), e.currency));
+  for (const e of spend) {
+    const { amount, currency } = spendOf(e);
+    perMonth.set(monthKey(e.date), (perMonth.get(monthKey(e.date)) ?? 0) + fx.convert(amount, currency));
+  }
   const observed = recent.map((m) => perMonth.get(m)).filter((v): v is number => v != null && v > 0);
   let discretionary = 0;
   let basis: RunwayResult["basis"] = "none";
@@ -258,12 +262,13 @@ export async function budgetAdherence(userId: string, months: string[], fx: FxCo
       date: { gte: start, lt: end },
       AND: [COUNTS_IN_BUDGET, { OR: [{ type: "EXPENSE" }, { type: "INVESTMENT_PURCHASE", categoryId: { not: null } }] }],
     },
-    select: { amount: true, currency: true, date: true, categoryId: true },
+    select: { amount: true, currency: true, date: true, categoryId: true, expense: SPEND_EXPENSE },
   });
   const spentBy = new Map<string, number>();
   for (const e of spend) {
     const k = `${monthKey(e.date)}|${e.categoryId}`;
-    spentBy.set(k, (spentBy.get(k) ?? 0) + fx.convert(Number(e.amount), e.currency));
+    const { amount, currency } = spendOf(e);
+    spentBy.set(k, (spentBy.get(k) ?? 0) + fx.convert(amount, currency));
   }
   return months.map((m) => {
     const plan = plans.find((p) => p.month === m);

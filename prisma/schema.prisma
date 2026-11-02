@@ -371,8 +371,15 @@ model Expense {
   account        Account?        @relation(fields: [accountId], references: [id], onDelete: NoAction)
   categoryId     String
   category       Category        @relation(fields: [categoryId], references: [id], onDelete: NoAction)
+  // What the user reported, in the currency they chose (primary by default).
   amount         Decimal
   currency       String
+  // Set when `currency` isn't the account's (₹ reported for a £ card): what
+  // left the account, in the account's currency, and the rate the user
+  // confirmed (account-currency units per 1 `currency`). The ledger entry is
+  // `accountAmount` in the account's currency; budgets count `amount`.
+  accountAmount  Decimal?
+  exchangeRate   Decimal?
   date           DateTime        @default(now())
   description    String?
   notes          String?

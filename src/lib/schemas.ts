@@ -1,8 +1,12 @@
 import { z } from "zod";
-import { zPositive, zNonNegative, zInt, zId, zIsoDate, zMoney, zMoneyNonNegative, zSignedMoney } from "@/lib/validate";
+import { zPositive, zNonNegative, zInt, zId, zIsoDate, zMoney, zMoneyNonNegative, zSignedMoney, zNumber } from "@/lib/validate";
 import { SUPPORTED_CURRENCIES } from "@/lib/currencies";
 
 const CURRENCY = z.enum(SUPPORTED_CURRENCIES.map((c) => c.code) as [string, ...string[]]);
+/** Units of one currency per 1 unit of another: positive, sane, ≤ 10 decimals. */
+const zRate = zNumber
+  .refine((n) => n > 0 && n < 1e7, "must be a positive exchange rate")
+  .transform((n) => Math.round(n * 1e10) / 1e10);
 const ACCOUNT_TYPE = z.enum([
   "SAVINGS",
   "CURRENT",
@@ -61,7 +65,12 @@ export const createExpenseSchema = z.object({
   accountId: zId.nullish(),
   categoryId: zId,
   amount: zMoney,
+  // The currency the amount is reported in (primary by default). When it
+  // isn't the account's, the confirmed rate (account currency per 1 unit of
+  // `currency`) is required; `accountAmount` is what actually left the account.
   currency: CURRENCY.optional(),
+  exchangeRate: zRate.optional(),
+  accountAmount: zMoney.optional(),
   date: zIsoDate.optional(),
   description: optionalTrimmed,
   notes: optionalTrimmed,
@@ -83,6 +92,8 @@ export const createExpenseSchema = z.object({
 export const amendExpenseSchema = z.object({
   accountId: zId.nullish(),
   currency: CURRENCY.optional(),
+  exchangeRate: zRate.optional(),
+  accountAmount: zMoney.optional(),
   categoryId: zId.optional(),
   amount: zMoney.optional(),
   date: zIsoDate.optional(),

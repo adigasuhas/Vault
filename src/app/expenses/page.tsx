@@ -22,13 +22,19 @@ import { ConfirmAction } from "@/components/ConfirmAction";
 import { MoreHorizontal, Plus, Receipt, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCurrency } from "@/context/CurrencyContext";
+import { CurrencySwitch, ExchangeRateConfirm, fmtRate, marketRate, useConversion } from "@/components/app/ExchangeRateConfirm";
 
 interface Account { id: string; name: string; currency: string; currentBalance: string; status: string; accountType: string }
 interface Category { id: string; name: string; defaultAccountId: string | null }
 interface Expense {
   id: string;
+  /** As reported, in `currency` (the user's primary currency by default). */
   amount: string;
   currency: string;
+  /** Set when `currency` isn't the account's: what left the account, and the
+   * confirmed rate (account currency per 1 `currency`). */
+  accountAmount: string | null;
+  exchangeRate: string | null;
   date: string;
   description: string | null;
   voidedAt: string | null;
@@ -45,6 +51,18 @@ interface BudgetLine { categoryId: string; budgetAmount: number; spent: number; 
 interface BudgetResp { month: string; currency: string; lines: BudgetLine[]; unbudgeted: BudgetLine[]; hasPlan: boolean }
 
 const NEW_CAT = "__new__";
+
+/** "1 GBP = 110.25 INR": a stored rate (account per 1 reported) the readable way round. */
+function rateLabel(rate: number, reported: string, account: string) {
+  return rate >= 1 ? `1 ${reported} = ${fmtRate(rate)} ${account}` : `1 ${account} = ${fmtRate(1 / rate)} ${reported}`;
+}
+
+/** A day's total, per currency: rupees and pounds are never added together. */
+function dayTotal(items: Expense[]) {
+  const by = new Map<string, number>();
+  for (const e of items) if (!e.voidedAt) by.set(e.currency, (by.get(e.currency) ?? 0) + Number(e.amount));
+  return [...by.entries()].map(([c, v]) => formatMoney(v, c)).join(" + ") || formatMoney(0, items[0].currency);
+}
 
 function relDay(iso: string) {
   const today = localToday();
@@ -95,7 +113,10 @@ function ExpenseForm({
   const [date, setDate] = useState(initial ? initial.date.slice(0, 10) : localToday());
   const [categoryId, setCategoryId] = useState(initial?.category.id ?? defaultCategoryId ?? "");
   const [accountId, setAccountId] = useState(initial?.account?.id ?? "");
-  const { primary } = useCurrency();
+  const fxCtx = useCurrency();
+  const { primary, secondary } = fxCtx;
+  // Expenses are reported in the primary currency unless the user switches.
+  const [curChoice, setCur] = useState(initial?.currency ?? primary);
   const [description, setDescription] = useState(initial?.description ?? "");
   const [newCat, setNewCat] = useState("");
   const [busy, setBusy] = useState(false);
@@ -123,12 +144,31 @@ function ExpenseForm({
   const budgetedCats = categories.filter((c) => budgetedIds.has(c.id));
   const otherCats = categories.filter((c) => !budgetedIds.has(c.id));
   const account = accounts.find((a) => a.id === accountId);
-  const cur = account?.currency ?? primary;
   const amt = Number(amount);
+  // Primary and secondary, plus the account's own currency if it's neither.
+  const curOptions = [...new Set([primary, secondary, account?.currency].filter((c): c is string => !!c))];
+  // A currency that only the previous account offered falls back to primary.
+  const cur = curOptions.includes(curChoice) ? curChoice : primary;
+  const conv = useConversion(
+    amt,
+    cur,
+    account?.currency ?? cur,
+    initial?.exchangeRate && initial.account
+      ? { from: initial.currency, to: initial.account.currency, rate: Number(initial.exchangeRate), debit: initial.accountAmount != null ? Number(initial.accountAmount) : null, amount: Number(initial.amount) }
+      : undefined
+  );
+  // What leaves the account, in its currency.
+  const debit = conv.needed ? conv.debit : amt;
+  const ready = amt > 0 && !!categoryId && categoryId !== NEW_CAT && !!accountId && (!conv.needed || (conv.rate != null && conv.debit != null && conv.debit > 0));
+  // The amount as the month's budget counts it (budgets can be in any currency).
+  const budgetRate = budget ? marketRate(fxCtx, cur, budget.currency)?.rate ?? null : null;
+  const amtInBudget = budgetRate != null ? amt * budgetRate : 0;
+  const withDebit = (s: string) => (conv.needed && conv.debit != null && account ? `${s} · ${formatMoney(conv.debit, account.currency)} from ${account.name}` : s);
   const catName = categories.find((c) => c.id === categoryId)?.name;
   const today = localToday();
   const yesterday = isoDate(addDaysUTC(new Date(today), -1));
-  const overdraw = account && !["CREDIT_CARD", "LOAN"].includes(account.accountType) && amt > Number(account.currentBalance) + (initial && initial.account?.id === account.id ? Number(initial.amount) : 0);
+  const initialDebit = initial ? Number(initial.accountAmount ?? initial.amount) : 0;
+  const overdraw = account && debit != null && !["CREDIT_CARD", "LOAN"].includes(account.accountType) && debit > Number(account.currentBalance) + (initial && initial.account?.id === account.id ? initialDebit : 0);
 
   async function createCategory() {
     if (!newCat.trim()) return;
@@ -144,20 +184,22 @@ function ExpenseForm({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!(amt > 0) || !categoryId || categoryId === NEW_CAT || !accountId) return;
+    if (!ready) return;
+    // The confirmed rate travels with the expense whenever it's converted.
+    const fx = conv.needed ? { exchangeRate: conv.rate!, accountAmount: conv.debit! } : {};
     setBusy(true);
     try {
       if (editing) {
-        await api(`/api/expenses/${initial!.id}`, { method: "PATCH", body: { amount: amt, date, categoryId, accountId, description: description || null } });
+        await api(`/api/expenses/${initial!.id}`, { method: "PATCH", body: { amount: amt, currency: cur, ...fx, date, categoryId, accountId, description: description || null } });
         toast.success("Expense corrected. The original stays on the statement with its reversal.");
       } else {
-        const r = await api<{ duplicate: boolean; loanEmi?: { loanName: string; paidCount: number | null } }>("/api/expenses", { body: { amount: amt, date, categoryId, accountId, description: description || undefined, currency: cur, idempotencyKey: key } });
+        const r = await api<{ duplicate: boolean; loanEmi?: { loanName: string; paidCount: number | null } }>("/api/expenses", { body: { amount: amt, date, categoryId, accountId, description: description || undefined, currency: cur, ...fx, idempotencyKey: key } });
         toast.success(
           r.duplicate
             ? "Already logged. We didn't add it twice."
             : r.loanEmi
               ? `${formatMoney(amt, cur)} recorded as ${r.loanEmi.loanName} EMI${r.loanEmi.paidCount ? ` #${r.loanEmi.paidCount}` : ""}. It shows as paid in Loans & EMIs.`
-              : `${formatMoney(amt, cur)} on ${catName} logged for ${formatDate(date, { day: "numeric", month: "short" })}.`
+              : withDebit(`${formatMoney(amt, cur)} on ${catName} logged for ${formatDate(date, { day: "numeric", month: "short" })}`) + "."
         );
         setAmount("");
         setDescription("");
@@ -175,12 +217,15 @@ function ExpenseForm({
 
   return (
     <form onSubmit={submit} className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-[1.1fr_1.3fr_1.3fr]">
+      <div className={cn("grid gap-3", curOptions.length > 1 ? "sm:grid-cols-[1.5fr_1.2fr_1.2fr]" : "sm:grid-cols-[1.1fr_1.3fr_1.3fr]")}>
         <div className="space-y-1.5">
-          <Label htmlFor="x-amt">Amount{cur ? ` (${cur})` : ""}</Label>
-          <div className="relative">
-            <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground">{SUPPORTED_CURRENCIES.find((c) => c.code === cur)?.symbol ?? ""}</span>
-            <Input ref={amountRef} id="x-amt" autoFocus type="number" inputMode="decimal" step="0.01" min="0" required value={amount} onChange={(e) => setAmount(e.target.value)} className="h-10 pl-8 text-lg font-medium tabular-nums" placeholder="0" />
+          <Label htmlFor="x-amt">Amount{curOptions.length > 1 ? "" : ` (${cur})`}</Label>
+          <div className="flex gap-1.5">
+            <div className="relative min-w-0 flex-1">
+              <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground">{SUPPORTED_CURRENCIES.find((c) => c.code === cur)?.symbol ?? ""}</span>
+              <Input ref={amountRef} id="x-amt" autoFocus type="number" inputMode="decimal" step="0.01" min="0" required value={amount} onChange={(e) => setAmount(e.target.value)} className="h-10 pl-8 text-lg font-medium tabular-nums" placeholder="0" />
+            </div>
+            {curOptions.length > 1 && <CurrencySwitch options={curOptions} value={cur} onChange={setCur} />}
           </div>
         </div>
         <div className="space-y-1.5">
@@ -217,6 +262,8 @@ function ExpenseForm({
         </div>
       </div>
 
+      {account && <ExchangeRateConfirm conv={conv} amount={amt} accountName={account.name} />}
+
       {categoryId === NEW_CAT && (
         <div className="flex gap-2">
           <Input autoFocus value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="Category name, like Pets" onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), createCategory())} />
@@ -249,21 +296,22 @@ function ExpenseForm({
             : line ? (
               <span>
                 {catName} in {monthLabel(month)}:{" "}
-                <span className={cn("tabular-nums", line.budgetAmount - line.spent - (amt || 0) < 0 ? "text-negative" : "text-foreground")}>
+                <span className={cn("tabular-nums", line.budgetAmount - line.spent - (amtInBudget || 0) < 0 ? "text-negative" : "text-foreground")}>
                   {formatMoney(Math.max(line.budgetAmount - line.spent, 0), budget.currency)} left of {formatMoney(line.budgetAmount, budget.currency)}
                 </span>
-                {amt > 0 && line.budgetAmount - line.spent - amt < 0 && ". This takes it over budget."}
+                {amt > 0 && line.budgetAmount - line.spent - amtInBudget < 0 && ". This takes it over budget."}
               </span>
             ) : (
               <span>No budget for {catName} in {monthLabel(month)}.</span>
             )
           )}
           {overdraw && <span className="ml-2 text-warning">More than {account!.name}&apos;s balance.</span>}
+          {line && budget && cur !== budget.currency && <span className="ml-2">Converted to {budget.currency} for the budget.</span>}
         </div>
         <div className="flex gap-2">
           {onCancel && <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>}
-          <Button type="submit" disabled={busy || !(amt > 0) || !categoryId || categoryId === NEW_CAT || !accountId}>
-            {busy ? "Saving…" : editing ? "Save correction" : "Log expense"}
+          <Button type="submit" disabled={busy || !ready}>
+            {busy ? "Saving…" : editing ? (conv.needed ? "Confirm rate & save" : "Save correction") : conv.needed ? "Confirm rate & log" : "Log expense"}
           </Button>
         </div>
       </div>
@@ -360,7 +408,7 @@ export default function ExpensesPage() {
   async function remove(e: Expense, reason?: string) {
     try {
       await api(`/api/expenses/${e.id}`, { method: "DELETE", body: { reason } });
-      toast.success(e.account ? `Removed. ${formatMoney(e.amount, e.currency)} is back in ${e.account.name}.` : "Removed.");
+      toast.success(e.account ? `Removed. ${formatMoney(e.accountAmount ?? e.amount, e.account.currency)} is back in ${e.account.name}.` : "Removed.");
       loadList();
       loadRefs();
     } catch (err) {
@@ -446,7 +494,7 @@ export default function ExpensesPage() {
                   <div key={day}>
                     {day && <div className="flex items-center justify-between border-b border-border bg-muted/40 px-5 py-1.5 text-[11px] font-medium text-muted-foreground">
                       <span>{relDay(day)}</span>
-                      <span className="tabular-nums">{formatMoney(items.filter((e) => !e.voidedAt).reduce((s, e) => s + Number(e.amount), 0), items[0].currency)}</span>
+                      <span className="tabular-nums">{dayTotal(items)}</span>
                     </div>}
                     <ul className="divide-y divide-border/70">
                       {items.map((e) => (
@@ -460,7 +508,16 @@ export default function ExpensesPage() {
                             </p>
                           </div>
                           {e.voidedAt && <StatusBadge tone="neutral">Removed</StatusBadge>}
-                          <Money value={-Number(e.amount)} currency={e.currency} signed tone={e.voidedAt ? "muted" : "plain"} className="text-sm font-medium" />
+                          <div className="text-right">
+                            <Money value={-Number(e.amount)} currency={e.currency} signed tone={e.voidedAt ? "muted" : "plain"} className="text-sm font-medium" />
+                            {e.accountAmount && e.account && (
+                              <p className="text-[11px] text-muted-foreground tabular-nums" title={e.exchangeRate ? rateLabel(Number(e.exchangeRate), e.currency, e.account.currency) : undefined}>
+                                <span className="sr-only">Taken from {e.account.name}: </span>
+                                {formatMoney(e.accountAmount, e.account.currency)}
+                                {e.exchangeRate && <span className="hidden sm:inline"> · {rateLabel(Number(e.exchangeRate), e.currency, e.account.currency)}</span>}
+                              </p>
+                            )}
+                          </div>
                           <div className="w-8">
                             {!e.voidedAt && e.account?.status !== "CLOSED" && (
                               <DropdownMenu>
@@ -533,7 +590,8 @@ export default function ExpensesPage() {
           removing && (
             <>
               <p>
-                {removing.description || removing.category.name} · {formatMoney(removing.amount, removing.currency)} on {formatDate(removing.date)}. The amount goes back to{" "}
+                {removing.description || removing.category.name} · {formatMoney(removing.amount, removing.currency)} on {formatDate(removing.date)}.{" "}
+                {removing.accountAmount && removing.account ? <>{formatMoney(removing.accountAmount, removing.account.currency)} goes back to </> : "The amount goes back to "}
                 <b className="text-foreground">{removing.account?.name}</b> and stops counting toward the {removing.category.name} budget.
               </p>
               <p>The entry stays on the statement, struck through, with a reversal next to it.</p>

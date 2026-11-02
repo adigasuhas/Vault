@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { Prisma, type LedgerEntryType } from "@prisma/client";
-import { ValidationError, MAX_AMOUNT } from "@/lib/validate";
+import { ValidationError, MAX_AMOUNT, roundMoney } from "@/lib/validate";
 import { loanAmortization, loanProgress } from "@/lib/loans";
 import { dateOnly, nthOccurrence, todayIn, type Frequency } from "@/lib/dates";
 
@@ -26,6 +26,17 @@ export type Tx = Prisma.TransactionClient;
 export function signedAmount(type: LedgerEntryType | string, amount: number): number {
   if (type === "ADJUSTMENT" || type === "OPENING" || type === "REVERSAL") return amount;
   return type === "EXPENSE" || type === "TRANSFER_OUT" || type === "INVESTMENT_PURCHASE" || type === "TO_INVESTMENT_CASH" ? -amount : amount;
+}
+
+/** What a ledger row counts as spending. An expense reported in a currency
+ * other than its account's counts at the amount the user reported (the rate
+ * they confirmed), not today's rate applied to the account's figure. Select
+ * `expense: SPEND_EXPENSE` on the rows passed in. */
+export const SPEND_EXPENSE = { select: { amount: true, currency: true } } as const;
+export function spendOf(r: { amount: unknown; currency: string; expense?: { amount: unknown; currency: string } | null }) {
+  return r.expense && r.expense.currency !== r.currency
+    ? { amount: Number(r.expense.amount), currency: r.expense.currency }
+    : { amount: Number(r.amount), currency: r.currency };
 }
 
 /** Account types that hold the user's own money and can't go below zero.
@@ -60,6 +71,36 @@ export function assertPostable(amount: number, entryCurrency: string, accountCur
         "Log it against an account in the same currency."
     );
   }
+}
+
+/**
+ * How an expense posts to its account. In the account's own currency it posts
+ * as is. Reported in another currency (₹ for a £ card), it needs the rate the
+ * user confirmed — account-currency units per 1 unit of the reported
+ * currency — and posts what left the account: `accountAmount` when the user
+ * typed the exact figure (from a statement), otherwise amount × rate. A typed
+ * figure has to agree with its rate, so the two can't drift apart.
+ */
+export function expenseBooking(
+  amount: number,
+  currency: string,
+  accountCurrency: string,
+  rate?: number | null,
+  accountAmount?: number | null
+): { postAmount: number; accountAmount: number | null; exchangeRate: number | null } {
+  if (currency === accountCurrency) return { postAmount: amount, accountAmount: null, exchangeRate: null };
+  if (!rate || !Number.isFinite(rate) || rate <= 0) {
+    throw new ValidationError(`Confirm the exchange rate: this expense is in ${currency} and the account is in ${accountCurrency}.`);
+  }
+  const computed = roundMoney(amount * rate);
+  const debit = accountAmount ?? computed;
+  if (Math.abs(debit - computed) > Math.max(0.011, computed * 0.0005)) {
+    throw new ValidationError(
+      `${debit.toFixed(2)} ${accountCurrency} doesn't match ${amount.toFixed(2)} ${currency} at that rate. Check the rate or the amount taken from the account.`
+    );
+  }
+  if (!(debit > 0)) throw new ValidationError(`At that rate less than 0.01 ${accountCurrency} would leave the account. Check the rate.`);
+  return { postAmount: debit, accountAmount: debit, exchangeRate: rate };
 }
 
 function assertOpen(account: { name: string; status: string }) {
@@ -392,6 +433,9 @@ export async function recordExpense(
     oneTime?: boolean;
     countInBudget?: boolean;
     projectId?: string | null;
+    /** Required when `currency` isn't the account's: see expenseBooking. */
+    exchangeRate?: number;
+    accountAmount?: number;
   }
 ) {
   const oneTime = input.oneTime ?? false;
@@ -405,12 +449,15 @@ export async function recordExpense(
   }
   try {
     return await db.$transaction(async (tx: Tx) => {
+      assertPostable(input.amount, input.currency, input.currency);
+      let booking = { postAmount: input.amount, accountAmount: null as number | null, exchangeRate: null as number | null };
+      let postCurrency = input.currency;
       if (input.accountId) {
         const account = await tx.account.findFirstOrThrow({ where: { id: input.accountId, userId } });
         assertOpen(account);
-        assertPostable(input.amount, input.currency, account.currency);
-      } else {
-        assertPostable(input.amount, input.currency, input.currency);
+        booking = expenseBooking(input.amount, input.currency, account.currency, input.exchangeRate, input.accountAmount);
+        postCurrency = account.currency;
+        assertPostable(booking.postAmount, postCurrency, account.currency);
       }
 
       const expense = await tx.expense.create({
@@ -420,6 +467,8 @@ export async function recordExpense(
           categoryId: input.categoryId,
           amount: input.amount,
           currency: input.currency,
+          accountAmount: booking.accountAmount,
+          exchangeRate: booking.exchangeRate,
           date: input.date,
           description: input.description,
           notes: input.notes,
@@ -434,8 +483,8 @@ export async function recordExpense(
         userId,
         accountId: input.accountId,
         type: "EXPENSE",
-        amount: input.amount,
-        currency: input.currency,
+        amount: booking.postAmount,
+        currency: postCurrency,
         date: input.date,
         description: input.description,
         expenseId: expense.id,
@@ -486,8 +535,12 @@ export async function amendExpense(
   expenseId: string,
   changes: {
     accountId?: string | null;
-    /** Only used when there's no account (otherwise the account's currency). */
+    /** The reported currency (kept from the original when left out). */
     currency?: string;
+    /** Needed when the currency isn't the account's and the pair or the
+     * amount changed; otherwise the original's confirmed rate is kept. */
+    exchangeRate?: number;
+    accountAmount?: number;
     categoryId?: string;
     amount?: number;
     date?: Date;
@@ -506,13 +559,28 @@ export async function amendExpense(
     const account = accountId ? await tx.account.findFirst({ where: { id: accountId, userId } }) : null;
     if (accountId && !account) throw new ValidationError("Account not found.");
     if (account) assertOpen(account);
-    // Without an account the purchase keeps its own currency.
-    const currency = account?.currency ?? changes.currency ?? original.currency;
+    const currency = changes.currency ?? original.currency;
     const categoryId = changes.categoryId ?? original.categoryId;
     const category = await tx.category.findFirst({ where: { id: categoryId, userId } });
     if (!category) throw new ValidationError("Category not found.");
     const amount = changes.amount ?? Number(original.amount);
     assertPostable(amount, currency, currency);
+    // A converted expense keeps its confirmed rate (and exact debit) through
+    // edits that don't touch the money: a new category, date or note.
+    const samePair = original.exchangeRate != null && original.currency === currency && original.account?.currency === account?.currency;
+    const keepRate = changes.exchangeRate === undefined && samePair;
+    const keepDebit = keepRate && changes.amount === undefined && changes.accountAmount === undefined;
+    const booking = account
+      ? expenseBooking(
+          amount,
+          currency,
+          account.currency,
+          keepRate ? Number(original.exchangeRate) : changes.exchangeRate,
+          keepDebit && original.accountAmount != null ? Number(original.accountAmount) : changes.accountAmount
+        )
+      : { postAmount: amount, accountAmount: null, exchangeRate: null };
+    const postCurrency = account?.currency ?? currency;
+    assertPostable(booking.postAmount, postCurrency, postCurrency);
     const description = changes.description === undefined ? original.description : changes.description;
     const date = changes.date ?? original.date;
     const notes = changes.notes === undefined ? original.notes : changes.notes;
@@ -528,6 +596,8 @@ export async function amendExpense(
         categoryId,
         amount,
         currency,
+        accountAmount: booking.accountAmount,
+        exchangeRate: booking.exchangeRate,
         date,
         description,
         notes,
@@ -541,8 +611,8 @@ export async function amendExpense(
       userId,
       accountId,
       type: "EXPENSE",
-      amount,
-      currency,
+      amount: booking.postAmount,
+      currency: postCurrency,
       date,
       description,
       expenseId: expense.id,

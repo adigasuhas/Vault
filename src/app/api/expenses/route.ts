@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { authed } from "@/lib/api";
-import { recordExpense } from "@/lib/ledger";
+import { expenseBooking, recordExpense } from "@/lib/ledger";
 import { parseJson, ValidationError } from "@/lib/validate";
 import { createExpenseSchema } from "@/lib/schemas";
 import { monthRange } from "@/lib/dates";
@@ -49,9 +49,10 @@ export const POST = authed(async (req, { userId }) => {
   if (input.projectId && !(await db.expenseProject.findFirst({ where: { id: input.projectId, userId } }))) {
     throw new ValidationError("Group not found.");
   }
-  if (account && input.currency && input.currency !== account.currency) {
-    throw new ValidationError(`${account.name} is in ${account.currency}. Log the expense against an account in ${input.currency}, or convert the amount.`);
-  }
+  // Reported in the user's primary currency by default; for an account kept in
+  // another currency the confirmed rate decides what leaves the account.
+  const currency =
+    input.currency ?? account?.currency ?? (await db.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true } })).baseCurrency;
   // A loan's category means this is the loan's EMI: book it against the loan
   // (and its schedule) so Loans & EMIs shows it paid — not as a loose expense
   // the EMI schedule would then ask for again.
@@ -59,9 +60,11 @@ export const POST = authed(async (req, { userId }) => {
   if (loan) {
     if (!account) throw new ValidationError(`Choose the account the ${loan.name} EMI was paid from.`);
     if (input.oneTime) throw new ValidationError(`${loan.name} EMIs can't be one-time purchases. Untick "one-time" to log the EMI.`);
+    // The EMI is what left the account, in the account's currency.
+    const { postAmount } = expenseBooking(input.amount, currency, account.currency, input.exchangeRate, input.accountAmount);
     const r = await payNextLoanEmi(userId, {
       loanId: loan.id,
-      amount: input.amount,
+      amount: postAmount,
       date: input.date ?? (await userToday(userId)),
       accountId: account.id,
       idempotencyKey: input.idempotencyKey,
@@ -71,14 +74,13 @@ export const POST = authed(async (req, { userId }) => {
       { status: r.duplicate ? 200 : 201 }
     );
   }
-  // Without an account, the purchase is in the currency given (or the user's main one).
-  const currency =
-    account?.currency ?? input.currency ?? (await db.user.findUniqueOrThrow({ where: { id: userId }, select: { baseCurrency: true } })).baseCurrency;
   const { expense, duplicate } = await recordExpense(userId, {
     accountId: account?.id ?? null,
     categoryId: category.id,
     amount: input.amount,
     currency,
+    exchangeRate: input.exchangeRate,
+    accountAmount: input.accountAmount,
     date: input.date ?? (await userToday(userId)),
     description: input.description,
     notes: input.notes,
