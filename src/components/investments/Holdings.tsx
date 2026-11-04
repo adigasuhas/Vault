@@ -127,6 +127,35 @@ function PriceValue({ s, compact }: { s: StockRow; compact?: boolean }) {
   );
 }
 
+/**
+ * The latest session's move: % change since the previous close, and what it
+ * did to this holding. Plain coloured text, not the shaded pills of the
+ * Return column: daily moves are usually well under the break-even band, and
+ * today's move shouldn't read like the holding's overall return.
+ */
+function DayChange({ s, m, compact }: { s: StockRow; m: ReturnType<typeof stockMetrics>; compact?: boolean }) {
+  if (m.dayPct == null || m.dayChange == null) {
+    return <span className="text-muted-foreground" title="No previous close yet. It appears after the next price update.">–</span>;
+  }
+  const stale = priceStatus(s.lastPrice, s.lastPriceAt) === "stale";
+  const dir = m.dayPct > 0 ? "up" : m.dayPct < 0 ? "down" : "flat";
+  const session = s.lastPriceAt ? formatDate(s.lastPriceAt, { day: "numeric", month: "short" }) : "";
+  const label = `${dir === "up" ? "Up" : dir === "down" ? "Down" : "Unchanged"} ${Math.abs(m.dayPct).toFixed(2)}% since the previous close of ${formatMoney(Number(s.previousClose), s.currency)}${stale ? `, as of ${session}` : ""}: ${signed(m.dayChange, s.currency)} on this holding`;
+  return (
+    <span className={cn("tabular-nums", stale ? "text-muted-foreground" : tone(m.dayPct))} title={label}>
+      <span className="sr-only">{label}</span>
+      <span aria-hidden>
+        <span className="font-medium">
+          <span className="mr-0.5 text-[9px]">{dir === "up" ? "▲" : dir === "down" ? "▼" : "■"}</span>
+          {pct(m.dayPct)}
+        </span>
+        <span className={cn("text-[11px]", compact ? "ml-1" : "block")}>{signed(m.dayChange, s.currency)}</span>
+        {stale && !compact && <span className="block text-[11px] text-warning">{session}</span>}
+      </span>
+    </span>
+  );
+}
+
 function stockMetrics(s: StockRow) {
   const qty = Number(s.quantity);
   const last = Number(s.lastPrice ?? s.avgBuyPrice);
@@ -135,9 +164,11 @@ function stockMetrics(s: StockRow) {
   const pl = current - invested;
   const prev = s.previousClose != null ? Number(s.previousClose) : null;
   const dayPct = prev && s.lastPrice != null ? ((Number(s.lastPrice) - prev) / prev) * 100 : null;
+  // What the latest session's move means for this holding (shares shown × change per share).
+  const dayChange = prev && s.lastPrice != null ? (Number(s.lastPrice) - prev) * qty : null;
   // No market price yet: valued at cost (as in the totals), but its P/L is unknown, not zero.
   const noPrice = priceStatus(s.lastPrice, s.lastPriceAt) === "none";
-  return { qty, last, avg: qty > 0 ? invested / qty : Number(s.avgBuyPrice), invested, current, pl, plPct: invested > 0 ? (pl / invested) * 100 : 0, dayPct, noPrice };
+  return { qty, last, avg: qty > 0 ? invested / qty : Number(s.avgBuyPrice), invested, current, pl, plPct: invested > 0 ? (pl / invested) * 100 : 0, dayPct, dayChange, noPrice };
 }
 
 export function StockTable({
@@ -229,10 +260,11 @@ export function StockTable({
               {m.noPrice ? <span className="shrink-0 rounded-md bg-muted/60 px-1.5 py-1 text-xs text-muted-foreground">No price yet</span> : <PlBadge pl={m.pl} pct={m.plPct} currency={s.currency} />}
             </div>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-              <MiniStat label="Avg purchase price" value={formatMoney(m.avg, s.currency)} />
               <MiniStat label="Current price" value={<PriceValue s={s} compact />} />
+              <MiniStat label="Today" value={<DayChange s={s} m={m} compact />} />
               <MiniStat label="Invested" value={formatMoney(m.invested, s.currency)} />
               <MiniStat label="Current value" value={formatMoney(m.current, s.currency)} />
+              <MiniStat label="Avg purchase price" value={formatMoney(m.avg, s.currency)} />
             </dl>
             <div className="flex justify-end gap-1">
               <Button variant="outline" size="sm" onClick={() => onView(s.id)}><Eye className="h-3.5 w-3.5" />Details</Button>
@@ -259,6 +291,7 @@ export function StockTable({
             <th className="hidden px-3 py-2.5 font-medium uppercase 2xl:table-cell">1 year</th>
             <SortTh k="avg" label="Avg buy" sort={sort} align="right" />
             <SortTh k="price" label="Price" sort={sort} align="right" />
+            <SortTh k="day" label="Today" sort={sort} align="right" />
             <SortTh k="invested" label="Invested" sort={sort} align="right" />
             <SortTh k="current" label="Value" sort={sort} align="right" />
             <SortTh k="pl" label="Profit / loss" sort={sort} align="right" />
@@ -283,6 +316,7 @@ export function StockTable({
               </td>
               <td className="px-3 py-2.5 text-right tabular-nums" title={s.lots.length > 1 ? "Weighted by shares across the purchases shown" : undefined}>{formatMoney(m.avg, s.currency)}</td>
               <td className="px-3 py-2.5 text-right tabular-nums"><PriceValue s={s} /></td>
+              <td className="px-3 py-2.5 text-right whitespace-nowrap"><DayChange s={s} m={m} /></td>
               <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(m.invested, s.currency)}<p><Equivalent both stack value={m.invested} currency={s.currency} /></p></td>
               <td className="px-3 py-2.5 text-right tabular-nums">
                 {formatMoney(m.current, s.currency)}
