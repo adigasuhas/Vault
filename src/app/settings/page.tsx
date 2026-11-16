@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
-import { Bell, Database, Monitor, Moon, Palette, Coins, ShieldCheck, Sun, UserRound } from "lucide-react";
+import { Bell, Database, FolderTree, Monitor, Moon, Palette, Coins, ShieldCheck, Sun, UserRound } from "lucide-react";
+import { CategoryManager } from "@/components/categories/CategoryManager";
 import { useSession } from "@/context/SessionContext";
 import { useCurrency } from "@/context/CurrencyContext";
 import { api } from "@/lib/client";
@@ -42,6 +43,7 @@ interface Rate { targetCurrency: string; rate: number | null; mode: string | nul
 const SECTIONS = [
   { id: "profile", label: "Profile", icon: UserRound },
   { id: "money", label: "Money", icon: Coins },
+  { id: "categories", label: "Categories", icon: FolderTree },
   { id: "reminders", label: "Reminders", icon: Bell },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "security", label: "Sign-in & security", icon: ShieldCheck },
@@ -465,6 +467,10 @@ export default function SettingsPage() {
                 </div>
               )}
             </Panel>
+          </Section>
+
+          <Section id="categories" title="Categories" description="How expenses, scheduled payments and budgets are grouped. Subcategories are optional. Renaming, moving or reordering never changes an amount, a date or a balance.">
+            <CategoryManager />
           </Section>
 
           <Section id="reminders" title="Reminders" description="What shows up under the bell at the top of every page.">

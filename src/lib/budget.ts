@@ -6,6 +6,8 @@ import { loadOccurrences, syncScheduledBudgets, userToday, type Occurrence } fro
 import { monthKey, monthRange } from "@/lib/dates";
 import { createFxConverter, type FxConverter } from "@/lib/fx";
 import { audit, SPEND_EXPENSE, spendOf, type Tx } from "@/lib/ledger";
+import { budgetGroups, groupSpent, planTotal, rootOf } from "@/lib/budget-tree";
+import { fundingView } from "@/lib/budget-funding";
 
 /**
  * Budgets are per month. A month's plan holds the allocations that apply to
@@ -21,6 +23,11 @@ import { audit, SPEND_EXPENSE, spendOf, type Tx } from "@/lib/ledger";
  *
  * Spending always comes from the ledger (EXPENSE entries that haven't been
  * reversed), so expenses, scheduled payments and EMIs all count.
+ *
+ * Categories nest one level (Groceries › Dairy). A parent's line is the
+ * envelope for its whole group; subcategory lines break it down. The group
+ * counts once in the totals (see budget-tree), and spending anywhere in it
+ * counts against the parent's line.
  */
 
 export async function ensureMonthPlan(userId: string, month: string) {
@@ -79,10 +86,21 @@ async function createOrSyncPlan(userId: string, month: string, fxOutside: FxConv
   });
 }
 
+export interface LineFunding {
+  sourceId: string;
+  label: string;
+  kind: "RECEIVABLE" | "ACCOUNT";
+  amount: number;
+  /** The source no longer fully covers what the plan counts on. */
+  atRisk: boolean;
+}
+
 export interface BudgetLine {
   id: string | null; // null = spending with no budget this month
   categoryId: string;
   categoryName: string;
+  /** The parent category, for a subcategory. */
+  parentId: string | null;
   isRecurring: boolean;
   source: string;
   accountId: string | null;
@@ -94,6 +112,45 @@ export interface BudgetLine {
   /** Scheduled payments falling in this month for the category. */
   scheduled: Occurrence[];
   scheduledTotal: number;
+  /** Where the money for this line comes from. */
+  funding: LineFunding[];
+  funded: number;
+  /** Planned but not yet backed by a source (0 when fully funded). */
+  unfunded: number;
+  /** Optional: the loan this line plans a repayment towards. */
+  loan: {
+    id: string;
+    name: string;
+    currency: string;
+    emi: number;
+    repaid: number;
+    payments: number;
+    /** The loan's own EMI category, when this month budgets it outside this
+     * line's group: the repayment would be planned twice. */
+    alsoBudgeted: { categoryId: string; name: string; amount: number } | null;
+  } | null;
+  /** Optional: the scheduled payment this line covers. */
+  paymentSchedule: { id: string; name: string; planned: number; paid: number; statuses: string[] } | null;
+}
+
+/** A top-level category with a budget of its own or in its subcategories. */
+export interface BudgetGroupView {
+  categoryId: string;
+  name: string;
+  /** The parent's own line (the envelope), if it has one. */
+  lineId: string | null;
+  own: number | null;
+  breakdown: number;
+  /** What the group counts for in the plan's totals. */
+  total: number;
+  unassigned: number;
+  over: number;
+  spent: number;
+  remaining: number;
+  funded: number;
+  unfunded: number;
+  /** Subcategories shown under it: budgeted ones, then any with spending. */
+  children: string[];
 }
 
 export async function budgetForMonth(userId: string, month: string) {
@@ -105,7 +162,12 @@ export async function budgetForMonth(userId: string, month: string) {
     plan
       ? db.budgetCategoryAllocation.findMany({
           where: { budgetPlanId: plan.id },
-          include: { category: true, account: { select: { id: true, name: true } } },
+          include: {
+            category: true,
+            account: { select: { id: true, name: true } },
+            loan: { select: { id: true, name: true, currency: true, emiAmount: true, categoryId: true } },
+            paymentSchedule: { select: { id: true, name: true } },
+          },
           orderBy: { sortOrder: "asc" },
         })
       : Promise.resolve([]),
@@ -115,7 +177,7 @@ export async function budgetForMonth(userId: string, month: string) {
       where: { userId, reversedAt: null, date: { gte: start, lt: end }, OR: [{ type: "EXPENSE" }, { type: "INVESTMENT_PURCHASE", categoryId: { not: null } }] },
       select: { categoryId: true, amount: true, currency: true, oneTime: true, countInBudget: true, expense: SPEND_EXPENSE },
     }),
-    db.category.findMany({ where: { userId }, select: { id: true, name: true, isDefault: true } }),
+    db.category.findMany({ where: { userId }, select: { id: true, name: true, isDefault: true, parentId: true } }),
     db.account.findMany({ where: { userId }, select: { id: true, name: true } }),
     loadOccurrences(userId, start, last, { direction: "PAYMENT" }),
     loadOccurrences(userId, start, last, { direction: "INCOME" }),
@@ -156,14 +218,33 @@ export async function budgetForMonth(userId: string, month: string) {
     scheduledBy.set(p.categoryId, [...(scheduledBy.get(p.categoryId) ?? []), p]);
   }
 
+  // Parent and subcategory lines form groups, each counted once.
+  const parentOf = new Map(categories.map((c) => [c.id, c.parentId]));
+  const groups = budgetGroups(allocations.map((a) => ({ categoryId: a.categoryId, amount: Number(a.budgetAmount) })), categories);
+  const groupOf = new Map(groups.map((g) => [g.rootId, g]));
+  const funding = await fundingView(userId, plan);
+
+  // Repayments recorded towards linked loans this month (actual, not planned).
+  const loanIds = [...new Set(allocations.map((a) => a.loanId).filter((x): x is string => !!x))];
+  const loanPayments = loanIds.length
+    ? await db.loanPayment.findMany({ where: { loanId: { in: loanIds }, reversedAt: null, paidOn: { gte: start, lt: end } }, select: { loanId: true, amount: true } })
+    : [];
+
   const lines: BudgetLine[] = allocations.map((a) => {
-    const spent = spend.get(a.categoryId) ?? 0;
+    // A parent's line is its group's envelope, so all the group's spending counts against it.
+    const group = groupOf.get(a.categoryId);
+    const spent = group ? groupSpent(group, spend) : (spend.get(a.categoryId) ?? 0);
     const budgetAmount = Number(a.budgetAmount);
     const scheduled = scheduledBy.get(a.categoryId) ?? [];
+    const lineFunding = funding?.lineFunding.get(a.id) ?? [];
+    const funded = roundMoney(lineFunding.reduce((t, f) => t + f.amount, 0));
+    const paid = loanPayments.filter((p) => p.loanId === a.loanId);
+    const schedOcc = a.paymentScheduleId ? payments.filter((o) => o.scheduleId === a.paymentScheduleId && o.status !== "SKIPPED") : [];
     return {
       id: a.id,
       categoryId: a.categoryId,
       categoryName: a.category.name,
+      parentId: a.category.parentId,
       isRecurring: a.category.isDefault,
       source: a.source,
       accountId: a.accountId,
@@ -174,14 +255,43 @@ export async function budgetForMonth(userId: string, month: string) {
       percentUsed: budgetAmount > 0 ? Math.round((spent / budgetAmount) * 100) : spent > 0 ? 100 : 0,
       scheduled,
       scheduledTotal: scheduled.reduce((s, o) => s + o.amount, 0),
+      funding: lineFunding,
+      funded,
+      unfunded: roundMoney(Math.max((group ? group.total : budgetAmount) - funded, 0)),
+      loan: a.loan
+        ? {
+            id: a.loan.id,
+            name: a.loan.name,
+            currency: a.loan.currency,
+            emi: toPlan(Number(a.loan.emiAmount), a.loan.currency),
+            repaid: toPlan(paid.reduce((t, p) => t + Number(p.amount), 0), a.loan.currency),
+            payments: paid.length,
+            alsoBudgeted: (() => {
+              const own = a.loan.categoryId ? allocations.find((x) => x.categoryId === a.loan!.categoryId) : undefined;
+              if (!own || rootOf(own.categoryId, parentOf) === rootOf(a.categoryId, parentOf)) return null;
+              return { categoryId: own.categoryId, name: own.category.name, amount: Number(own.budgetAmount) };
+            })(),
+          }
+        : null,
+      paymentSchedule: a.paymentSchedule
+        ? {
+            id: a.paymentSchedule.id,
+            name: a.paymentSchedule.name,
+            planned: schedOcc.reduce((t, o) => t + toPlan(o.amount, o.currency), 0),
+            paid: schedOcc.filter((o) => o.status === "CONFIRMED").reduce((t, o) => t + toPlan(o.amount, o.currency), 0),
+            statuses: schedOcc.map((o) => o.status),
+          }
+        : null,
     };
   });
 
-  // Spending (or scheduled payments) in categories with no budget this month.
+  // Spending (or scheduled payments) with no budget this month: not on a
+  // line of its own and not inside a budgeted parent's group.
   const budgeted = new Set(lines.map((l) => l.categoryId));
+  const covered = (id: string) => budgeted.has(id) || groupOf.has(rootOf(id, parentOf));
   const unbudgetedIds = new Set<string>();
-  for (const [id, v] of spend) if (v > 0 && id !== "_none" && !budgeted.has(id)) unbudgetedIds.add(id);
-  for (const id of scheduledBy.keys()) if (!budgeted.has(id)) unbudgetedIds.add(id);
+  for (const [id, v] of spend) if (v > 0 && id !== "_none" && !covered(id)) unbudgetedIds.add(id);
+  for (const id of scheduledBy.keys()) if (!covered(id)) unbudgetedIds.add(id);
   const unbudgeted: BudgetLine[] = [...unbudgetedIds].map((id) => {
     const scheduled = scheduledBy.get(id) ?? [];
     const spent = spend.get(id) ?? 0;
@@ -189,6 +299,7 @@ export async function budgetForMonth(userId: string, month: string) {
       id: null,
       categoryId: id,
       categoryName: catName.get(id)?.name ?? "Uncategorised",
+      parentId: catName.get(id)?.parentId ?? null,
       isRecurring: !!catName.get(id)?.isDefault,
       source: "NONE",
       accountId: null,
@@ -199,10 +310,37 @@ export async function budgetForMonth(userId: string, month: string) {
       percentUsed: spent > 0 ? 100 : 0,
       scheduled,
       scheduledTotal: scheduled.reduce((s, o) => s + o.amount, 0),
+      funding: [],
+      funded: 0,
+      unfunded: 0,
+      loan: null,
+      paymentSchedule: null,
     };
   });
 
-  const totalBudgeted = lines.reduce((s, l) => s + l.budgetAmount, 0);
+  const groupViews: BudgetGroupView[] = groups.map((g) => {
+    const spent = groupSpent(g, spend);
+    const inGroup = lines.filter((l) => g.members.includes(l.categoryId));
+    const funded = roundMoney(inGroup.reduce((t, l) => t + l.funded, 0));
+    const spentChildren = g.members.filter((id) => id !== g.rootId && !g.budgetedChildren.includes(id) && (spend.get(id) ?? 0) > 0);
+    return {
+      categoryId: g.rootId,
+      name: catName.get(g.rootId)?.name ?? "Uncategorised",
+      lineId: lines.find((l) => l.categoryId === g.rootId)?.id ?? null,
+      own: g.own,
+      breakdown: g.breakdown,
+      total: g.total,
+      unassigned: g.unassigned,
+      over: g.over,
+      spent,
+      remaining: g.total - spent,
+      funded,
+      unfunded: roundMoney(Math.max(g.total - funded, 0)),
+      children: [...g.budgetedChildren, ...spentChildren],
+    };
+  });
+  // Each group once: a parent's envelope and its breakdown are never added together.
+  const totalBudgeted = planTotal(groups);
   const totalSpent = [...spend.values()].reduce((s, v) => s + v, 0);
   const expectedIncome = income.filter((o) => o.status !== "SKIPPED" && o.status !== "REVERSED").reduce((s, o) => s + conv(o).amount, 0);
   void acctName;
@@ -220,6 +358,29 @@ export async function budgetForMonth(userId: string, month: string) {
     oneTimeExcluded,
     lines,
     unbudgeted,
+    groups: groupViews,
+    /** Spending per category this month (plan currency), for subcategory rows. */
+    spentByCategory: Object.fromEntries([...spend.entries()].map(([k, v]) => [k, roundMoney(v)])),
+    /** The money this month draws on (null for a past month with no plan). */
+    sources: funding?.sources ?? [],
+    available: funding?.available ?? null,
+    fundingOptions: funding?.options ?? [],
+    totalFunded: roundMoney(groupViews.reduce((t, g) => t + Math.min(g.funded, g.total), 0)),
+    /** What a line can optionally plan for (links never pay or change them). */
+    linkOptions: {
+      loans: (await db.loan.findMany({ where: { userId, status: "ACTIVE" }, select: { id: true, name: true, currency: true, emiAmount: true }, orderBy: { name: "asc" } })).map((l) => ({
+        id: l.id,
+        name: l.name,
+        currency: l.currency,
+        emi: Number(l.emiAmount),
+      })),
+      paymentSchedules: (await db.scheduledCredit.findMany({ where: { userId, direction: "PAYMENT", isActive: true }, select: { id: true, name: true, amount: true, currency: true }, orderBy: { name: "asc" } })).map((p) => ({
+        id: p.id,
+        name: p.name,
+        amount: Number(p.amount),
+        currency: p.currency,
+      })),
+    },
   };
 }
 
@@ -265,6 +426,16 @@ export async function switchBudgetCurrency(userId: string, currency: string) {
           const next = round(Number(a.budgetAmount) * r);
           await tx.budgetCategoryAllocation.update({ where: { id: a.id }, data: { budgetAmount: next } });
           await tx.budgetAdjustment.create({ data: { budgetCategoryAllocationId: a.id, oldAmount: a.budgetAmount, newAmount: next, note: `Converted ${plan.currency} → ${currency} at ${r.toFixed(4)}` } });
+        }
+        // The month's money sources and the funding they give convert too.
+        for (const src of await tx.budgetSource.findMany({ where: { budgetPlanId: plan.id }, include: { funding: true } })) {
+          let given = 0;
+          for (const f of src.funding) {
+            const next = Math.max(round(Number(f.amount) * r), 0.01);
+            given += next;
+            await tx.budgetFunding.update({ where: { id: f.id }, data: { amount: next } });
+          }
+          await tx.budgetSource.update({ where: { id: src.id }, data: { amount: Math.max(round(Number(src.amount) * r), round(given), 0.01) } });
         }
         await tx.budgetPlan.update({ where: { id: plan.id }, data: { currency, totalIncome: round(Number(plan.totalIncome) * r) } });
       }

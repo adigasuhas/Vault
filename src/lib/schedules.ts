@@ -967,14 +967,15 @@ export async function retireLoanBudget(tx: Tx, userId: string, categoryId: strin
   });
   await syncScheduledBudgets(tx, userId, [categoryId]);
   if (!opts.dropCategoryIfUnused) return;
-  const [ledger, expenses, allocations, schedules, loans] = await Promise.all([
+  const [ledger, expenses, allocations, schedules, loans, subcategories] = await Promise.all([
     tx.ledgerEntry.count({ where: { categoryId } }),
     tx.expense.count({ where: { categoryId } }),
     tx.budgetCategoryAllocation.count({ where: { categoryId } }),
     tx.scheduledCredit.count({ where: { categoryId } }),
     tx.loan.count({ where: { categoryId } }),
+    tx.category.count({ where: { parentId: categoryId } }),
   ]);
-  if (ledger + expenses + allocations + schedules + loans === 0) await tx.category.delete({ where: { id: categoryId } });
+  if (ledger + expenses + allocations + schedules + loans + subcategories === 0) await tx.category.delete({ where: { id: categoryId } });
 }
 
 /**
@@ -1044,8 +1045,13 @@ export async function syncScheduledBudgets(tx: Tx, userId: string, categoryIds?:
         if (amount <= 0) {
           // Nothing scheduled any more: the line existed only because of the
           // schedule, so it goes (spending in the category, if any, shows as
-          // unbudgeted). Lines the user set by hand are never touched.
-          await tx.budgetCategoryAllocation.delete({ where: { id: existing.id } });
+          // unbudgeted). Lines the user set by hand are never touched, and
+          // a line the user has funded is their plan now: it stays, as theirs.
+          if (await tx.budgetFunding.count({ where: { allocationId: existing.id } })) {
+            await tx.budgetCategoryAllocation.update({ where: { id: existing.id }, data: { source: "MANUAL" } });
+          } else {
+            await tx.budgetCategoryAllocation.delete({ where: { id: existing.id } });
+          }
         } else if (Number(existing.budgetAmount) !== amount) {
           await tx.budgetCategoryAllocation.update({ where: { id: existing.id }, data: { budgetAmount: amount } });
           await tx.budgetAdjustment.create({

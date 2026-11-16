@@ -270,6 +270,8 @@ model Account {
   loans                Loan[]
   fixedDeposits        FixedDeposit[]
   investmentSales      InvestmentSale[]
+  // Balance set aside in budgets (planning only).
+  budgetSources        BudgetSource[]
 
   @@index([userId])
 }
@@ -328,18 +330,29 @@ model LedgerEntry {
 // ---------- Categories & Expenses ----------
 
 model Category {
-  id               String   @id @default(uuid())
+  id               String     @id @default(uuid())
   userId           String
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user             User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   name             String
   icon             String?
   color            String?
-  sortOrder        Int      @default(0)
-  isDefault        Boolean  @default(false)
+  // Order among its siblings (top-level categories, or one parent's subcategories).
+  sortOrder        Int        @default(0)
+  // Optional parent, one level deep: Groceries › Dairy. Spending, budgets and
+  // history stay on the category itself; the parent only groups it. A DB
+  // trigger keeps the tree two levels, within one user, and loop-free.
+  parentId         String?
+  parent           Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: NoAction)
+  children         Category[] @relation("CategoryTree")
+  // Seeded by VAULT as a starter category (not made by the user). Both are
+  // edited the same way; this only labels them.
+  isSystem         Boolean    @default(false)
+  // "Repeats every month" (historical name): stamped into each new month's budget.
+  isDefault        Boolean    @default(false)
   // Used as the starting budgetAmount when a default category auto-populates
   // a new month (see ensureBudgetPlanWithAllocations) — lets a source like a
   // Loan's EMI pre-fill every future month's budget instead of starting at 0.
-  defaultAmount    Decimal  @default(0)
+  defaultAmount    Decimal    @default(0)
   // First month (YYYY-MM) a recurring category applies to. Months before it
   // never get the recurring allocation, so marking a category recurring in
   // October doesn't retroactively budget it in March.
@@ -349,8 +362,8 @@ model Category {
   // Account/card this category is normally paid from (pre-selected on new
   // expenses and carried into each month's allocation).
   defaultAccountId String?
-  defaultAccount   Account? @relation("CategoryDefaultAccount", fields: [defaultAccountId], references: [id])
-  createdAt        DateTime @default(now())
+  defaultAccount   Account?   @relation("CategoryDefaultAccount", fields: [defaultAccountId], references: [id])
+  createdAt        DateTime   @default(now())
 
   expenses          Expense[]
   budgetAllocations BudgetCategoryAllocation[]
@@ -360,6 +373,7 @@ model Category {
 
   @@unique([userId, name])
   @@index([userId])
+  @@index([parentId])
 }
 
 model Expense {
@@ -561,6 +575,9 @@ model ScheduledCredit {
 
   executions CreditExecution[]
   overrides  ScheduleOverride[]
+  // Budget planning that refers to this schedule (never moves money).
+  budgetSources     BudgetSource[]
+  budgetAllocations BudgetCategoryAllocation[] @relation("AllocationPaymentSchedule")
 
   @@index([userId])
   @@index([nextExecutionDate])
@@ -622,31 +639,90 @@ model BudgetPlan {
   updatedAt   DateTime @updatedAt
 
   allocations BudgetCategoryAllocation[]
+  // The money this month's budget draws on.
+  sources     BudgetSource[]
 
   @@unique([userId, month])
 }
 
 model BudgetCategoryAllocation {
-  id           String     @id @default(uuid())
-  budgetPlanId String
-  budgetPlan   BudgetPlan @relation(fields: [budgetPlanId], references: [id], onDelete: Cascade)
-  categoryId   String
-  category     Category   @relation(fields: [categoryId], references: [id], onDelete: NoAction)
-  budgetAmount Decimal
-  sortOrder    Int        @default(0)
+  id                String           @id @default(uuid())
+  budgetPlanId      String
+  budgetPlan        BudgetPlan       @relation(fields: [budgetPlanId], references: [id], onDelete: Cascade)
+  categoryId        String
+  category          Category         @relation(fields: [categoryId], references: [id], onDelete: NoAction)
+  budgetAmount      Decimal
+  sortOrder         Int              @default(0)
   // Account/card this month's spending in the category is planned from.
-  accountId    String?
-  account      Account?   @relation(fields: [accountId], references: [id])
+  accountId         String?
+  account           Account?         @relation(fields: [accountId], references: [id])
   // MANUAL (added for this month) | RECURRING (from a recurring category) |
   // SCHEDULE (sized from scheduled payments). Once the user edits the amount
   // it becomes MANUAL and schedule syncs stop overwriting it.
-  source       String     @default("MANUAL")
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  source            String           @default("MANUAL")
+  // Optional: the loan this line plans a repayment towards, and/or the
+  // scheduled payment it covers. Planning only: neither is paid, nor is the
+  // loan's balance changed, until a repayment is actually recorded.
+  loanId            String?
+  loan              Loan?            @relation(fields: [loanId], references: [id], onDelete: SetNull)
+  paymentScheduleId String?
+  paymentSchedule   ScheduledCredit? @relation("AllocationPaymentSchedule", fields: [paymentScheduleId], references: [id], onDelete: SetNull)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
 
   adjustments BudgetAdjustment[]
+  funding     BudgetFunding[]
 
   @@unique([budgetPlanId, categoryId])
+}
+
+/// Money a month's budget draws on: one occurrence of an income schedule
+/// (a receivable, expected or received) or part of an account's balance.
+/// Planning only: nothing here creates a transaction, moves money or changes
+/// a balance. Amounts are in the plan's currency.
+model BudgetSource {
+  id                String           @id @default(uuid())
+  budgetPlanId      String
+  budgetPlan        BudgetPlan       @relation(fields: [budgetPlanId], references: [id], onDelete: Cascade)
+  // RECEIVABLE | ACCOUNT
+  kind              String
+  // "R:<scheduleId>:<YYYY-MM-DD>" or "A:<accountId>": one row per source per month.
+  sourceKey         String
+  // RECEIVABLE: the schedule and the nominal date of the occurrence. Kept
+  // (as null) if the schedule is deleted, so the plan shows it as unbacked.
+  scheduledCreditId String?
+  scheduledCredit   ScheduledCredit? @relation(fields: [scheduledCreditId], references: [id], onDelete: SetNull)
+  occurrenceDate    DateTime?
+  // ACCOUNT: the account whose balance is set aside.
+  accountId         String?
+  account           Account?         @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  // The source's name when it was added, shown if the source goes away.
+  label             String
+  amount            Decimal
+  sortOrder         Int              @default(0)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  funding BudgetFunding[]
+
+  @@unique([budgetPlanId, sourceKey])
+  @@index([scheduledCreditId])
+  @@index([accountId])
+}
+
+/// How much of one budget line a source pays for (plan currency).
+model BudgetFunding {
+  id           String                   @id @default(uuid())
+  allocationId String
+  allocation   BudgetCategoryAllocation @relation(fields: [allocationId], references: [id], onDelete: Cascade)
+  sourceId     String
+  source       BudgetSource             @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  amount       Decimal
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+
+  @@unique([allocationId, sourceId])
+  @@index([sourceId])
 }
 
 model BudgetAdjustment {
@@ -912,6 +988,8 @@ model Loan {
   updatedAt       DateTime   @updatedAt
 
   payments LoanPayment[]
+  // Budget lines that plan a repayment towards this loan (planning only).
+  budgetAllocations BudgetCategoryAllocation[]
   schedule ScheduledCredit?
 
   @@index([userId])

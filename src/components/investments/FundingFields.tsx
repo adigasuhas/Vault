@@ -56,7 +56,7 @@ export function fundingBody(f: FundingValue, total: number, available: number) {
 }
 
 interface Account { id: string; name: string; currency: string; status: string; currentBalance: string }
-interface Category { id: string; name: string }
+interface Category { id: string; name: string; /** "Groceries › Dairy" for a subcategory. */ path?: string }
 
 /** "Paid from" for an investment purchase. Investment cash shows what's
  * available; when it doesn't cover the total, an account covers the rest
@@ -145,7 +145,7 @@ export function FundingFields({ value, onChange, currency, total }: { value: Fun
               <SelectContent>
                 <SelectItem value="__none__">Not in the budget</SelectItem>
                 <SelectSeparator />
-                {categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                {categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.path ?? c.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>

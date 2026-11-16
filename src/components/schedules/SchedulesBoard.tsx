@@ -26,7 +26,7 @@ import { Equivalent } from "@/components/app/Money";
 import { FxTicker } from "@/components/app/FxTicker";
 
 interface Account { id: string; name: string; currency: string; status: string; currentBalance: string }
-interface Category { id: string; name: string }
+interface Category { id: string; name: string; /** "Groceries › Dairy" for a subcategory. */ path?: string }
 export interface Schedule {
   id: string;
   name: string;

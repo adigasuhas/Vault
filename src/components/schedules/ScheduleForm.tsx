@@ -60,7 +60,7 @@ const KIND_CATEGORY: Record<string, RegExp> = {
 };
 
 interface Account { id: string; name: string; currency: string; status: string; currentBalance: string }
-interface Category { id: string; name: string }
+interface Category { id: string; name: string; /** "Groceries › Dairy" for a subcategory. */ path?: string }
 
 export interface ScheduleFormValue {
   id?: string;
@@ -518,7 +518,7 @@ function ScheduleFormFields({
             <Select value={categoryId ?? ""} onValueChange={(v) => setCategoryId(v)}>
               <SelectTrigger className="w-full"><SelectValue placeholder="Choose category" /></SelectTrigger>
               <SelectContent>
-                {categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                {categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.path ?? c.name}</SelectItem>)}
                 <SelectSeparator />
                 <SelectItem value="__new__">+ New category…</SelectItem>
               </SelectContent>

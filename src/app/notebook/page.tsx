@@ -41,7 +41,7 @@ interface Entry {
 }
 interface Project { id: string; name: string; archivedAt: string | null; count: number; byCurrency: { currency: string; amount: number }[]; total: number | null; lastDate: string | null }
 interface Account { id: string; name: string; currency: string; status: string }
-interface Category { id: string; name: string }
+interface Category { id: string; name: string; /** "Groceries › Dairy" for a subcategory. */ path?: string }
 
 const NO_GROUP = "__none__";
 const NEW_GROUP = "__new_group__";
@@ -326,7 +326,7 @@ function ConvertDialog({
               <Label>Category</Label>
               <Select value={categoryId} onValueChange={setCategoryId}>
                 <SelectTrigger className="w-full"><SelectValue placeholder="Choose category" /></SelectTrigger>
-                <SelectContent>{categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+                <SelectContent>{categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.path ?? c.name}</SelectItem>)}</SelectContent>
               </Select>
             </div>
           )}

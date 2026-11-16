@@ -51,7 +51,7 @@ export async function GET() {
     db.transfer.findMany({ where: { userId }, orderBy: { date: "asc" } }),
     db.scheduledCredit.findMany({ where: { userId } }),
     db.creditExecution.findMany({ where: { scheduledCredit: { userId } } }),
-    db.budgetPlan.findMany({ where: { userId }, include: { allocations: { include: { adjustments: true } } } }),
+    db.budgetPlan.findMany({ where: { userId }, include: { allocations: { include: { adjustments: true, funding: true } }, sources: true } }),
     db.stockHolding.findMany({ where: { userId }, include: { lots: true } }),
     db.mutualFundHolding.findMany({ where: { userId }, include: { lots: true } }),
     db.fixedDeposit.findMany({ where: { userId } }),

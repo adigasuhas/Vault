@@ -2,16 +2,21 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { authed, notFound } from "@/lib/api";
 import { parseJson, ValidationError } from "@/lib/validate";
-import { patchCategorySchema } from "@/lib/schemas";
+import { deleteCategorySchema, patchCategorySchema } from "@/lib/schemas";
 import { audit, type Tx } from "@/lib/ledger";
+import { categoryUsage, deleteCategory, updateCategory } from "@/lib/categories";
 import { monthKey } from "@/lib/dates";
 import { userToday } from "@/lib/schedules";
 
 export const dynamic = "force-dynamic";
 
-/** Rename, or turn "repeats every month" on/off. Turning it on applies from
- * the current month (never retroactively); turning it off leaves past and
- * current months alone and stops future ones. */
+/** What refers to the category: shown before deleting it. */
+export const GET = authed<{ id: string }>(async (_req, { userId, params }) => ({ usage: await categoryUsage(userId, params.id) }));
+
+/** Rename, recolour, move in the tree, or turn "repeats every month" on/off.
+ * Turning it on applies from the current month (never retroactively);
+ * turning it off leaves past and current months alone and stops future
+ * ones. Moving or renaming changes no amounts, dates or balances. */
 export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   const existing = await db.category.findFirst({ where: { id: params.id, userId } });
   if (!existing) return notFound("Category not found.");
@@ -19,10 +24,12 @@ export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   const current = monthKey(await userToday(userId));
   try {
     return await db.$transaction(async (tx: Tx) => {
+      if (input.name !== undefined || input.parentId !== undefined || input.color !== undefined) {
+        await updateCategory(tx, userId, existing.id, { name: input.name, parentId: input.parentId, color: input.color });
+      }
       const category = await tx.category.update({
         where: { id: existing.id },
         data: {
-          ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.isDefault !== undefined
             ? { isDefault: input.isDefault, ...(input.isDefault && !existing.isDefault ? { defaultSince: current } : {}) }
             : {}),
@@ -57,25 +64,13 @@ export const PATCH = authed<{ id: string }>(async (req, { userId, params }) => {
   }
 });
 
-/** Deletes a category only if nothing ever referenced it — spending history
- * and schedules keep their category forever. */
-export const DELETE = authed<{ id: string }>(async (_req, { userId, params }) => {
-  const existing = await db.category.findFirst({ where: { id: params.id, userId } });
+/** Deletes a category. In use, its transactions, scheduled payments and
+ * budget lines move to `reassignTo` (amounts and dates untouched), or its
+ * budget lines alone are dropped with `dropBudgets`; its subcategories move
+ * up to the top level. See deleteCategory. */
+export const DELETE = authed<{ id: string }>(async (req, { userId, params }) => {
+  const existing = await db.category.findFirst({ where: { id: params.id, userId }, select: { id: true } });
   if (!existing) return notFound("Category not found.");
-  const [entries, expenses, schedules, loans] = await Promise.all([
-    db.ledgerEntry.count({ where: { categoryId: existing.id } }),
-    db.expense.count({ where: { categoryId: existing.id } }),
-    db.scheduledCredit.count({ where: { categoryId: existing.id } }),
-    db.loan.count({ where: { categoryId: existing.id } }),
-  ]);
-  if (entries || expenses || schedules || loans) {
-    throw new ValidationError(
-      `${existing.name} has spending history or scheduled payments, so it can't be deleted. Remove it from the month's budget instead.`
-    );
-  }
-  await db.$transaction([
-    db.budgetCategoryAllocation.deleteMany({ where: { categoryId: existing.id } }),
-    db.category.delete({ where: { id: existing.id } }),
-  ]);
-  return { ok: true };
+  const input = await parseJson(req, deleteCategorySchema).catch(() => ({ reassignTo: undefined, dropBudgets: undefined }));
+  return { ok: true, ...(await deleteCategory(userId, existing.id, input)) };
 });

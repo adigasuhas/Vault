@@ -220,21 +220,38 @@ export const confirmOccurrenceSchema = z.object({
 export const noteSchema = z.object({ note: z.string().trim().max(300).optional(), reason: z.string().trim().max(300).optional() });
 
 // ---- Budget ----
-export const createCategorySchema = z.object({
-  name: z.string().trim().min(1).max(80),
-  month: MONTH.optional(),
-  isDefault: z.boolean().optional(),
-});
 /** One workflow: pick (or name) a category, the account/card it's paid from,
  * the amount, and whether it repeats every month from this one onward. */
+/** A money source for a budget line: one already in the month, an income
+ * occurrence (schedule + nominal date), or an account's balance. */
+const BUDGET_SOURCE_REF = z.union([
+  z.object({ sourceId: zId }),
+  z.object({ receivable: z.object({ scheduleId: zId, occurrenceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD") }) }),
+  z.object({ accountId: zId }),
+]);
+/** A line's funding: how much each source pays for. Replaces what it had. */
+export const budgetFundingSchema = z.array(z.intersection(BUDGET_SOURCE_REF, z.object({ amount: zMoney }))).max(20);
+/** Adds money to a month's budget: an income occurrence (all that's left of
+ * it, unless `amount` says less) or part of an account's balance. */
+export const budgetSourceSchema = z.intersection(
+  z.object({ month: MONTH, amount: zMoney.optional() }),
+  z.union([BUDGET_SOURCE_REF.options[1], BUDGET_SOURCE_REF.options[2]])
+);
+export const patchBudgetSourceSchema = z.object({ amount: zMoney });
+
 export const addAllocationSchema = z
   .object({
     month: MONTH,
     categoryId: zId.optional(),
     newCategoryName: z.string().trim().min(1).max(80).optional(),
+    /** Create the new category as a subcategory of this top-level one. */
+    newCategoryParentId: zId.nullish(),
     budgetAmount: zMoneyNonNegative.default(0),
     accountId: zId.nullish(),
     recurring: z.boolean().default(false),
+    funding: budgetFundingSchema.optional(),
+    loanId: zId.nullish(),
+    paymentScheduleId: zId.nullish(),
   })
   .refine((v) => v.categoryId || v.newCategoryName, { message: "Choose a category or name a new one.", path: ["categoryId"] });
 export const patchAllocationSchema = z.object({
@@ -244,13 +261,36 @@ export const patchAllocationSchema = z.object({
    * updates the recurring default). */
   scope: z.enum(["MONTH", "FORWARD"]).default("MONTH"),
   note: z.string().trim().max(300).optional(),
+  /** This month's line only (whatever the scope): funding, and the optional
+   * loan / scheduled payment it plans for. */
+  funding: budgetFundingSchema.optional(),
+  loanId: zId.nullish(),
+  paymentScheduleId: zId.nullish(),
 });
 export const deleteAllocationSchema = z.object({ scope: z.enum(["MONTH", "FORWARD"]).default("MONTH") });
+/** A colour from the chart series palette (1–8), or none. */
+const CATEGORY_COLOR = z.string().regex(/^[1-8]$/, "must be a palette colour");
+export const createCategorySchema = z.object({
+  name: z.string().trim().min(1, "Give the category a name.").max(80),
+  /** Make it a subcategory of this top-level category. */
+  parentId: zId.nullish(),
+  color: CATEGORY_COLOR.nullish(),
+});
 export const patchCategorySchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   isDefault: z.boolean().optional(),
+  /** Move under another top-level category, or (null) to the top level. */
+  parentId: zId.nullable().optional(),
+  color: CATEGORY_COLOR.nullable().optional(),
 });
-export const reorderCategoriesSchema = z.object({ order: z.array(zId).min(1) });
+/** Deleting a category that's in use: move what refers to it to `reassignTo`,
+ * or (budget lines only) drop them from their budgets. */
+export const deleteCategorySchema = z.object({
+  reassignTo: zId.optional(),
+  dropBudgets: z.boolean().optional(),
+});
+/** The new order of one set of siblings: the top level (parentId null) or one parent's subcategories. */
+export const reorderCategoriesSchema = z.object({ parentId: zId.nullable(), order: z.array(zId).min(1).max(500) });
 export const setBudgetIncomeSchema = z.object({ month: MONTH.optional(), totalIncome: zMoneyNonNegative.optional() });
 export const unallocatedSchema = z.object({
   month: MONTH.optional(),

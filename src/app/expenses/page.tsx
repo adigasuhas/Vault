@@ -25,7 +25,7 @@ import { useCurrency } from "@/context/CurrencyContext";
 import { CurrencySwitch, ExchangeRateConfirm, fmtRate, marketRate, useConversion } from "@/components/app/ExchangeRateConfirm";
 
 interface Account { id: string; name: string; currency: string; currentBalance: string; status: string; accountType: string }
-interface Category { id: string; name: string; defaultAccountId: string | null }
+interface Category { id: string; name: string; defaultAccountId: string | null; parentId?: string | null; /** "Groceries › Dairy" for a subcategory. */ path?: string }
 interface Expense {
   id: string;
   /** As reported, in `currency` (the user's primary currency by default). */
@@ -47,7 +47,7 @@ interface Expense {
   account: { id: string; name: string; currency: string; status: string } | null;
   project: { id: string; name: string } | null;
 }
-interface BudgetLine { categoryId: string; budgetAmount: number; spent: number; accountId: string | null; id: string | null }
+interface BudgetLine { categoryId: string; categoryName: string; budgetAmount: number; spent: number; accountId: string | null; id: string | null }
 interface BudgetResp { month: string; currency: string; lines: BudgetLine[]; unbudgeted: BudgetLine[]; hasPlan: boolean }
 
 const NEW_CAT = "__new__";
@@ -137,10 +137,16 @@ function ExpenseForm({
     if (!accountId && accounts[0]) setAccountId(accounts[0].id);
   }, [accounts, accountId]);
 
-  const line = budget ? [...budget.lines, ...budget.unbudgeted].find((l) => l.categoryId === categoryId && l.id) : null;
-  // Categories budgeted for the expense's own month come first; everything
-  // else is still allowed, but clearly labelled as outside that budget.
+  // A subcategory without a line of its own counts toward its parent's.
+  const parentOf = (id: string) => categories.find((c) => c.id === id)?.parentId ?? null;
+  const ownLine = budget ? [...budget.lines, ...budget.unbudgeted].find((l) => l.categoryId === categoryId && l.id) : null;
+  const parentLine = !ownLine && budget && parentOf(categoryId) ? budget.lines.find((l) => l.categoryId === parentOf(categoryId) && l.id) : null;
+  const line = ownLine ?? parentLine ?? null;
+  // Categories budgeted for the expense's own month come first (including
+  // subcategories of a budgeted parent); everything else is still allowed,
+  // but clearly labelled as outside that budget.
   const budgetedIds = new Set((budget?.lines ?? []).filter((l) => l.id).map((l) => l.categoryId));
+  for (const c of categories) if (c.parentId && budgetedIds.has(c.parentId)) budgetedIds.add(c.id);
   const budgetedCats = categories.filter((c) => budgetedIds.has(c.id));
   const otherCats = categories.filter((c) => !budgetedIds.has(c.id));
   const account = accounts.find((a) => a.id === accountId);
@@ -236,14 +242,14 @@ function ExpenseForm({
               {budgetedCats.length > 0 && (
                 <SelectGroup>
                   <SelectLabel>In the {monthLabel(month, "short")} budget</SelectLabel>
-                  {budgetedCats.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                  {budgetedCats.map((c) => <SelectItem key={c.id} value={c.id}>{c.path ?? c.name}</SelectItem>)}
                 </SelectGroup>
               )}
               {budgetedCats.length > 0 && otherCats.length > 0 && <SelectSeparator />}
               {otherCats.length > 0 && (
                 <SelectGroup>
                   <SelectLabel>{budgetedCats.length ? `Not budgeted in ${monthLabel(month, "short")}` : budget ? `No budget for ${monthLabel(month, "short")}` : "Categories"}</SelectLabel>
-                  {otherCats.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                  {otherCats.map((c) => <SelectItem key={c.id} value={c.id}>{c.path ?? c.name}</SelectItem>)}
                 </SelectGroup>
               )}
               <SelectSeparator />
@@ -295,7 +301,7 @@ function ExpenseForm({
             budget === null ? <span>Checking {monthLabel(month, "short")} budget…</span>
             : line ? (
               <span>
-                {catName} in {monthLabel(month)}:{" "}
+                {parentLine ? `${catName} counts toward ${parentLine.categoryName}` : catName} in {monthLabel(month)}:{" "}
                 <span className={cn("tabular-nums", line.budgetAmount - line.spent - (amtInBudget || 0) < 0 ? "text-negative" : "text-foreground")}>
                   {formatMoney(Math.max(line.budgetAmount - line.spent, 0), budget.currency)} left of {formatMoney(line.budgetAmount, budget.currency)}
                 </span>
@@ -456,7 +462,7 @@ export default function ExpensesPage() {
                 <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="ALL">All categories</SelectItem>
-                  {usedCats.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                  {usedCats.map((c) => <SelectItem key={c.id} value={c.id}>{c.path ?? c.name}</SelectItem>)}
                 </SelectContent>
               </Select>
               <Select value={filterAcct} onValueChange={setFilterAcct}>

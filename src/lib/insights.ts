@@ -4,6 +4,7 @@ import { computePortfolioValue } from "@/lib/portfolio";
 import { loadOccurrences, userToday, type Occurrence } from "@/lib/schedules";
 import { addDaysUTC, isoDate, lastNMonths, monthKey, monthRange, shiftMonth } from "@/lib/dates";
 import { isLiabilityAccount, SPEND_EXPENSE, spendOf } from "@/lib/ledger";
+import { budgetGroups, groupSpent, planTotal } from "@/lib/budget-tree";
 import { loanLiabilities } from "@/lib/loan-balance";
 
 /**
@@ -153,7 +154,7 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
       where: { userId, type: "EXPENSE", reversedAt: null, oneTime: false, creditExecutionId: null, loanPaymentId: null, date: { gte: recentStart, lte: today } },
       select: { amount: true, currency: true, date: true, expense: SPEND_EXPENSE },
     }),
-    db.budgetPlan.findUnique({ where: { userId_month: { userId, month: current } }, include: { allocations: { include: { category: { select: { schedules: { select: { id: true }, where: { direction: "PAYMENT", isActive: true } } } } } } } }),
+    db.budgetPlan.findUnique({ where: { userId_month: { userId, month: current } }, include: { allocations: { include: { category: { select: { parentId: true, schedules: { select: { id: true }, where: { direction: "PAYMENT", isActive: true } } } } } } } }),
   ]);
   const perMonth = new Map<string, number>();
   for (const e of spend) {
@@ -170,7 +171,14 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
     // No full month yet: the larger of what's budgeted (lines not covered by a
     // scheduled payment) and this month's spending so far, at its pace for the
     // whole month — so early spending isn't assumed to stop.
-    const budgeted = (plan?.allocations ?? []).filter((a) => a.category.schedules.length === 0).reduce((s, a) => s + Number(a.budgetAmount), 0);
+    // Each budget group once (a parent's envelope, not plus its breakdown).
+    const open = (plan?.allocations ?? []).filter((a) => a.category.schedules.length === 0);
+    const budgeted = planTotal(
+      budgetGroups(
+        open.map((a) => ({ categoryId: a.categoryId, amount: Number(a.budgetAmount) })),
+        open.map((a) => ({ id: a.categoryId, parentId: a.category.parentId }))
+      )
+    );
     const day = today.getUTCDate();
     const daysInMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).getUTCDate();
     const soFar = perMonth.get(current) ?? 0;
@@ -247,12 +255,15 @@ export async function computeRunway(userId: string, fx: FxConverter, cash: numbe
 }
 
 /** Budget adherence per month: what was planned vs spent, from plans that
- * exist (months with no plan are reported as such, not as zero budgets). */
+ * exist (months with no plan are reported as such, not as zero budgets).
+ * One line per budget group: a parent with its subcategories counts once,
+ * against all the group's spending. */
 export async function budgetAdherence(userId: string, months: string[], fx: FxConverter) {
-  const plans = await db.budgetPlan.findMany({
-    where: { userId, month: { in: months } },
-    include: { allocations: { include: { category: { select: { name: true } } } } },
-  });
+  const [plans, categories] = await Promise.all([
+    db.budgetPlan.findMany({ where: { userId, month: { in: months } }, include: { allocations: true } }),
+    db.category.findMany({ where: { userId }, select: { id: true, name: true, parentId: true } }),
+  ]);
+  const nameOf = new Map(categories.map((c) => [c.id, c.name]));
   const { start } = monthRange(months[0]);
   const { end } = monthRange(months[months.length - 1]);
   const spend = await db.ledgerEntry.findMany({
@@ -273,11 +284,12 @@ export async function budgetAdherence(userId: string, months: string[], fx: FxCo
   return months.map((m) => {
     const plan = plans.find((p) => p.month === m);
     if (!plan) return { month: m, hasPlan: false, budgeted: 0, spentInBudget: 0, overCount: 0, lines: [] as { name: string; budgeted: number; spent: number }[] };
-    const lines = plan.allocations.map((a) => ({
-      name: a.category.name,
+    const spentIn = new Map(categories.map((c) => [c.id, spentBy.get(`${m}|${c.id}`) ?? 0]));
+    const lines = budgetGroups(plan.allocations.map((a) => ({ categoryId: a.categoryId, amount: Number(a.budgetAmount) })), categories).map((g) => ({
+      name: nameOf.get(g.rootId) ?? "Uncategorised",
       // Plans can be in any currency; adherence is reported in primary.
-      budgeted: fx.convert(Number(a.budgetAmount), plan.currency),
-      spent: spentBy.get(`${m}|${a.categoryId}`) ?? 0,
+      budgeted: fx.convert(g.total, plan.currency),
+      spent: groupSpent(g, spentIn),
     }));
     return {
       month: m,
