@@ -717,7 +717,23 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
     if (reanchor) {
       const today = await userTodayTx(tx, userId);
       const start = dateOnly(changes.startDate ?? s.nextExecutionDate);
-      if (start < today) throw new ValidationError("A new pattern has to start today or later. Past ones stay as they were.");
+      // The pattern can start in the past (e.g. a stipend that really began
+      // last month): dates from there to today come due, just as when a
+      // schedule is created with a past date. What's already been booked
+      // can't be re-dated, so the new start has to come after it.
+      const booked = await tx.creditExecution.findFirst({
+        where: { scheduledCreditId: s.id, status: { in: ["CONFIRMED", "REVERSED"] } },
+        orderBy: { executedDate: "desc" },
+      });
+      const lastBooked = booked ? dateOnly(booked.occurrenceDate && booked.occurrenceDate > booked.executedDate ? booked.occurrenceDate : booked.executedDate) : null;
+      if (lastBooked && start <= lastBooked) {
+        throw new ValidationError(
+          `${s.name} already has ${s.direction === "INCOME" ? "money received" : "a payment"} recorded on ${lastBooked.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })}. Pick a date after it; what's recorded stays as it is.`
+        );
+      }
+      // Overrides and stored occurrences from here on belong to the old
+      // pattern unless the new one has the same date.
+      const from = start < today ? start : today;
       const freq = changes.frequency ?? (s.frequency as Frequency);
       data.frequency = freq;
       data.customIntervalDays = freq === "CUSTOM" ? changes.customIntervalDays ?? s.customIntervalDays ?? 30 : null;
@@ -733,13 +749,26 @@ export async function updateSchedule(userId: string, scheduleId: string, changes
       // that occurrence (and a moved date still fits its period); the rest
       // belonged to the old pattern's dates and go.
       const overrides = await tx.scheduleOverride.findMany({ where: { scheduledCreditId: s.id } });
-      const { dropped } = overridesKeptOnReanchor(newRule, overrides, today);
+      const { dropped } = overridesKeptOnReanchor(newRule, overrides, from);
       if (dropped.length) await tx.scheduleOverride.deleteMany({ where: { id: { in: dropped.map((o) => o.id) } } });
-      // Upcoming ones skipped ahead of time on dates the new pattern no longer
-      // has would linger as phantom occurrences. Nothing was booked on them.
-      const skippedAhead = await tx.creditExecution.findMany({ where: { scheduledCreditId: s.id, status: "SKIPPED", executedDate: { gt: today } } });
-      const obsolete = skippedAhead.filter((x) => !x.occurrenceDate || !isNominalOf(newRule, x.occurrenceDate));
+      // Occurrences the old pattern left unbooked (skipped ahead of time, or
+      // due and waiting) on dates the new pattern doesn't have would linger
+      // as phantoms. Nothing was booked on them; the new pattern's own dates
+      // come due again below.
+      const unbooked = await tx.creditExecution.findMany({
+        where: {
+          scheduledCreditId: s.id,
+          OR: [
+            { status: "SKIPPED", executedDate: start < today ? { gte: start } : { gt: today } },
+            ...(start < today ? [{ status: { in: ["PENDING", "FAILED"] as ("PENDING" | "FAILED")[] }, occurrenceDate: { gte: start } }] : []),
+          ],
+        },
+      });
+      const obsolete = unbooked.filter((x) => !x.occurrenceDate || !isNominalOf(newRule, x.occurrenceDate));
       if (obsolete.length) await tx.creditExecution.deleteMany({ where: { id: { in: obsolete.map((x) => x.id) } } });
+      // A one-time or ended schedule that's being given a new date runs again
+      // (one the user ended themselves stays ended).
+      if (!s.isActive && !s.cancelledAt && (changes.isActive ?? true)) data.isActive = true;
       track(
         "pattern",
         { frequency: s.frequency, next: isoDate(s.nextExecutionDate) },

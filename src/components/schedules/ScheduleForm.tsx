@@ -256,6 +256,15 @@ function ScheduleFormFields({
     editing &&
     (startDate !== initial!.startDate || frequency !== initial!.frequency || (frequency === "CUSTOM" && days !== initial!.customIntervalDays));
   const keepsSavedPattern = editing && !patternChanged;
+  // A new pattern may start in the past (its dates up to today come due), but
+  // not on or before something already booked: that history stays as it is.
+  const lastBooked = (saved?.executions ?? [])
+    .filter((x) => x.status === "CONFIRMED" || x.status === "REVERSED")
+    .map((x) => (x.occurrenceDate && x.occurrenceDate > x.executedDate ? x.occurrenceDate : x.executedDate))
+    .sort()
+    .pop();
+  const beforeBooked = patternChanged && !!startDate && !!lastBooked && startDate <= lastBooked;
+  const startsInPast = patternChanged && !!startDate && startDate < today && !beforeBooked;
 
   const rule = useMemo(
     () =>
@@ -271,10 +280,11 @@ function ScheduleFormFields({
     const out = new Map<string, { date: string | null; amount: number | null }>();
     if (!saved) return { baseline: out, droppedSaved: [] as SavedSchedule["overrides"] };
     const all = saved.overrides.map((o) => ({ ...o, occurrenceDate: asDate(o.occurrenceDate), date: o.date ? asDate(o.date) : null, src: o }));
-    const { kept, dropped } = patternChanged ? overridesKeptOnReanchor(rule, all, asDate(today)) : { kept: all, dropped: [] };
+    const from = patternChanged && startDate && startDate < today ? startDate : today;
+    const { kept, dropped } = patternChanged ? overridesKeptOnReanchor(rule, all, asDate(from)) : { kept: all, dropped: [] };
     for (const o of kept) out.set(o.src.occurrenceDate, { date: o.src.date, amount: o.src.amount });
     return { baseline: out, droppedSaved: dropped.map((o) => o.src) };
-  }, [saved, patternChanged, rule, today]);
+  }, [saved, patternChanged, rule, today, startDate]);
 
   // Stored occurrences ahead of the next date: skipped ahead of time. After a
   // pattern change only those the new pattern still has remain.
@@ -352,7 +362,7 @@ function ScheduleFormFields({
     !accountId && direction === "INCOME" && "Choose the account it's credited to.",
     direction === "PAYMENT" && (!categoryId || categoryId === "__new__") && "Choose a budget category.",
     !startDate && "Pick a date.",
-    patternChanged && startDate && startDate < today && "A new pattern has to start today or later. Past dates stay as they were.",
+    beforeBooked && `${direction === "INCOME" ? "Money was received" : "A payment was made"} on ${nice(lastBooked!)}. Pick a date after it; what's recorded stays as it is.`,
     endDate && startDate && endDate < startDate && "The end date is before the first date.",
     rowProblems.length > 0 && `Fix the date${rowProblems.length > 1 ? "s" : ""} marked under Upcoming dates.`,
   ].filter((p): p is string => !!p);
@@ -558,13 +568,17 @@ function ScheduleFormFields({
             type="date"
             required
             value={startDate}
-            aria-invalid={patternChanged && !!startDate && startDate < today}
+            aria-invalid={beforeBooked}
             aria-describedby="s-start-hint"
             onChange={(e) => { setStartTouched(true); setStartDate(e.target.value); }}
           />
-          <p id="s-start-hint" className={cn("text-[11px]", patternChanged && startDate && startDate < today ? "text-negative" : "text-muted-foreground")}>
-            {patternChanged && startDate && startDate < today
-              ? "Pick today or later for the new pattern."
+          <p id="s-start-hint" className={cn("text-[11px]", beforeBooked ? "text-negative" : "text-muted-foreground")}>
+            {beforeBooked
+              ? <>Pick a date after {nice(lastBooked!)}, when the last one was recorded.</>
+              : startsInPast
+                ? confirmEach
+                  ? "Dates from here up to today come due for you to confirm. Nothing is booked until you do."
+                  : "Dates from here up to today are booked when you save, as this schedule books automatically."
               : editing && frequency !== "ONE_TIME"
                 ? nextRow && nextRow.date !== nextRow.key && keepsSavedPattern
                   ? <>Expected on {nice(nextRow.date)}. Changing this date resets the pattern from it; to move one payment, change it below.</>
